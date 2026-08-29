@@ -1,0 +1,27 @@
+# Ficheiros de ambiente e segredos
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+
+# Build / dependencias
+node_modules/
+dist/
+target/
+build/
+*.class
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Fontes privadas (adicionar o woff2 real em public/fonts, nunca comitar)
+frontend/public/fonts/*.woff2
+frontend/public/fonts/*.woff
+frontend/public/fonts/*.ttf
