@@ -43,9 +43,9 @@ export function CampaignDetail() {
   }
 
   function loadLeads() {
-    api.get(`/api/leads?campaignId=${id}&size=100`)
+    api.get(`/api/campaigns/${id}/messaging-leads`)
       .then(d => {
-        setLeads(d.content || [])
+        setLeads(d || [])
       })
       .catch(() => {})
   }
@@ -89,13 +89,12 @@ export function CampaignDetail() {
     setSelectedLeads(next)
   }
 
-  function selectAllEligible() {
-    const eligibleIds = leads.filter(l => l.status === 'APPROVED').map(l => l.id)
-    if (selectedLeads.size === eligibleIds.length) {
-      setSelectedLeads(new Set())
-    } else {
-      setSelectedLeads(new Set(eligibleIds))
-    }
+  function toggleCheckbox(leadId, eligible) {
+    if (!eligible) return;
+    const next = new Set(selectedLeads)
+    if (next.has(leadId)) next.delete(leadId)
+    else next.add(leadId)
+    setSelectedLeads(next)
   }
 
   async function handlePreview() {
@@ -118,11 +117,29 @@ export function CampaignDetail() {
     }
   }
 
+  async function handleSendAllEligible() {
+    setPreviewLoading(true)
+    setShowPreview(true)
+    try {
+      const res = await api.post(`/api/campaigns/${id}/send-preview`, {
+        allEligible: true
+      })
+      setPreviewData(res)
+      setShowPreview(true)
+    } catch (err) {
+      push(err.message, 'error')
+      setShowPreview(false)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
   async function confirmSend() {
     setSending(true)
     try {
       await api.post(`/api/campaigns/${id}/send`, {
-        leadIds: Array.from(selectedLeads)
+        leadIds: Array.from(selectedLeads),
+        allEligible: false
       })
       push('Mensagens enviadas para a fila.', 'success')
       setShowPreview(false)
@@ -160,7 +177,7 @@ export function CampaignDetail() {
     ['Bloqueados', c.blockedCount]
   ]
 
-  const eligibleCount = leads.filter(l => l.status === 'APPROVED').length
+  const eligibleCount = leads.filter(l => l.eligible).length
 
   return (
     <div>
@@ -231,6 +248,9 @@ export function CampaignDetail() {
           <button className="btn btn-sm" onClick={selectAllEligible}>
             Selecionar Todos Elegiveis ({eligibleCount})
           </button>
+          <button className="btn btn-secondary btn-sm" onClick={handleSendAllEligible} disabled={eligibleCount === 0}>
+            Enviar para todos elegíveis ({eligibleCount})
+          </button>
           <button className="btn btn-primary btn-sm" onClick={handlePreview} disabled={selectedLeads.size === 0}>
             Preview & Enviar ({selectedLeads.size})
           </button>
@@ -243,31 +263,69 @@ export function CampaignDetail() {
             <thead>
               <tr>
                 <th style={{ width: 40 }}>Sel</th>
-                <th>Nome</th>
-                <th>Telefone</th>
-                <th>Status</th>
+                <th>Empresa</th>
+                <th>Contato</th>
+                <th>Instagram</th>
+                <th>Local</th>
+                <th>Site</th>
+                <th>Score</th>
+                <th>Sistema</th>
+                <th>Envio</th>
               </tr>
             </thead>
             <tbody>
-              {leads.map(l => (
-                <tr key={l.id} className={l.status === 'APPROVED' ? 'clickable' : ''} onClick={() => l.status === 'APPROVED' && toggleLead(l.id)}>
-                  <td>
-                    <input 
-                      type="checkbox" 
-                      checked={selectedLeads.has(l.id)} 
-                      onChange={() => toggleLead(l.id)} 
-                      disabled={l.status !== 'APPROVED'} 
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </td>
-                  <td>
-                    <strong>{l.name}</strong>
-                    <div className="muted" style={{ fontSize: 12 }}>{l.city} · {l.niche}</div>
-                  </td>
-                  <td>{l.whatsapp || '-'}</td>
-                  <td>{l.status}</td>
-                </tr>
-              ))}
+              {leads.map(l => {
+                const isEligible = l.eligible
+                return (
+                  <tr key={l.leadId} className={isEligible ? 'clickable' : ''} onClick={() => isEligible && toggleLead(l.leadId)}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedLeads.has(l.leadId)}
+                        onChange={() => toggleCheckbox(l.leadId, isEligible)}
+                        disabled={!isEligible}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </td>
+                    <td>
+                      <strong>{l.businessName}</strong>
+                    </td>
+                    <td>
+                      {l.phone !== undefined && l.phone !== null ? l.phone : '-'}
+
+                      {l.ineligibilityCode === 'NO_PHONE' && (
+                        <span className="muted" style={{ fontSize: 12, color: 'red' }}>Sem telefone</span>
+                      )}
+                    </td>
+                    <td>
+                      {l.instagramUsername != null ? '@' + l.instagramUsername : '-'}
+                    </td>
+                    <td>
+                      {l.city != null || l.state != null ? (
+                        <div>
+                          {l.city != null ? l.city : ''}{' '}
+                          {l.state != null ? l.state : ''}
+                        </div>
+                      ) : '-'}
+
+                      {l.ineligibilityCode === 'DO_NOT_CONTACT' && (
+                        <span className="muted" style={{ fontSize: 12, color: 'red' }}>Não prospectar</span>
+                      )}
+                    </td>
+                    <td>{l.opportunityScore != null ? String(l.opportunityScore) : '-'}</td>
+                    <td>{l.detectedSystem != null ? l.detectedSystem : 'Não identificado'}</td>
+                    <td>
+                      {l.sendStatus !== null && l.sendStatus !== undefined ? (
+                        <span className={"badge ".concat(getBadgeClass(l.sendStatus))}>
+                          {l.sendStatus}
+                        </span>
+                      ) : (
+                        <span className="badge badge-gray">Pronto</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -277,7 +335,7 @@ export function CampaignDetail() {
 
       {showPreview && (
         <Modal
-          title="Preview de Envio"
+          title="Revisar envio"
           onClose={() => setShowPreview(false)}
           footer={
             <>
@@ -292,13 +350,32 @@ export function CampaignDetail() {
             <div className="loading">Gerando preview...</div>
           ) : previewData ? (
             <div>
-              <p>O envio ocorrera para <strong>{previewData.targetCount}</strong> lead(s).</p>
-              <div style={{ marginTop: 16 }}>
-                <strong>Exemplo de mensagem para o primeiro lead:</strong>
-                <div className="card" style={{ marginTop: 8, whiteSpace: 'pre-wrap', backgroundColor: '#f9f9f9' }}>
-                  {previewData.previewMessage}
+              <p>{previewData.eligibleCount} mensagens serão adicionadas à fila.</p>
+              {previewData.ineligibleCount > 0 && (
+                <p>{previewData.ineligibleCount} lead será{'s' .previewData.ineligibleCount > 1 ? '' : ''} ignorado.</p>
+              )}
+              <div style={{ marginTop: 16, maxHeight: 300, overflowY: 'auto' }}>
+                <strong>Pré-visualização:</strong>
+                <div>
+                  {previewData.previews.map((p, idx) => (
+                    <div key={idx} style={{ marginBottom: 12, whiteSpace: 'pre-wrap' }}>
+                      <strong>{p.businessName}</strong>: {p.message}
+                    </div>
+                  ))}
                 </div>
               </div>
+              {previewData.ineligible.length > 0 && (
+                <div style={{ marginTop: 16, marginBottom: 12 }}>
+                  <strong>Ignorados:</strong>
+                  <div>
+                    {previewData.ineligible.map((i, idx) => (
+                      <div key={idx} style={{ marginBottom: 6, fontSize: 14 }}>
+                        {i.businessName} — {i.reason}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ) : null}
         </Modal>
@@ -310,4 +387,25 @@ export function CampaignDetail() {
       </div>
     </div>
   )
+}
+
+function getBadgeClass(status) {
+  switch (status) {
+    case 'QUEUED': return 'badge-blue';
+    case 'SENDING': return 'badge-orange';
+    case 'SENT': return 'badge-green';
+    case 'FAILED': return 'badge-red';
+    case 'SKIPPED': return 'badge-gray';
+    case 'DELIVERY_UNKNOWN': return 'badge-orange';
+    default: return 'badge-gray';
+  }
+}
+
+function selectAllEligible() {
+  const eligibleIds = leads.filter(l => l.eligible).map(l => l.leadId)
+  if (selectedLeads.size === eligibleIds.length) {
+    setSelectedLeads(new Set())
+  } else {
+    setSelectedLeads(new Set(eligibleIds))
+  }
 }

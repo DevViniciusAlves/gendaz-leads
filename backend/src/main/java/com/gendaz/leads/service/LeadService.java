@@ -195,7 +195,6 @@ public class LeadService {
         leadRepository.save(lead);
         leadEventRepository.save(LeadEvent.builder().leadId(id).campaignId(lead.getCurrentCampaignId())
                 .eventType("message_approved").build());
-        enqueueSend(lead);
         recountCampaign(lead.getCurrentCampaignId());
         return toResponse(lead);
     }
@@ -250,19 +249,6 @@ public class LeadService {
         }
         leadAnalysisService.analyzeAndGenerate(lead, lead.getCurrentCampaignId());
         return toResponse(lead);
-    }
-
-    private void enqueueSend(Lead lead) {
-        boolean already = messageSendRepository.findByLeadId(lead.getId()).stream()
-                .anyMatch(s -> "SENT".equals(s.getStatus()) || "SENDING".equals(s.getStatus()));
-        if (already) return;
-        MessageSend send = MessageSend.builder()
-                .leadId(lead.getId())
-                .campaignId(lead.getCurrentCampaignId())
-                .provider(providerName)
-                .status("QUEUED")
-                .build();
-        messageSendRepository.save(send);
     }
 
     private void recountCampaign(Long campaignId) {
