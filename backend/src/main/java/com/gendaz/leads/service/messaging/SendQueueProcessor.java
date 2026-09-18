@@ -2,15 +2,9 @@ package com.gendaz.leads.service.messaging;
 
 import com.gendaz.leads.entity.Lead;
 import com.gendaz.leads.entity.MessageSend;
-import com.gendaz.leads.entity.MessageTemplate;
-import com.gendaz.leads.repository.MessageTemplateRepository;
 import com.gendaz.leads.repository.MessageSendRepository;
 import com.gendaz.leads.repository.LeadRepository;
-import com.gendaz.leads.service.LeadService;
-import com.gendaz.leads.service.DeduplicationService;
-import com.gendaz.leads.service.TemplateRenderer;
 import com.gendaz.leads.util.Normalizer;
-import com.gendaz.leads.exception.ApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.*;
@@ -20,7 +14,7 @@ import org.springframework.transaction.annotation.*;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
-import java.util.stream.Collectors;
+import jakarta.persistence.EntityManager;
 
 @Component
 public class SendQueueProcessor {
@@ -31,52 +25,61 @@ public class SendQueueProcessor {
     @Value("${app.messaging.max-concurrent-sends:1}")
     private int maxConcurrentSends;
 
-    @Value("${app.messaging.provider:log}")
-    private String providerName;
-
     private final MessageSendRepository messageSendRepository;
     private final LeadRepository leadRepository;
-    private final MessageTemplateRepository templateRepository;
-    private final TemplateRenderer templateRenderer;
-    private final Map<String, MessagingProvider> messagingProviders;
-    private final LeadService leadService;
-    private final DeduplicationService deduplicationService;
+    private final MessagingProviderRouter providerRouter;
     private final Normalizer normalizer;
+    private final EntityManager entityManager;
 
     public SendQueueProcessor(MessageSendRepository messageSendRepository, LeadRepository leadRepository,
-                              MessageTemplateRepository templateRepository, TemplateRenderer templateRenderer,
-                              List<MessagingProvider> messagingProviders,
-                              LeadService leadService, DeduplicationService deduplicationService,
-                              Normalizer normalizer) {
+                              MessagingProviderRouter providerRouter,
+                              Normalizer normalizer, EntityManager entityManager) {
         this.messageSendRepository = messageSendRepository;
         this.leadRepository = leadRepository;
-        this.templateRepository = templateRepository;
-        this.templateRenderer = templateRenderer;
-        this.messagingProviders = messagingProviders.stream()
-                .collect(Collectors.toMap(MessagingProvider::getName, p -> p));
-        this.leadService = leadService;
-        this.deduplicationService = deduplicationService;
+        this.providerRouter = providerRouter;
         this.normalizer = normalizer;
+        this.entityManager = entityManager;
     }
 
-    @Scheduled(fixedDelayString = "${app.messaging.send-interval-seconds:30}000")
+    @Scheduled(fixedDelayString = "${app.messaging.send-interval-seconds:60}000")
     @Transactional
     public void processQueue() {
-        List<MessageSend> due = messageSendRepository.findDue(Instant.now());
         int processed = 0;
-        for (MessageSend send : due) {
-            if (processed >= maxConcurrentSends) break;
+        while (processed < maxConcurrentSends) {
+            MessageSend send = fetchAndLockNextTask();
+            if (send == null) break;
             try {
                 processOne(send);
-                processed++;
-            } catch (RuntimeException e) {
+            } catch (Exception e) {
                 log.warn("Erro ao processar envio {}: {}", send.getId(), e.getMessage());
+            } finally {
+                processed++;
             }
         }
     }
 
+    private MessageSend fetchAndLockNextTask() {
+        List<MessageSend> results = entityManager.createQuery(
+            "SELECT ms FROM MessageSend ms WHERE ms.status = 'QUEUED' " +
+            "AND (ms.nextAttemptAt IS NULL OR ms.nextAttemptAt <= :now) " +
+            "ORDER BY ms.nextAttemptAt ASC NULLS FIRST", MessageSend.class)
+            .setParameter("now", Instant.now())
+            .setMaxResults(1)
+            .setLockMode(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+            .setHint("jakarta.persistence.lock.timeout", -2) // SKIP LOCKED
+            .getResultList();
+
+        if (results.isEmpty()) return null;
+        
+        MessageSend send = results.get(0);
+        send.setStatus("SENDING");
+        return messageSendRepository.saveAndFlush(send);
+    }
+
     private void processOne(MessageSend send) {
-        // Verificar doNotContact imediatamente antes do envio
+        send.setAttempts(send.getAttempts() + 1);
+        send.setLastAttemptAt(Instant.now());
+
         Lead lead = leadRepository.findById(send.getLeadId()).orElse(null);
         if (lead == null) {
             send.setStatus("FAILED");
@@ -92,65 +95,69 @@ public class SendQueueProcessor {
             return;
         }
 
-        // Verificar telefone válido
-        String normalizedPhone = normalizer.normalizePhone(lead.getPhone());
-        if (normalizedPhone == null || normalizedPhone.isBlank()) {
+        if (send.getMessageTextSnapshot() == null || send.getMessageTextSnapshot().isBlank()) {
             send.setStatus("FAILED");
-            send.setResult("Telefone invalido ou ausente.");
+            send.setResult("Template ou mensagem não renderizada no snapshot.");
             messageSendRepository.save(send);
             return;
         }
 
-        // Renderizar snapshot da mensagem se ainda não renderizada
-        if (send.getMessageTextSnapshot() == null && send.getTemplateId() != null) {
-            Optional<MessageTemplate> templateOpt = templateRepository.findById(send.getTemplateId());
-            if (templateOpt.isPresent()) {
-                String rendered = templateRenderer.render(
-                        templateOpt.get().getTemplateText(), lead, null);
-                send.setMessageTextSnapshot(rendered);
-            }
+        if (send.getRecipientSnapshot() == null || send.getRecipientSnapshot().isBlank()) {
+            send.setStatus("FAILED");
+            send.setResult("Destinatário ausente no snapshot.");
+            messageSendRepository.save(send);
+            return;
         }
 
-        // Selecionar provider pelo nome
-        MessagingProvider provider = messagingProviders.get(providerName);
+        MessagingProvider provider = providerRouter.getProvider(send.getProvider());
         if (provider == null) {
-            // Provider log - apenas registra
-            send.setStatus("SENT");
-            send.setResult("Registrado em log (provider=log).");
+            send.setStatus("FAILED");
+            send.setResult("PROVIDER_NOT_FOUND");
             messageSendRepository.save(send);
             return;
         }
-
-        // Usar mensagem snapshot se renderizada, senão usar string vazia
-        String text = send.getMessageTextSnapshot() != null ? send.getMessageTextSnapshot() : "";
 
         try {
-            // O provider send ja trata o caso de telefone/lead
-            var result = provider.send(lead, text);
+            MessagingCommand command = new MessagingCommand(
+                send.getId(),
+                lead.getId(),
+                send.getRecipientSnapshot(),
+                send.getMessageTextSnapshot(),
+                send.getRequestId()
+            );
+
+            MessagingSendResult result = provider.send(command);
 
             if (result.success()) {
                 send.setStatus("SENT");
+                send.setSentAt(Instant.now());
                 send.setResult(result.detail());
+                send.setProviderMessageId(result.providerMessageId());
                 lead.setStatus("SENT");
                 leadRepository.save(lead);
             } else {
-                if (send.getAttempts() >= MAX_ATTEMPTS) {
-                    send.setStatus("FAILED");
-                } else {
-                    send.setStatus("QUEUED");
-                    send.setNextAttemptAt(Instant.now().plus(2L * send.getAttempts(), ChronoUnit.MINUTES));
-                }
-                send.setResult(result.detail());
+                handleFailure(send, result);
             }
         } catch (Exception e) {
-            if (send.getAttempts() >= MAX_ATTEMPTS) {
-                send.setStatus("FAILED");
-            } else {
-                send.setStatus("QUEUED");
-                send.setNextAttemptAt(Instant.now().plus(2L * send.getAttempts(), ChronoUnit.MINUTES));
-            }
-            send.setResult("Erro: " + e.getMessage());
+            handleFailure(send, new MessagingSendResult(false, FailureCategory.AMBIGUOUS, null, "UNEXPECTED_ERROR", e.getMessage()));
         }
         messageSendRepository.save(send);
+    }
+
+    private void handleFailure(MessageSend send, MessagingSendResult result) {
+        send.setResult(result.detail());
+        send.setErrorCode(result.errorCode());
+
+        if (result.failureCategory() == FailureCategory.TERMINAL) {
+            send.setStatus("FAILED");
+            return;
+        }
+
+        if (send.getAttempts() >= MAX_ATTEMPTS) {
+            send.setStatus(result.failureCategory() == FailureCategory.AMBIGUOUS ? "DELIVERY_UNKNOWN" : "FAILED");
+        } else {
+            send.setStatus("QUEUED");
+            send.setNextAttemptAt(Instant.now().plus(2L * send.getAttempts(), ChronoUnit.MINUTES));
+        }
     }
 }

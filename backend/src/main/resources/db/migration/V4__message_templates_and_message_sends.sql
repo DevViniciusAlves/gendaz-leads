@@ -8,7 +8,7 @@ CREATE TABLE message_templates (
     template_text TEXT NOT NULL,
     is_default BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Garante apenas um template default por vez (index parcial)
@@ -42,24 +42,20 @@ ALTER TABLE message_sends ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
 ALTER TABLE message_sends ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
 
 -- Atualizar constraint de status para incluir DELIVERY_UNKNOWN
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'chk_send_status'
-    ) THEN
-        -- Constraint ja existe, altera para incluir DELIVERY_UNKNOWN
-        EXECUTE 'ALTER TABLE message_sends DROP CONSTRAINT chk_send_status';
-    END IF;
-    EXECUTE 'ALTER TABLE message_sends ADD CONSTRAINT chk_send_status CHECK (status IN (
-        ''QUEUED'',''SENDING'',''SENT'',''FAILED'',''SKIPPED'',''DELIVERY_UNKNOWN''
-    ))';
-    RAISE NOTICE 'Constraint de status atualizada para incluir DELIVERY_UNKNOWN';
-END$$;
+ALTER TABLE message_sends DROP CONSTRAINT IF EXISTS chk_send_status;
+ALTER TABLE message_sends ADD CONSTRAINT chk_send_status CHECK (status IN (
+    'QUEUED','SENDING','SENT','FAILED','SKIPPED','DELIVERY_UNKNOWN'
+));
 
 -- Criar index unico em request_id para idempotencia (aparencia condicional)
 CREATE UNIQUE INDEX IF NOT EXISTS uq_message_sends_request_id
 ON message_sends (request_id)
 WHERE request_id IS NOT NULL;
+
+-- Criar index unico(campaign_id, lead_id) quando status IN (QUEUED, SENDING, SENT, DELIVERY_UNKNOWN)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_message_sends_campaign_lead
+ON message_sends (campaign_id, lead_id)
+WHERE status IN ('QUEUED', 'SENDING', 'SENT', 'DELIVERY_UNKNOWN');
 
 COMMENT ON TABLE message_templates IS 'Templates de mensagem para abordagem via WhatsApp';
 COMMENT ON INDEX uq_message_template_default IS 'Index parcial: apenas um template pode ser default ao mesmo tempo';

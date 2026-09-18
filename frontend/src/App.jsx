@@ -12,6 +12,7 @@ import { CampaignDetail } from './pages/CampaignDetail.jsx'
 import { Leads } from './pages/Leads.jsx'
 import { LeadDetail } from './pages/LeadDetail.jsx'
 import { WhatsApp } from './pages/WhatsApp.jsx'
+import { Templates } from './pages/Templates.jsx'
 
 function Verifier({ children }) {
   const [checked, setChecked] = useState(false)
@@ -101,6 +102,16 @@ export default function App() {
                 <ProtectedRoute>
                   <AppShell>
                     <WhatsApp />
+                  </AppShell>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/templates"
+              element={
+                <ProtectedRoute>
+                  <AppShell>
+                    <Templates />
                   </AppShell>
                 </ProtectedRoute>
               }

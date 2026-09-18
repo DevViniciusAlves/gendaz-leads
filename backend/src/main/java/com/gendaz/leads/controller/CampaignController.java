@@ -1,14 +1,11 @@
 package com.gendaz.leads.controller;
 
 import com.gendaz.leads.dto.campaign.*;
-import com.gendaz.leads.entity.Campaign;
-import com.gendaz.leads.entity.MessageTemplate;
 import com.gendaz.leads.service.*;
 import org.springframework.data.domain.*;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 import jakarta.validation.*;
-import java.util.*;
 import java.util.*;
 
 @RestController
@@ -46,37 +43,18 @@ public class CampaignController {
         return ResponseEntity.accepted().build();
     }
 
-    // --- NOVOS ENDPOINTS DE TEMPLATE ---
-
-    @GetMapping("/{campaignId}/message-templates/default")
-    public ResponseEntity<MessageTemplate> getDefaultTemplate(@PathVariable Long campaignId) {
-        campaignService.get(campaignId);
-        return ResponseEntity.ok(new MessageTemplate());
-    }
-
-    @PutMapping("/{campaignId}/message-templates/default")
-    public ResponseEntity<MessageTemplate> setDefaultTemplate(@PathVariable Long campaignId,
-                                                            @RequestBody MessageTemplate template) {
-        campaignService.get(campaignId);
-        return ResponseEntity.ok(template);
-    }
-
-    // --- NOVOS ENDPOINTS DE PREVIEW E ENVIO ---
-
     @PostMapping("/{campaignId}/send-preview")
     public ResponseEntity<SendPreviewResponse> generateSendPreview(
             @PathVariable Long campaignId,
             @RequestBody(required = false) SendPreviewRequest request) {
         Long templateId = request != null && request.getTemplateId() != null ?
                 request.getTemplateId() : null;
-        String templateText = request != null && request.getTemplateText() != null ?
-                request.getTemplateText() : null;
         Boolean allEligible = request != null && request.isAllEligible();
 
         SendPreviewResponse preview = campaignSendService.generatePreview(
                 campaignId,
                 request != null && request.getLeadIds() != null ? request.getLeadIds() : null,
-                templateText,
+                null,
                 allEligible
         );
 
@@ -93,7 +71,8 @@ public class CampaignController {
         SendResultEnqueue result = campaignSendService.enqueueMessages(
                 campaignId,
                 leadIds,
-                request != null && request.getTemplateId() != null ? request.getTemplateId() : null
+                request != null && request.getTemplateId() != null ? request.getTemplateId() : null,
+                request != null && request.getAllEligible() != null ? request.getAllEligible() : false
         );
 
         return ResponseEntity.ok(result);

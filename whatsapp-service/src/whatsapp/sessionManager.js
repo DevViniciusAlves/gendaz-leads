@@ -83,6 +83,18 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     return Math.min(exp, cfg.reconnectMaxDelayMs);
   }
 
+  function scheduleReconnect() {
+    if (state.reconnectTimer) return;
+    state.reconnectAttempts += 1;
+    const delay = backoffDelay(state.reconnectAttempts);
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = null;
+      connectInternal({ reason: 'reconnect' }).catch((e) => {
+        log.warn && log.warn('Reconexao falhou:', e.message);
+      });
+    }, delay);
+  }
+
   // Write queue control para creds.update - serializa e persiste sequencialmente
   async function enqueueCredsWrite(fn) {
     return new Promise((resolve) => {
@@ -121,7 +133,9 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     sock.ev.on('creds.update', async () => {
       try {
         if (sock.authState && typeof sock.authState.saveCreds === 'function') {
-          await enqueueCredsWrite(() => sock.authState.saveCreds().catch(() => {}));
+          await enqueueCredsWrite(() => sock.authState.saveCreds().catch((err) => {
+            log.warn && log.warn('Erro ao salvar credenciais:', err.message);
+          }));
         }
       } catch (e) {
         log.warn && log.warn('Erro no creds.update handler:', e.message);

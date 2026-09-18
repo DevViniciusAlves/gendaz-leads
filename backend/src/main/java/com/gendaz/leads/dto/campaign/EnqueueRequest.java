@@ -11,4 +11,5 @@ import java.util.*;
 public class EnqueueRequest {
     private List<Long> leadIds;
     private Long templateId;
+    private Boolean allEligible;
 }

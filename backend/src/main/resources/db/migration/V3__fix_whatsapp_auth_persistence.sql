@@ -7,11 +7,12 @@ DO $$
 DECLARE
   fk_name TEXT;
 BEGIN
-  -- Localiza e remove a FK se existir (nome pode variar por versao do PG)
+  -- Localiza e remove a FK se existir
   SELECT conname INTO fk_name
   FROM pg_constraint
-  WHERE conname LIKE 'whatsapp_auth_keys_session_id_fk%'
-    OR conname LIKE 'fk_%whatsapp_auth_keys%';
+  WHERE conrelid = 'whatsapp_auth_keys'::regclass
+    AND confrelid = 'whatsapp_auth_sessions'::regclass
+    AND contype = 'f';
 
   IF fk_name IS NOT NULL THEN
     EXECUTE format('ALTER TABLE whatsapp_auth_keys DROP CONSTRAINT %I;', fk_name);
@@ -21,11 +22,7 @@ BEGIN
   END IF;
 END$$;
 
--- Garante que indexes existem isoladamente (nao dependem de FK)
-CREATE INDEX IF NOT EXISTS idx_whatsapp_auth_keys_session ON whatsapp_auth_keys(session_id);
-COMMENT ON INDEX idx_whatsapp_auth_keys_session IS 'Indexador isolado; FK removida com seguranca V3';
-
--- Garante que tabelas existem e isoladas (idempotente)
+-- Garante que tabelas existem isoladamente (idempotente)
 CREATE TABLE IF NOT EXISTS whatsapp_auth_sessions (
     session_id VARCHAR(64) PRIMARY KEY,
     payload TEXT NOT NULL,
@@ -44,8 +41,3 @@ CREATE TABLE IF NOT EXISTS whatsapp_auth_keys (
 );
 
 COMMENT ON TABLE whatsapp_auth_keys IS 'Signal Keys e outros tipos do Baileys; persistente isoladamente desde V3.';
-
--- View resumida para debug (nao expor creds em claro)
-CREATE OR REPLACE VIEW whatsapp_auth_sessions_summary AS
-SELECT session_id, registered, created_at, updated_at
-FROM whatsapp_auth_sessions;

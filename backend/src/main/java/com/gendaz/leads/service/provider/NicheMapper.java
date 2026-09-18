@@ -24,19 +24,19 @@ public final class NicheMapper {
         // beleza / estetica
         put(List.of("estetica", "esthetica", "clinica de estetica", "centro de estetica",
                 "beleza", "estudio de beleza", "aesthetic", "aesthetics"),
-                List.of("shop=beauty", "beauty=aesthetic", "beauty=skin_care"));
+                List.of("shop=beauty", "shop=beauty,beauty=aesthetic", "shop=beauty,beauty=skin_care"));
         // cilios
         put(List.of("cilios", "cilio", "extensao de cilios", "alongamento de cilios",
                 "lash", "lashes", "lash designer", "lash design", "cilista"),
-                List.of("shop=beauty", "beauty=eyelash"));
+                List.of("shop=beauty,beauty=eyelash", "shop=beauty,beauty=nails,beauty=eyelash"));
         // sobrancelhas
         put(List.of("sobrancelha", "sobrancelhas", "designer de sobrancelha",
                 "design de sobrancelha", "brow", "brows", "eyebrow", "eyebrows"),
-                List.of("shop=beauty", "beauty=eyebrow"));
+                List.of("shop=beauty,beauty=eyebrow"));
         // unhas
         put(List.of("unha", "unhas", "manicure", "pedicure", "nail", "nails",
                 "nail designer", "esmalteria", "alongamento de unhas"),
-                List.of("shop=beauty", "beauty=nails"));
+                List.of("shop=beauty,beauty=nails"));
         // salao / cabelo
         put(List.of("salao", "salao de beleza", "salao de cabelereiro", "beleza salao",
                 "cabeleireiro", "cabeleireira", "cabelo", "cabelos", "cabelereiro",
@@ -44,7 +44,7 @@ public final class NicheMapper {
                 List.of("shop=hairdresser", "shop=beauty"));
         // barbearia - usa estrategia composta: shop=barber E/OU hairdresser=barber
         put(List.of("barbearia", "barbearias", "barber", "barbershop", "barba"),
-                List.of("shop=barber", "hairdresser=barber"));
+                List.of("shop=barber", "shop=hairdresser,hairdresser=barber"));
         // dentista / odonto
         put(List.of("dentista", "dentistas", "odontologia", "clinica odontologica",
                 "consultorio odontologico", "dentist", "dental"),
@@ -56,11 +56,11 @@ public final class NicheMapper {
         // massagem / spa
         put(List.of("massagem", "massoterapia", "massagista", "spa", "terapia",
                 "massage", "fisioterapia", "pilates"),
-                List.of("shop=beauty", "beauty=massage", "leisure=spa", "shop=massage"));
+                List.of("shop=beauty,beauty=massage", "leisure=spa", "shop=massage"));
         // depilacao
         put(List.of("depilacao", "depiladora", "epilacao", "hair removal",
                 "laser", "depilacao a laser"),
-                List.of("shop=beauty", "beauty=hair_removal"));
+                List.of("shop=beauty,beauty=hair_removal"));
         // genericos de beleza (fallback para qualquer outro termo de beleza)
         put(List.of("estudio", "beauty", "skincare", "skin care", "maquiagem", "makeup"),
                 List.of("shop=beauty"));

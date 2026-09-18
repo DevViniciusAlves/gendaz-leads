@@ -12,7 +12,7 @@ import com.gendaz.leads.repository.CampaignRepository;
 import com.gendaz.leads.repository.LeadEventRepository;
 import com.gendaz.leads.repository.LeadRepository;
 import com.gendaz.leads.repository.LeadSourceRepository;
-import com.gendaz.leads.service.provider.LeadDiscoveryProvider;
+import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.util.Normalizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,13 +43,13 @@ public class AsyncCampaignProcessor {
     private final LeadAnalysisService leadAnalysisService;
     private final DeduplicationService deduplicationService;
     private final Normalizer normalizer;
-    private final List<LeadDiscoveryProvider> providers;
+    private final OpenStreetMapProvider openStreetMapProvider;
 
     public AsyncCampaignProcessor(CampaignRepository campaignRepository, LeadRepository leadRepository,
                                   CampaignLeadRepository campaignLeadRepository, LeadSourceRepository leadSourceRepository,
                                   LeadEventRepository leadEventRepository, LeadAnalysisService leadAnalysisService,
                                   DeduplicationService deduplicationService, Normalizer normalizer,
-                                  List<LeadDiscoveryProvider> providers) {
+                                  OpenStreetMapProvider openStreetMapProvider) {
         this.campaignRepository = campaignRepository;
         this.leadRepository = leadRepository;
         this.campaignLeadRepository = campaignLeadRepository;
@@ -58,7 +58,7 @@ public class AsyncCampaignProcessor {
         this.leadAnalysisService = leadAnalysisService;
         this.deduplicationService = deduplicationService;
         this.normalizer = normalizer;
-        this.providers = providers;
+        this.openStreetMapProvider = openStreetMapProvider;
     }
 
     @Async
@@ -115,22 +115,15 @@ public class AsyncCampaignProcessor {
         totalBudget = Math.max(totalBudget, campaign.getRequestedQuantity() + 10);
         totalBudget = Math.min(totalBudget, 200);
 
-        List<LeadDiscoveryProvider> active = providers.stream()
-                .filter(LeadDiscoveryProvider::isEnabled)
-                .toList();
-        if (active.isEmpty()) {
-            log.warn("Nenhum provider de descoberta habilitado para campanha {}", campaign.getId());
-        }
-        int perProvider = active.isEmpty() ? 0
-                : Math.max((int) Math.ceil((double) totalBudget / active.size()), campaign.getRequestedQuantity());
-
         List<LeadCandidate> candidates = new ArrayList<>();
-        for (LeadDiscoveryProvider provider : active) {
-            try {
-                candidates.addAll(provider.discover(campaign.getNiche(), campaign.getLocation(), perProvider));
-            } catch (RuntimeException e) {
-                log.warn("Provider {} falhou: {}", provider.getName(), e.getMessage());
+        try {
+            if (openStreetMapProvider.isEnabled()) {
+                candidates.addAll(openStreetMapProvider.discover(campaign.getNiche(), campaign.getLocation(), totalBudget));
+            } else {
+                log.warn("OpenStreetMapProvider não está habilitado para campanha {}", campaign.getId());
             }
+        } catch (RuntimeException e) {
+            log.warn("Provider {} falhou: {}", openStreetMapProvider.getName(), e.getMessage());
         }
 
         Set<String> batchSeen = new LinkedHashSet<>();

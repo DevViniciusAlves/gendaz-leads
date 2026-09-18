@@ -73,14 +73,11 @@ app:
     max-leads: ${MAX_LEADS_PER_REQUEST:30}
     discovery-multiplier: ${DISCOVERY_MULTIPLIER:3}
   discovery:
-    google:
-      api-key: ${GOOGLE_MAPS_API_KEY:}
-      enabled: ${GOOGLE_ENABLED:true}
-      timeout-ms: ${GOOGLE_TIMEOUT_MS:8000}
     osm:
       enabled: ${OSM_ENABLED:true}
-      timeout-ms: ${OSM_TIMEOUT_MS:10000}
+      timeout-ms: ${OSM_TIMEOUT_MS:30000}
       overpass-url: ${OSM_OVERPASS_URL:https://overpass-api.de/api/interpreter}
+      fallback-url: ${OSM_OVERPASS_FALLBACK_URL:}
   groq:
     api-key: ${GROQ_API_KEY:}
     model: ${GROQ_MODEL:llama-3.3-70b-versatile}
@@ -88,8 +85,8 @@ app:
     timeout-ms: ${GROQ_TIMEOUT_MS:30000}
     max-retries: ${GROQ_MAX_RETRIES:2}
   messaging:
-    provider: ${MESSAGING_PROVIDER:log}
-    send-interval-seconds: ${SEND_INTERVAL_SECONDS:30}
+    provider: ${MESSAGING_PROVIDER:whatsapp}
+    send-interval-seconds: ${SEND_INTERVAL_SECONDS:60}
     max-concurrent-sends: ${MAX_CONCURRENT_SENDS:1}
   whatsapp:
     service-url: ${WHATSAPP_SERVICE_URL:}

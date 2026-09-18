@@ -5,6 +5,7 @@ import com.gendaz.leads.repository.MessageTemplateRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 
 @Service
@@ -31,11 +32,14 @@ public class TemplateService {
         return templateRepository.findFirstByIsDefaultTrue();
     }
 
+    @Transactional(readOnly = true)
+    public List<MessageTemplate> findAll() {
+        return templateRepository.findAll();
+    }
+
     @Transactional
     public void setDefault(Long id) {
-        // Desmarcar todos os demais como não-padrão
         templateRepository.updateDefaultFalse();
-        // Marcar este como padrão
         templateRepository.updateDefaultTrue(id);
     }
 

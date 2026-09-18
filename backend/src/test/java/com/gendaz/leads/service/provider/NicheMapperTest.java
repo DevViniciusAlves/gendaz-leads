@@ -13,21 +13,21 @@ class NicheMapperTest {
         var c = NicheMapper.resolve("lash designer");
         assertEquals(a.tagFilters(), b.tagFilters());
         assertEquals(a.tagFilters(), c.tagFilters());
-        assertTrue(a.tagFilters().contains("beauty=eyelash"));
+        assertTrue(a.tagFilters().stream().anyMatch(t -> t.contains("beauty=eyelash")));
     }
 
     @Test
     void unhaSobracelhaEsteticaAliases() {
-        assertTrue(NicheMapper.resolve("unhas").tagFilters().contains("beauty=nails"));
-        assertTrue(NicheMapper.resolve("manicure").tagFilters().contains("beauty=nails"));
-        assertTrue(NicheMapper.resolve("sobrancelhas").tagFilters().contains("beauty=eyebrow"));
-        assertTrue(NicheMapper.resolve("designer de sobrancelha").tagFilters().contains("beauty=eyebrow"));
-        assertTrue(NicheMapper.resolve("clínica de estética").tagFilters().contains("shop=beauty"));
-        assertTrue(NicheMapper.resolve("barbearia").tagFilters().contains("shop=barber"));
-        assertTrue(NicheMapper.resolve("salão de beleza").tagFilters().contains("shop=hairdresser"));
-        assertTrue(NicheMapper.resolve("dentista").tagFilters().contains("amenity=dentist"));
-        assertTrue(NicheMapper.resolve("depilação").tagFilters().contains("beauty=hair_removal"));
-        assertTrue(NicheMapper.resolve("massagem").tagFilters().contains("beauty=massage"));
+        assertTrue(NicheMapper.resolve("unhas").tagFilters().stream().anyMatch(t -> t.contains("beauty=nails")));
+        assertTrue(NicheMapper.resolve("manicure").tagFilters().stream().anyMatch(t -> t.contains("beauty=nails")));
+        assertTrue(NicheMapper.resolve("sobrancelhas").tagFilters().stream().anyMatch(t -> t.contains("beauty=eyebrow")));
+        assertTrue(NicheMapper.resolve("designer de sobrancelha").tagFilters().stream().anyMatch(t -> t.contains("beauty=eyebrow")));
+        assertTrue(NicheMapper.resolve("clínica de estética").tagFilters().stream().anyMatch(t -> t.contains("shop=beauty")));
+        assertTrue(NicheMapper.resolve("barbearia").tagFilters().stream().anyMatch(t -> t.contains("shop=barber")));
+        assertTrue(NicheMapper.resolve("salão de beleza").tagFilters().stream().anyMatch(t -> t.contains("shop=hairdresser")));
+        assertTrue(NicheMapper.resolve("dentista").tagFilters().stream().anyMatch(t -> t.contains("amenity=dentist")));
+        assertTrue(NicheMapper.resolve("depilação").tagFilters().stream().anyMatch(t -> t.contains("beauty=hair_removal")));
+        assertTrue(NicheMapper.resolve("massagem").tagFilters().stream().anyMatch(t -> t.contains("beauty=massage")));
     }
 
     @Test
@@ -41,7 +41,7 @@ class NicheMapperTest {
     void regexIsSanitizedAgainstInjection() {
         var s = NicheMapper.resolve("cilios\");out body;/*");
         String q = s.fallbackNameRegex();
-        // Pattern.quote envolve com \Q...\E, sem quebrar a query
-        assertTrue(q.startsWith("\\Q"));
+        assertFalse(q.contains(";"));
+        assertFalse(q.contains("\""));
     }
 }

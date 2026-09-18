@@ -13,6 +13,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 import java.util.*;
 
@@ -21,7 +22,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenStreetMapProvider.class);
 
-    /** Meio-tamanho da bbox (graus) ao redor do ponto geocodificado. ~0.18 ~= 20 km. */
     private static final double BBOX_DELTA = 0.18;
     private static final int MIN_OUT = 80;
     private static final int MAX_OUT = 200;
@@ -29,11 +29,14 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.enabled:true}")
     private boolean enabled;
 
-    @Value("${app.discovery.osm.timeout-ms:10000}")
+    @Value("${app.discovery.osm.timeout-ms:30000}")
     private int timeoutMs;
 
     @Value("${app.discovery.osm.overpass-url:https://overpass-api.de/api/interpreter}")
     private String overpassUrl;
+
+    @Value("${app.discovery.osm.fallback-url:}")
+    private String fallbackUrl;
 
     private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
@@ -49,18 +52,14 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     }
 
     private RestClient client() {
-        int effective = timeoutMs > 0 ? timeoutMs : 10000;
+        int effective = timeoutMs > 0 ? timeoutMs : 30000;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(Math.min(effective, 15000));
+        factory.setConnectTimeout(15000);
         factory.setReadTimeout(effective);
         return builder
                 .requestFactory(factory)
                 .defaultHeader("User-Agent", "GendazLeads/1.0 (contato@gendaz.com)")
                 .build();
-    }
-
-    private RestClient restClient() {
-        return client();
     }
 
     @Override
@@ -75,103 +74,152 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     @Override
     public List<LeadCandidate> discover(String niche, String location, int limit) {
-        if (!isEnabled()) {
-            log.info("OpenStreetMap desabilitado");
+        if (!isEnabled()) return List.of();
+        log.info("[osm] discovery_started niche={} location={} requested={}", niche, location, limit);
+        
+        Geo geo = geocode(location);
+        if (geo == null) {
+            log.warn("Nao foi possivel geocodificar: {}", location);
             return List.of();
         }
-        try {
-            Geo geo = geocode(location);
-            if (geo == null) {
-                log.warn("Nao foi possivel geocodificar a localizacao: {}", location);
-                return List.of();
-            }
-            String query = buildOverpassQuery(niche, geo, limit);
-            String response = restClient().post()
-                    .uri(overpassUrl)
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body("data=" + java.net.URLEncoder.encode(query, java.nio.charset.StandardCharsets.UTF_8))
-                    .retrieve()
-                    .body(String.class);
+        log.info("[osm] geocode_success=true bbox_source={}", geo.bboxValid ? "nominatim" : "fallback");
 
-            JsonNode root = objectMapper.readTree(response);
-            JsonNode elements = root.path("elements");
-            if (elements.isMissingNode() || !elements.isArray()) return List.of();
-
-            // Deduplicacao dentro do lote por chave explicita (source + sourceId),
-            // sem depender de equals/hashCode de LeadCandidate.
-            Map<String, LeadCandidate> byKey = new LinkedHashMap<>();
-            for (JsonNode el : elements) {
-                if (byKey.size() >= Math.max(limit, 1)) break;
-                LeadCandidate candidate = mapElement(el, geo);
-                if (candidate == null) continue;
-                String key = "openstreetmap:" + String.valueOf(candidate.getSourceId()).toLowerCase(Locale.ROOT);
-                byKey.putIfAbsent(key, candidate);
-            }
-            return new ArrayList<>(byKey.values());
-        } catch (ApiException e) {
-            throw e;
-        } catch (RuntimeException | java.io.IOException e) {
-            log.warn("Falha ao consultar OpenStreetMap: {}", e.getMessage());
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_ERROR",
-                    "Falha ao obter leads do OpenStreetMap.");
+        String query = buildOverpassQuery(niche, geo, limit);
+        
+        List<String> endpoints = new ArrayList<>();
+        endpoints.add(overpassUrl);
+        if (fallbackUrl != null && !fallbackUrl.isBlank()) {
+            endpoints.add(fallbackUrl);
         }
+
+        for (int i = 0; i < endpoints.size(); i++) {
+            String url = endpoints.get(i);
+            boolean isFallback = (i > 0);
+            
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    log.info("[osm] overpass_attempt={} endpoint={}", attempt, url);
+                    String response = client().post()
+                            .uri(url)
+                            .header("Content-Type", "application/x-www-form-urlencoded")
+                            .body("data=" + java.net.URLEncoder.encode(query, java.nio.charset.StandardCharsets.UTF_8))
+                            .retrieve()
+                            .body(String.class);
+
+                    JsonNode root = objectMapper.readTree(response);
+                    JsonNode elements = root.path("elements");
+                    if (elements.isMissingNode() || !elements.isArray()) {
+                        log.info("[osm] discovery_finished returned=0");
+                        return List.of(); // Zero results is valid
+                    }
+
+                    log.info("[osm] elements_received={}", elements.size());
+                    Map<String, LeadCandidate> byKey = new LinkedHashMap<>();
+                    for (JsonNode el : elements) {
+                        if (byKey.size() >= limit) break;
+                        LeadCandidate candidate = mapElement(el, geo);
+                        if (candidate != null) {
+                            String key = "osm:" + candidate.getSourceId();
+                            byKey.putIfAbsent(key, candidate);
+                        }
+                    }
+                    log.info("[osm] candidates_after_dedupe={} discovery_finished returned={}", byKey.size(), byKey.size());
+                    return new ArrayList<>(byKey.values());
+                    
+                } catch (RestClientException | java.io.IOException e) {
+                    log.warn("[osm] overpass_failed attempt={} errorType={}", attempt, e.getClass().getSimpleName());
+                    if (attempt == 3) {
+                        if (!isFallback && endpoints.size() > 1) {
+                            log.info("[osm] fallback_endpoint=true");
+                        }
+                    } else {
+                        try { Thread.sleep(1000 * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    }
+                }
+            }
+        }
+        
+        throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_ERROR", "Falha ao obter leads após retentativas.");
     }
 
     private Geo geocode(String location) {
-        try {
-            String response = restClient().get()
-                    .uri(uriBuilder -> uriBuilder
-                            .scheme("https").host("nominatim.openstreetmap.org").path("/search")
-                            .queryParam("q", location).queryParam("format", "json")
-                            .queryParam("limit", "1").queryParam("addressdetails", "1").build())
-                    .retrieve()
-                    .body(String.class);
-            JsonNode arr = objectMapper.readTree(response);
-            if (!arr.isArray() || arr.isEmpty()) return null;
-            JsonNode hit = arr.get(0);
-            double lat = hit.path("lat").asDouble(Double.NaN);
-            double lon = hit.path("lon").asDouble(Double.NaN);
-            if (Double.isNaN(lat) || Double.isNaN(lon)) return null;
-            JsonNode address = hit.path("address");
-            String city = firstPresent(address,
-                    "city", "town", "village", "municipality", "suburb", "county");
-            String state = address.path("state").asText(null);
-            String country = address.path("country").asText(null);
-            if (country == null || country.isBlank()) country = "BR";
-            return new Geo(lat, lon, blankToNull(city), blankToNull(state), country);
-        } catch (RuntimeException | java.io.IOException e) {
-            log.warn("Falha de geocodificacao OSM: {}", e.getMessage());
-            return null;
+        for (int i = 0; i < 3; i++) {
+            try {
+                String response = client().get()
+                        .uri(uriBuilder -> uriBuilder
+                                .scheme("https").host("nominatim.openstreetmap.org").path("/search")
+                                .queryParam("q", location)
+                                .queryParam("format", "json")
+                                .queryParam("limit", "1")
+                                .queryParam("addressdetails", "1")
+                                .build())
+                        .retrieve()
+                        .body(String.class);
+                JsonNode arr = objectMapper.readTree(response);
+                if (!arr.isArray() || arr.isEmpty()) return null;
+                
+                JsonNode hit = arr.get(0);
+                double lat = hit.path("lat").asDouble(Double.NaN);
+                double lon = hit.path("lon").asDouble(Double.NaN);
+                if (Double.isNaN(lat) || Double.isNaN(lon)) return null;
+                
+                JsonNode address = hit.path("address");
+                String city = firstPresent(address, "city", "town", "village", "municipality");
+                String state = address.path("state").asText(null);
+                String country = address.path("country").asText(null);
+                if (country == null || country.isBlank()) country = "BR";
+                
+                double south = 0, north = 0, west = 0, east = 0;
+                boolean bboxValid = false;
+                JsonNode bboxNode = hit.path("boundingbox");
+                if (bboxNode.isArray() && bboxNode.size() == 4) {
+                    south = bboxNode.get(0).asDouble();
+                    north = bboxNode.get(1).asDouble();
+                    west = bboxNode.get(2).asDouble();
+                    east = bboxNode.get(3).asDouble();
+                    
+                    if (south < north && west < east && (north - south) < 2.0 && (east - west) < 2.0) {
+                        bboxValid = true;
+                    }
+                }
+                
+                return new Geo(lat, lon, blankToNull(city), blankToNull(state), country, south, north, west, east, bboxValid);
+            } catch (RuntimeException | java.io.IOException e) {
+                try { Thread.sleep(1000 * (i + 1)); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            }
         }
+        return null;
     }
 
     String buildOverpassQuery(String niche, Geo geo, int limit) {
-        String bbox = String.format(Locale.US, "%f,%f,%f,%f",
-                geo.lat - BBOX_DELTA, geo.lon - BBOX_DELTA, geo.lat + BBOX_DELTA, geo.lon + BBOX_DELTA);
+        String bbox;
+        if (geo.bboxValid) {
+            bbox = String.format(Locale.US, "%f,%f,%f,%f", geo.south, geo.west, geo.north, geo.east);
+        } else {
+            bbox = String.format(Locale.US, "%f,%f,%f,%f",
+                    geo.lat - BBOX_DELTA, geo.lon - BBOX_DELTA, geo.lat + BBOX_DELTA, geo.lon + BBOX_DELTA);
+        }
+        
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
         StringBuilder sb = new StringBuilder();
         sb.append("[out:json][timeout:25];(");
         for (String t : strategy.tagFilters()) {
-            String[] kv = t.split("=", 2);
-            if (kv.length == 2 && !kv[0].isBlank() && !kv[1].isBlank()) {
-                sb.append(String.format("nwr[\"%s\"=\"%s\"](%s);",
-                        escapeTag(kv[0].trim()), escapeTag(kv[1].trim()), bbox));
+            StringBuilder filterBuilder = new StringBuilder();
+            for (String part : t.split(",")) {
+                String[] kv = part.split("=", 2);
+                if (kv.length == 2 && !kv[0].isBlank() && !kv[1].isBlank()) {
+                    filterBuilder.append(String.format("[\"%s\"=\"%s\"]", escapeTag(kv[0].trim()), escapeTag(kv[1].trim())));
+                }
+            }
+            if (!filterBuilder.isEmpty()) {
+                sb.append(String.format("nwr%s(%s);", filterBuilder, bbox));
             }
         }
-        // Fallback pelo nome (mantido, mas nao e a estrategia principal).
-        // Pattern.quote ja aplicado em NicheMapper.sanitizeForRegex.
-        if (strategy.fallbackNameRegex() != null && !strategy.fallbackNameRegex().isBlank()
-                && !strategy.fallbackNameRegex().equals("''")) {
-            sb.append(String.format("nwr[\"name\"~\"%s\",i](%s);",
-                    strategy.fallbackNameRegex(), bbox));
+        if (strategy.fallbackNameRegex() != null && !strategy.fallbackNameRegex().isBlank() && !strategy.fallbackNameRegex().equals("''")) {
+            sb.append(String.format("nwr[\"name\"~\"%s\",i](%s);", strategy.fallbackNameRegex(), bbox));
         }
-        sb.append(");out center tags ").append(outLimit(limit)).append(";");
+        sb.append(");out center tags ").append(Math.min(Math.max(limit, MIN_OUT), MAX_OUT)).append(";");
         return sb.toString();
-    }
-
-    static int outLimit(int limit) {
-        int want = Math.max(limit, MIN_OUT);
-        return Math.min(want, MAX_OUT);
     }
 
     LeadCandidate mapElement(JsonNode el, Geo geo) {
@@ -183,38 +231,22 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         String type = el.path("type").asText("");
         String id = el.path("id").asText("");
         if (type.isBlank() || id.isBlank()) return null;
-        String osmId = type + "/" + id;
 
-        LeadCandidate candidate = new LeadCandidate(name.trim(), "openstreetmap", osmId);
+        LeadCandidate candidate = new LeadCandidate(name.trim(), "openstreetmap", type + "/" + id);
         candidate.setCategory(buildCategory(tags));
         candidate.setWebsite(firstPresent(tags, "contact:website", "website", "url"));
         candidate.setPhone(firstPresent(tags, "contact:phone", "phone", "contact:mobile", "mobile"));
-
-        String city = firstPresent(tags, "addr:city", "addr:town", "addr:village", "addr:municipality");
-        String state = asTextOrNull(tags, "addr:state");
-        String country = asTextOrNull(tags, "addr:country");
-        candidate.setCity(city != null ? city : geo.city);
-        candidate.setState(state != null ? state : geo.state);
-        candidate.setCountry(country != null ? country : (geo.country != null ? geo.country : "BR"));
+        candidate.setCity(firstPresent(tags, "addr:city", "addr:town") != null ? firstPresent(tags, "addr:city", "addr:town") : geo.city);
+        candidate.setState(asTextOrNull(tags, "addr:state") != null ? asTextOrNull(tags, "addr:state") : geo.state);
+        candidate.setCountry(asTextOrNull(tags, "addr:country") != null ? asTextOrNull(tags, "addr:country") : geo.country);
         candidate.setAddress(buildAddress(tags, geo));
 
-        // Instagram: primeiro direto do OSM; somente se ausente, fallback via website.
         String rawIg = firstPresent(tags, "contact:instagram", "instagram");
         String username = normalizer.normalizeInstagram(rawIg);
         if (username != null && !username.isBlank()) {
             candidate.setInstagramUsername(username);
             candidate.setInstagramUrl("https://instagram.com/" + username);
             candidate.setInstagramStatus("FOUND");
-        } else if (candidate.getWebsite() != null && !candidate.getWebsite().isBlank()
-                && instagramDetector != null) {
-            String viaSite = instagramDetector.detectFromWebsite(candidate.getWebsite());
-            if (viaSite != null && !viaSite.isBlank()) {
-                candidate.setInstagramUsername(viaSite);
-                candidate.setInstagramUrl("https://instagram.com/" + viaSite);
-                candidate.setInstagramStatus("FOUND");
-            } else {
-                candidate.setInstagramStatus("NOT_FOUND");
-            }
         } else {
             candidate.setInstagramStatus("NOT_FOUND");
         }
@@ -222,20 +254,9 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     }
 
     static String buildCategory(JsonNode tags) {
-        String beauty = asTextOrNull(tags, "beauty");
-        String shop = asTextOrNull(tags, "shop");
-        String amenity = asTextOrNull(tags, "amenity");
-        String leisure = asTextOrNull(tags, "leisure");
-        String office = asTextOrNull(tags, "office");
-        String tourism = asTextOrNull(tags, "tourism");
-        if (beauty != null && !beauty.isBlank()) {
-            return "beauty:" + beauty.trim();
-        }
-        if (shop != null && !shop.isBlank()) return "shop:" + shop.trim();
-        if (amenity != null && !amenity.isBlank()) return "amenity:" + amenity.trim();
-        if (leisure != null && !leisure.isBlank()) return "leisure:" + leisure.trim();
-        if (office != null && !office.isBlank()) return "office:" + office.trim();
-        if (tourism != null && !tourism.isBlank()) return "tourism:" + tourism.trim();
+        if (asTextOrNull(tags, "beauty") != null) return "beauty:" + asTextOrNull(tags, "beauty");
+        if (asTextOrNull(tags, "shop") != null) return "shop:" + asTextOrNull(tags, "shop");
+        if (asTextOrNull(tags, "amenity") != null) return "amenity:" + asTextOrNull(tags, "amenity");
         return null;
     }
 
@@ -297,6 +318,5 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return s.replace("\\", "").replace("\"", "");
     }
 
-    record Geo(double lat, double lon, String city, String state, String country) {
-    }
+    record Geo(double lat, double lon, String city, String state, String country, double south, double north, double west, double east, boolean bboxValid) {}
 }

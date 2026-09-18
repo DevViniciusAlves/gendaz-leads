@@ -42,11 +42,26 @@ public class MessageSend {
     @Column(name = "message_text_snapshot", columnDefinition = "TEXT")
     private String messageTextSnapshot;
 
-    @Column(name = "template_id", columnDefinition = "BIGINT")
+    @Column(name = "recipient_snapshot")
+    private String recipientSnapshot;
+
+    @Column(name = "template_id")
     private Long templateId;
 
-    @Column(name = "request_id", columnDefinition = "VARCHAR(255)")
+    @Column(name = "request_id")
     private String requestId;
+
+    @Column(name = "provider_message_id")
+    private String providerMessageId;
+
+    @Column(name = "error_code")
+    private String errorCode;
+
+    @Column(name = "queued_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant queuedAt;
+
+    @Column(name = "sent_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant sentAt;
 
     @Column(columnDefinition = "TEXT")
     private String result;
