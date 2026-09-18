@@ -25,4 +25,8 @@ public interface MessageSendRepository extends JpaRepository<MessageSend, Long> 
             "AND (ms.nextAttemptAt IS NULL OR ms.nextAttemptAt <= :now) " +
             "ORDER BY ms.nextAttemptAt ASC NULLS FIRST")
     List<MessageSend> findDue(@Param("now") Instant now);
+
+    boolean existsByLeadIdAndStatus(Long leadId, String status);
+
+    boolean existsByRequestId(String requestId);
 }

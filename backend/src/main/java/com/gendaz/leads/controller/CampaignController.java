@@ -1,23 +1,26 @@
 package com.gendaz.leads.controller;
 
-import com.gendaz.leads.dto.campaign.CampaignResponse;
-import com.gendaz.leads.dto.campaign.CreateCampaignRequest;
-import com.gendaz.leads.service.CampaignService;
-import jakarta.validation.Valid;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
-import org.springframework.http.ResponseEntity;
+import com.gendaz.leads.dto.campaign.*;
+import com.gendaz.leads.entity.Campaign;
+import com.gendaz.leads.entity.MessageTemplate;
+import com.gendaz.leads.service.*;
+import org.springframework.data.domain.*;
+import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
+import jakarta.validation.*;
+import java.util.*;
+import java.util.*;
 
 @RestController
 @RequestMapping("/api/campaigns")
 public class CampaignController {
 
     private final CampaignService campaignService;
+    private final CampaignSendService campaignSendService;
 
-    public CampaignController(CampaignService campaignService) {
+    public CampaignController(CampaignService campaignService, CampaignSendService campaignSendService) {
         this.campaignService = campaignService;
+        this.campaignSendService = campaignSendService;
     }
 
     @PostMapping
@@ -41,5 +44,58 @@ public class CampaignController {
     public ResponseEntity<Void> retry(@PathVariable Long id) {
         campaignService.retry(id);
         return ResponseEntity.accepted().build();
+    }
+
+    // --- NOVOS ENDPOINTS DE TEMPLATE ---
+
+    @GetMapping("/{campaignId}/message-templates/default")
+    public ResponseEntity<MessageTemplate> getDefaultTemplate(@PathVariable Long campaignId) {
+        campaignService.get(campaignId);
+        return ResponseEntity.ok(new MessageTemplate());
+    }
+
+    @PutMapping("/{campaignId}/message-templates/default")
+    public ResponseEntity<MessageTemplate> setDefaultTemplate(@PathVariable Long campaignId,
+                                                            @RequestBody MessageTemplate template) {
+        campaignService.get(campaignId);
+        return ResponseEntity.ok(template);
+    }
+
+    // --- NOVOS ENDPOINTS DE PREVIEW E ENVIO ---
+
+    @PostMapping("/{campaignId}/send-preview")
+    public ResponseEntity<SendPreviewResponse> generateSendPreview(
+            @PathVariable Long campaignId,
+            @RequestBody(required = false) SendPreviewRequest request) {
+        Long templateId = request != null && request.getTemplateId() != null ?
+                request.getTemplateId() : null;
+        String templateText = request != null && request.getTemplateText() != null ?
+                request.getTemplateText() : null;
+        Boolean allEligible = request != null && request.isAllEligible();
+
+        SendPreviewResponse preview = campaignSendService.generatePreview(
+                campaignId,
+                request != null && request.getLeadIds() != null ? request.getLeadIds() : null,
+                templateText,
+                allEligible
+        );
+
+        return ResponseEntity.ok(preview);
+    }
+
+    @PostMapping("/{campaignId}/send")
+    public ResponseEntity<SendResultEnqueue> enqueueMessages(
+            @PathVariable Long campaignId,
+            @RequestBody(required = false) EnqueueRequest request) {
+        List<Long> leadIds = request != null && request.getLeadIds() != null
+                ? request.getLeadIds() : null;
+
+        SendResultEnqueue result = campaignSendService.enqueueMessages(
+                campaignId,
+                leadIds,
+                request != null && request.getTemplateId() != null ? request.getTemplateId() : null
+        );
+
+        return ResponseEntity.ok(result);
     }
 }

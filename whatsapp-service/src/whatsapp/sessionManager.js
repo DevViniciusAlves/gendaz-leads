@@ -1,8 +1,5 @@
 'use strict';
 
-const { maskPhone } = require('./phoneMask');
-
-// Estados publicos da sessao. Nunca expor objetos internos do Baileys.
 const STATES = Object.freeze({
   NOT_CONNECTED: 'NOT_CONNECTED',
   CONNECTING: 'CONNECTING',
@@ -21,10 +18,15 @@ function isValidRequestId(requestId) {
   return typeof requestId === 'string' && requestId.trim().length > 0 && requestId.length <= 120;
 }
 
+/**
+ * Cria e retorna um objeto de gerenciamento de sessão WhatsApp.
+ * O estado interno (seenRequests, sendChain, etc.) é encapsulado.
+ */
 function createSessionManager({ config: cfg, authStore, socketFactory, baileysLib, logger } = {}) {
   const log = logger || console;
   const baileys = baileysLib || (() => { try { return require('@whiskeysockets/baileys'); } catch (_) { return null; } })();
 
+  // Estado interno do gerenciador
   const state = {
     status: STATES.NOT_CONNECTED,
     qr: null,
@@ -34,12 +36,14 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     reconnectTimer: null,
     sock: null,
     connecting: false,
+    // Write queue para creds.update - evita race condition com múltiplos eventos rápidos
+    credsWriteQueue: [],
+    credsWriteInProgress: false,
+    // Idempotencia imediata em memoria (protecao tecnica; fonte duravel fica no Spring).
+    seenRequests: new Map(), // requestId -> { result, expiresAt }
+    // Serializacao de envio: promise chain.
+    sendChain: Promise.resolve(),
   };
-
-  // Idempotencia imediata em memoria (protecao tecnica; fonte duravel fica no Spring).
-  const seenRequests = new Map(); // requestId -> { result, expiresAt }
-  // Serializacao de envio: promise chain.
-  let sendChain = Promise.resolve();
 
   function publicStatus() {
     return {
@@ -57,7 +61,6 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
   }
 
   function setQr(qr) {
-    // Nunca logar conteudo do QR.
     if (qr) {
       state.qr = qr;
       state.qrUpdatedAt = new Date().toISOString();
@@ -80,47 +83,75 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     return Math.min(exp, cfg.reconnectMaxDelayMs);
   }
 
-  function scheduleReconnect() {
-    if (state.reconnectAttempts >= cfg.reconnectMaxAttempts) {
-      setStatus(STATES.ERROR, 'max_reconnect_attempts_reached');
-      return;
-    }
-    const delay = backoffDelay(state.reconnectAttempts);
-    state.reconnectAttempts += 1;
-    clearReconnectTimer();
-    state.reconnectTimer = setTimeout(() => {
-      state.reconnectTimer = null;
-      connectInternal({ reason: 'reconnect' }).catch(() => {});
-    }, delay);
-    if (state.status !== STATES.QR_REQUIRED) setStatus(STATES.DISCONNECTED);
+  // Write queue control para creds.update - serializa e persiste sequencialmente
+  async function enqueueCredsWrite(fn) {
+    return new Promise((resolve) => {
+      state.credsWriteQueue.push({ fn, resolve });
+      process.nextTick(() => dispatchCredsWrites());
+    });
   }
 
-  async function attachSocket(sock) {
+  async function dispatchCredsWrites() {
+    if (state.credsWriteInProgress) return;
+    if (state.credsWriteQueue.length === 0) {
+      state.credsWriteInProgress = false;
+      return;
+    }
+    state.credsWriteInProgress = true;
+    const { fn, resolve } = state.credsWriteQueue.shift();
+    try {
+      await fn();
+      resolve({ ok: true });
+    } catch (e) {
+      log.warn && log.warn('Falha ao persistir credenciais via write queue:', e.message);
+      resolve({ ok: false, error: e.message });
+    } finally {
+      state.credsWriteInProgress = false;
+      dispatchCredsWrites();
+    }
+  }
+
+  function attachSocket(sock) {
     state.sock = sock;
     const { DisconnectReason } = baileys || {};
+
+    // Apenas UM listener para creds.update, controlado via write queue
     sock.ev.on('creds.update', async () => {
       try {
-        if (sock.authState && sock.authState.saveCreds) await sock.authState.saveCreds();
+        if (sock.authState && typeof sock.authState.saveCreds === 'function') {
+          await enqueueCredsWrite(() => sock.authState.saveCreds().catch(() => {}));
+        }
       } catch (e) {
-        log.warn && log.warn('Falha ao salvar credenciais.');
+        log.warn && log.warn('Erro no creds.update handler:', e.message);
       }
     });
+
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update || {};
       if (qr) setQr(qr);
       if (connection === 'connecting') {
         if (state.status !== STATES.QR_REQUIRED) setStatus(STATES.CONNECTING);
       } else if (connection === 'open') {
+        // Conexão aberta: limpar QR, zerar tentativas, persistir, marcar registered
         setQr(null);
         state.reconnectAttempts = 0;
         clearReconnectTimer();
+        // Persistir auth state imediatamente
+        if (sock.authState && typeof sock.authState.saveCreds === 'function') {
+          try {
+            await sock.authState.saveCreds().catch((e) => {
+              log.warn && log.warn('Falha ao persistir creds após connect open:', e.message);
+            });
+          } catch (e) {
+            log.warn && log.warn('Falha crítica ao persistir creds:', e.message);
+          }
+        }
         setStatus(STATES.CONNECTED);
       } else if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         setQr(null);
         const loggedOut = DisconnectReason && statusCode === DisconnectReason.loggedOut;
         if (loggedOut) {
-          // Logout definitivo: limpar auth state.
           try { await authStore.clear(); } catch (_) {}
           state.reconnectAttempts = 0;
           setStatus(STATES.LOGGED_OUT);
@@ -139,11 +170,12 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     setStatus(STATES.CONNECTING);
     try {
       const { state: authState, saveCreds, registered } = await authStore.loadBaileysAuthState();
-      // Tentativa de restore silencioso quando registrada: mesmo fluxo de socket.
+      // Aplicar safeAuthStateObj para garantir compatibilidade de tipos após restore
+      const safeCreds = authStore.safeAuthStateObj ? authStore.safeAuthStateObj(authState) : authState;
       const { createSocket } = socketFactory || require('./socketFactory');
       let loggerLib = null;
       try { loggerLib = require('pino')({ level: 'silent' }); } catch (_) { loggerLib = null; }
-      const sock = createSocket({ baileys, authState, logger: loggerLib });
+      const sock = createSocket({ baileys, authState: safeCreds, logger: loggerLib });
       sock.authState = { saveCreds };
       if (sock.ev && typeof sock.ev.on === 'function') {
         sock.ev.on('creds.update', saveCreds);
@@ -189,15 +221,14 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
 
   function pruneSeen() {
     const now = Date.now();
-    for (const [k, v] of seenRequests) {
-      if (v.expiresAt <= now) seenRequests.delete(k);
+    for (const [k, v] of state.seenRequests) {
+      if (v.expiresAt <= now) state.seenRequests.delete(k);
     }
   }
 
   function enqueueSend(fn) {
-    const run = sendChain.then(fn, fn);
-    // Evita que uma falha quebre a cadeia para os proximos.
-    sendChain = run.catch(() => {});
+    const run = state.sendChain.then(fn, fn);
+    state.sendChain = run.catch(() => {});
     return run;
   }
 
@@ -227,7 +258,7 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
       throw err;
     }
     pruneSeen();
-    const cached = seenRequests.get(requestId);
+    const cached = state.seenRequests.get(requestId);
     if (cached) return { ...cached.result, deduplicated: true };
 
     if (state.status !== STATES.CONNECTED || !state.sock) {
@@ -239,18 +270,16 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
 
     const doSend = sender || defaultSender;
     return enqueueSend(async () => {
-      // Re-checa idempotencia dentro da fila (concorrencia).
-      const cachedInside = seenRequests.get(requestId);
+      const cachedInside = state.seenRequests.get(requestId);
       if (cachedInside) return { ...cachedInside.result, deduplicated: true };
       const result = await doSend({ recipient, text, requestId });
-      seenRequests.set(requestId, { result, expiresAt: Date.now() + cfg.idempotencyTtlMs });
+      state.seenRequests.set(requestId, { result, expiresAt: Date.now() + cfg.idempotencyTtlMs });
       return { ...result, deduplicated: false };
     });
   }
 
   async function defaultSender({ recipient, text }) {
     const jid = `${recipient}@s.whatsapp.net`;
-    // Verificacao de conta WhatsApp quando suportado.
     try {
       if (typeof state.sock.onWhatsApp === 'function') {
         const check = await state.sock.onWhatsApp(jid);
@@ -264,21 +293,18 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
       }
     } catch (e) {
       if (e && e.httpStatus === 400) throw e;
-      // Falha na verificacao nao deve bloquear envio: segue best-effort.
     }
     const sent = await state.sock.sendMessage(jid, { text });
-    // 'sent' = Baileys aceitou/enviou a operacao (nao significa leitura).
     const messageId = sent?.key?.id || null;
     return { status: 'sent', messageId, requestId: undefined };
   }
 
-  // Hooks para testes (injetar socket fake / inspecionar sem expor segredos).
   function _injectSocket(sock) {
     state.sock = sock;
     setStatus(STATES.CONNECTED);
   }
   function _setStatusForTest(s) { setStatus(s); }
-  function _debug() { return { status: state.status, hasQr: !!state.qr, seen: seenRequests.size }; }
+  function _debug() { return { status: state.status, hasQr: !!state.qr, seen: state.seenRequests.size }; }
 
   return {
     STATES,
@@ -289,7 +315,6 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     publicStatus,
     sendText,
     restoreIfRegistered: async () => {
-      // No boot: se registrada, tentar restaurar.
       try {
         const loaded = await authStore.loadBaileysAuthState();
         if (loaded && loaded.registered && baileys) {
@@ -301,7 +326,11 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     _injectSocket,
     _setStatusForTest,
     _debug,
+    // Expor funções auxiliares para testes
+    isValidRecipient,
+    isValidRequestId,
   };
 }
 
+// Exportar no nível do módulo para testes e compatibilidade
 module.exports = { createSessionManager, STATES, isValidRecipient, isValidRequestId };

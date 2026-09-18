@@ -39,6 +39,15 @@ public class MessageSend {
     @Column(name = "next_attempt_at", columnDefinition = "TIMESTAMPTZ")
     private Instant nextAttemptAt;
 
+    @Column(name = "message_text_snapshot", columnDefinition = "TEXT")
+    private String messageTextSnapshot;
+
+    @Column(name = "template_id", columnDefinition = "BIGINT")
+    private Long templateId;
+
+    @Column(name = "request_id", columnDefinition = "VARCHAR(255)")
+    private String requestId;
+
     @Column(columnDefinition = "TEXT")
     private String result;
 

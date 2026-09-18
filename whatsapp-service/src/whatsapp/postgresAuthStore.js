@@ -2,11 +2,12 @@
 
 const { Pool } = require('pg');
 const { encryptJson, decryptJson } = require('./cryptoStore');
+const { safeAuthStateObj } = require('./cryptoStore');
 
-// Persistencia do auth state Baileys em PostgreSQL (tabelas criadas pela migration V2 do backend).
+// Persistencia do auth state Baileys em PostgreSQL (tabelas criadas pela migration V2/V3 do backend).
 //   whatsapp_auth_sessions(session_id, payload, registered, created_at, updated_at)
 //   whatsapp_auth_keys(session_id, key_type, key_hash, payload, updated_at)
-//
+
 // Todo payload sensivel e armazenado criptografado (AES-256-GCM). Nunca logar conteudo descriptografado.
 
 function createPostgresAuthStore({ pool, sessionId, encryptionKey }) {
@@ -20,7 +21,7 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey }) {
     if (rows.length === 0) return { creds: null, registered: false };
     try {
       const creds = decryptJson(encryptionKey, rows[0].payload);
-      return { creds, registered: !!rows[0].registered };
+      return { creds: safeAuthStateObj(creds), registered: !!rows[0].registered };
     } catch (e) {
       throw new Error(`Falha ao descriptografar sessao ${sessionId}: ${e.message}`);
     }
@@ -77,11 +78,15 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey }) {
   }
 
   // Adaptador para o formato esperado pelo Baileys: { state: {creds, keys}, saveCreds }
+  // Usa safeAuthStateObj para preservar Buffers, Signal Keys e app-state-sync-key.
   async function loadBaileysAuthState() {
     const { creds, registered } = await readSession();
     const storedKeys = await readKeys();
     const { initAuthCreds } = require('@whiskeysockets/baileys');
     const stateCreds = creds || initAuthCreds();
+
+    // Aplica safeAuthStateObj para garantir compatibilidade de tipos (Buffers, Signal Keys, app-state-sync-key)
+    const adaptedCreds = safeAuthStateObj(stateCreds);
 
     const keys = {
       get: (type, ids) => {
@@ -106,10 +111,10 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey }) {
     };
 
     const saveCreds = async () => {
-      await writeSession(stateCreds, !!stateCreds.registered);
+      await writeSession(adaptedCreds, !!adaptedCreds.registered);
     };
 
-    return { state: { creds: stateCreds, keys }, saveCreds, registered };
+    return { state: { creds: adaptedCreds, keys }, saveCreds, registered };
   }
 
   return { readSession, writeSession, readKeys, writeKey, clear, loadBaileysAuthState, pool: db };
