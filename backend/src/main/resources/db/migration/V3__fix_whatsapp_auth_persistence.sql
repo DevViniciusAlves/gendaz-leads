@@ -43,8 +43,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_auth_keys (
     CONSTRAINT pk_whatsapp_auth_keys PRIMARY KEY (session_id, key_type, key_hash)
 );
 
-CREATE INDEX IF NOT EXISTS idx_whatsapp_auth_keys_session2 ON whatsapp_auth_keys(session_id);
-COMMENT ON TABLE whatsapp_auth_keys IS 'Signal Keys e outos tipos do Baileys; persistente isoladamente desde V3.';
+COMMENT ON TABLE whatsapp_auth_keys IS 'Signal Keys e outros tipos do Baileys; persistente isoladamente desde V3.';
 
 -- View resumida para debug (nao expor creds em claro)
 CREATE OR REPLACE VIEW whatsapp_auth_sessions_summary AS

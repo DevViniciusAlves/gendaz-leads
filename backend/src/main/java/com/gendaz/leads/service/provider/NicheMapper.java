@@ -42,9 +42,9 @@ public final class NicheMapper {
                 "cabeleireiro", "cabeleireira", "cabelo", "cabelos", "cabelereiro",
                 "hair", "hairdresser", "hair salon", "coiffeur"),
                 List.of("shop=hairdresser", "shop=beauty"));
-        // barbearia
+        // barbearia - usa estrategia composta: shop=barber E/OU hairdresser=barber
         put(List.of("barbearia", "barbearias", "barber", "barbershop", "barba"),
-                List.of("shop=barber"));
+                List.of("shop=barber", "hairdresser=barber"));
         // dentista / odonto
         put(List.of("dentista", "dentistas", "odontologia", "clinica odontologica",
                 "consultorio odontologico", "dentist", "dental"),
@@ -112,8 +112,10 @@ public final class NicheMapper {
     }
 
     /**
-     * Sanitiza o termo do usuario para uso dentro de regex Overpass.
+     * Sanitiza o termo do usuario para uso dentro de query Overpass.
      * Remove caracteres especiais de regex e limita o tamanho.
+     * NÃO usa Pattern.quote() (gera \\Q\\E incompativel com Overpass).
+     * Para nichos conhecidos, usa aliases regex explicitos.
      */
     static String sanitizeForRegex(String niche) {
         if (niche == null) return "";
@@ -121,7 +123,8 @@ public final class NicheMapper {
         if (s.length() > 60) s = s.substring(0, 60);
         // mantem letras (incl. acentuadas), numeros e espacos; resto vira espaco
         s = s.replaceAll("[^\\p{L}0-9 ]", " ").replaceAll("\\s+", " ").trim();
-        // escapa para regex literal
-        return java.util.regex.Pattern.quote(s);
+        // Nao usa Pattern.quote. Para texto literal no Overpass, usar aliases
+        // explicitos quando possivel. Aqui apenas limpamos para uso seguro.
+        return s;
     }
 }

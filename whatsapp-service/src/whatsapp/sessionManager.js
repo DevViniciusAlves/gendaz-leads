@@ -115,7 +115,9 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     state.sock = sock;
     const { DisconnectReason } = baileys || {};
 
-    // Apenas UM listener para creds.update, controlado via write queue
+    // --- UNICO listener para creds.update, controlado via write queue ---
+    // Apenas um listener, definido aqui em attachSocket. O connectInternal NÃO deve
+    // adicionar outro sock.ev.on('creds.update', ...).
     sock.ev.on('creds.update', async () => {
       try {
         if (sock.authState && typeof sock.authState.saveCreds === 'function') {
@@ -177,9 +179,8 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
       try { loggerLib = require('pino')({ level: 'silent' }); } catch (_) { loggerLib = null; }
       const sock = createSocket({ baileys, authState: safeCreds, logger: loggerLib });
       sock.authState = { saveCreds };
-      if (sock.ev && typeof sock.ev.on === 'function') {
-        sock.ev.on('creds.update', saveCreds);
-      }
+      // NÃO adicionar sock.ev.on('creds.update', saveCreds) aqui - ja foi feito em attachSocket()
+      // abaixo. Apenas garantir que o socket esteja conectado.
       await attachSocket(sock);
       if (registered) log.info && log.info('Sessao registrada encontrada; tentando restaurar.');
       return publicStatus();
@@ -283,7 +284,9 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     try {
       if (typeof state.sock.onWhatsApp === 'function') {
         const check = await state.sock.onWhatsApp(jid);
-        const exists = Array.isArray(check) ? check.some((c) => c && (c.exists || c.jid)) : !!check;
+        // CORREÇÃO: Apenas aceita entry.exists === true como prova.
+        // Não considere JID presente como prova automática.
+        const exists = Array.isArray(check) ? check.some((c) => c && c.exists === true) : false;
         if (!exists) {
           const err = new Error('Destinatario nao possui WhatsApp.');
           err.code = 'recipient_not_on_whatsapp';
