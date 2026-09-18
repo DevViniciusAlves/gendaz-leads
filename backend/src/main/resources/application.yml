@@ -91,6 +91,11 @@ app:
     provider: ${MESSAGING_PROVIDER:log}
     send-interval-seconds: ${SEND_INTERVAL_SECONDS:30}
     max-concurrent-sends: ${MAX_CONCURRENT_SENDS:1}
+  whatsapp:
+    service-url: ${WHATSAPP_SERVICE_URL:}
+    internal-token: ${WHATSAPP_INTERNAL_TOKEN:}
+    session-id: ${WHATSAPP_SESSION_ID:gendaz-leads}
+    timeout-ms: ${WHATSAPP_TIMEOUT_MS:15000}
 
 logging:
   level:

@@ -29,19 +29,21 @@ gendaz-leads/
 ├── backend/                # Spring Boot (pom.xml, src/main, src/test)
 │   ├── src/main/java/com/gendaz/leads/
 │   │   ├── config/         # WebConfig (rate limit)
-│   │   ├── controller/     # Auth, Campaign, Lead, Dashboard
-│   │   ├── dto/            # requisição/resposta (auth, campaign, lead, dashboard, common)
+│   │   ├── controller/     # Auth, Campaign, Lead, Dashboard, WhatsApp
+│   │   ├── dto/            # requisição/resposta (auth, campaign, lead, dashboard, whatsapp, common)
 │   │   ├── entity/         # User, Campaign, Lead, LeadSource, LeadAnalysis, LeadMessage, CampaignLead, LeadEvent, MessageSend
 │   │   ├── repository/     # Spring Data JPA
 │   │   ├── security/       # JWT, filtro, UserDetails, rate limit, CORS
 │   │   ├── service/        # orquestração de domínio
 │   │   │   ├── provider/   # LeadDiscoveryProvider: GooglePlacesProvider, OpenStreetMapProvider
 │   │   │   └── messaging/  # MessagingProvider: LogMessagingProvider + SendQueueProcessor
+│   │   ├── whatsapp/       # WhatsAppService + BaileysWhatsAppProvider (HTTP interno ao whatsapp-service)
 │   │   ├── util/           # Normalizer (normalização/deduplicação), SsrfGuard
 │   │   └── exception/      # ApiException + GlobalExceptionHandler
-│   └── src/main/resources/db/migration/V1__init.sql   # schema Flyway
+│   └── src/main/resources/db/migration/V1__init.sql, V2__whatsapp_auth.sql  # schema Flyway
+├── whatsapp-service/       # Node 20+ isolado (Baileys): sessao unica, QR, envio unitario
 └── frontend/               # React + Vite
-    └── src/                # api.js, pages (Dashboard, Campanhas, Leads, Login), components
+    └── src/                # api.js, pages (Dashboard, Campanhas, Leads, WhatsApp, Login), components
 ```
 
 ---
@@ -109,8 +111,30 @@ Veja `backend/.env.example`. Resumo (sem valores reais):
 - `OSM_ENABLED`, `OSM_TIMEOUT_MS`, `OSM_OVERPASS_URL`
 - `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_ENABLED`, `GROQ_TIMEOUT_MS`, `GROQ_MAX_RETRIES`
 - `MESSAGING_PROVIDER` (atual: `log`), `SEND_INTERVAL_SECONDS`, `MAX_CONCURRENT_SENDS`
+- `WHATSAPP_SERVICE_URL`, `WHATSAPP_INTERNAL_TOKEN`, `WHATSAPP_SESSION_ID`, `WHATSAPP_TIMEOUT_MS`
 - `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW`
 - `APP_ENV`, `PORT`
+
+### WhatsApp (infra técnica)
+
+Arquitetura: `Spring Boot → HTTP interno autenticado → whatsapp-service (Node/Baileys) → WhatsApp`.
+Baileys fica SOMENTE no serviço Node isolado (`whatsapp-service/`), nunca no Java.
+
+```bash
+cd whatsapp-service
+cp .env.example .env   # preencha WHATSAPP_INTERNAL_TOKEN, WHATSAPP_DATABASE_URL, WHATSAPP_AUTH_ENCRYPTION_KEY
+npm install
+npm start              # porta 3001; GET /health -> {"status":"UP"}
+```
+
+- Sessão única e estável (`WHATSAPP_SESSION_ID`, padrão `gendaz-leads`).
+- Auth state persistido em PostgreSQL (`whatsapp_auth_sessions`, `whatsapp_auth_keys`, migration `V2`),
+  criptografado com AES-256-GCM (`WHATSAPP_AUTH_ENCRYPTION_KEY` = 32 bytes em base64/hex).
+  Sem token configurado o serviço recusa iniciar (fail closed).
+- Spring expõe ao frontend SOMENTE: `GET /api/whatsapp/status`, `POST /api/whatsapp/connect`,
+  `GET /api/whatsapp/qr`, `POST /api/whatsapp/disconnect`, `POST /api/whatsapp/send`
+  (envio técnico individual; fila/delay comercial continuam no Spring — próxima task).
+- Frontend: página `/whatsapp` (Conectar → QR → Conectado → Desconectar), polling de 4s.
 
 ---
 

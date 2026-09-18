@@ -514,6 +514,19 @@ h4 {
   font-size: 13px;
 }
 
+.qr-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 16px;
+  display: inline-block;
+  margin: 12px 0;
+}
+
+.qr-box canvas {
+  display: block;
+}
+
 .section-title {
   font-size: 14px;
   text-transform: uppercase;

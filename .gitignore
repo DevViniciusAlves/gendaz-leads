@@ -16,6 +16,9 @@ build/
 *.log
 logs/
 
+# Auth state local do whatsapp-service (contém credenciais Baileys — nunca comitar)
+whatsapp-service/data/
+
 # IDE
 .idea/
 .vscode/

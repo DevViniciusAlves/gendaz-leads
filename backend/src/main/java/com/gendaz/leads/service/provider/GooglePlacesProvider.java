@@ -35,17 +35,22 @@ public class GooglePlacesProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.google.timeout-ms:8000}")
     private int timeoutMs;
 
-    private final RestClient restClient;
+    private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
     private final InstagramDetector instagramDetector;
 
     public GooglePlacesProvider(RestClient.Builder builder, ObjectMapper objectMapper, InstagramDetector instagramDetector) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(5000);
-        factory.setReadTimeout(15000);
-        this.restClient = builder.requestFactory(factory).build();
+        this.builder = builder;
         this.objectMapper = objectMapper;
         this.instagramDetector = instagramDetector;
+    }
+
+    private RestClient restClient() {
+        int effective = timeoutMs > 0 ? timeoutMs : 8000;
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Math.min(effective, 15000));
+        factory.setReadTimeout(effective);
+        return builder.requestFactory(factory).build();
     }
 
     @Override
@@ -69,7 +74,7 @@ public class GooglePlacesProvider implements LeadDiscoveryProvider {
                 "places.types,places.websiteUri,places.internationalPhoneNumber,places.nationalPhoneNumber," +
                 "places.googleMapsUri,places.addressComponents";
         try {
-            String response = restClient.post()
+            String response = restClient().post()
                     .uri(ENDPOINT)
                     .header("X-Goog-Api-Key", apiKey)
                     .header("X-Goog-FieldMask", fieldMask)

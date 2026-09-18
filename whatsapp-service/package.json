@@ -1,0 +1,21 @@
+{
+  "name": "gendaz-leads-whatsapp-service",
+  "version": "1.0.0",
+  "description": "Servico Node isolado (Baileys) para WhatsApp do Gendaz Leads. Uso pessoal, sessao unica.",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/whatsapp.test.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.24",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0"
+  }
+}

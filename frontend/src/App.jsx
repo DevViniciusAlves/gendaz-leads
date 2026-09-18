@@ -11,6 +11,7 @@ import { Campaigns } from './pages/Campaigns.jsx'
 import { CampaignDetail } from './pages/CampaignDetail.jsx'
 import { Leads } from './pages/Leads.jsx'
 import { LeadDetail } from './pages/LeadDetail.jsx'
+import { WhatsApp } from './pages/WhatsApp.jsx'
 
 function Verifier({ children }) {
   const [checked, setChecked] = useState(false)
@@ -90,6 +91,16 @@ export default function App() {
                 <ProtectedRoute>
                   <AppShell>
                     <LeadDetail />
+                  </AppShell>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/whatsapp"
+              element={
+                <ProtectedRoute>
+                  <AppShell>
+                    <WhatsApp />
                   </AppShell>
                 </ProtectedRoute>
               }

@@ -108,13 +108,26 @@ public class AsyncCampaignProcessor {
         campaign.setProgressCurrent(0);
         campaignRepository.save(campaign);
 
-        int googleLimit = Math.min(campaign.getRequestedQuantity() + 10, 60);
-        int osmLimit = Math.min(campaign.getRequestedQuantity() + 10, 60);
+        int multiplier = discoveryMultiplier <= 0 ? 3 : discoveryMultiplier;
+        int totalBudget = campaign.getRequestedQuantity() * multiplier;
+        // Garante margem minima para compensar duplicados/invalidos e impõe teto
+        // para nao gerar consultas gigantes no Overpass.
+        totalBudget = Math.max(totalBudget, campaign.getRequestedQuantity() + 10);
+        totalBudget = Math.min(totalBudget, 200);
+
+        List<LeadDiscoveryProvider> active = providers.stream()
+                .filter(LeadDiscoveryProvider::isEnabled)
+                .toList();
+        if (active.isEmpty()) {
+            log.warn("Nenhum provider de descoberta habilitado para campanha {}", campaign.getId());
+        }
+        int perProvider = active.isEmpty() ? 0
+                : Math.max((int) Math.ceil((double) totalBudget / active.size()), campaign.getRequestedQuantity());
 
         List<LeadCandidate> candidates = new ArrayList<>();
-        for (LeadDiscoveryProvider provider : providers) {
+        for (LeadDiscoveryProvider provider : active) {
             try {
-                candidates.addAll(provider.discover(campaign.getNiche(), campaign.getLocation(), googleLimit));
+                candidates.addAll(provider.discover(campaign.getNiche(), campaign.getLocation(), perProvider));
             } catch (RuntimeException e) {
                 log.warn("Provider {} falhou: {}", provider.getName(), e.getMessage());
             }

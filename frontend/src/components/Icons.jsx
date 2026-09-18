@@ -96,3 +96,11 @@ export function IconPlus(p) {
     </svg>
   )
 }
+
+export function IconChat(p) {
+  return (
+    <svg {...base} {...p}>
+      <path d="M21 12a8 8 0 01-8 8H4l2-3a8 8 0 1115-5z" />
+    </svg>
+  )
+}
