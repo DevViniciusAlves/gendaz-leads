@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.exception.ApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -29,6 +30,7 @@ public class BaileysWhatsAppProvider implements WhatsAppServiceProvider {
     private final ObjectMapper objectMapper;
     private final RestClient restClient;
 
+    @Autowired
     public BaileysWhatsAppProvider(RestClient.Builder builder, WhatsAppProperties properties,
                                    ObjectMapper objectMapper) {
         this.properties = properties;
