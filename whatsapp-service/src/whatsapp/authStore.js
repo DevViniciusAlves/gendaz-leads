@@ -16,10 +16,10 @@ function filePaths(baseDir) {
   };
 }
 
-async function readJsonSafe(file) {
+async function readJsonSafe(file, reviver) {
   try {
     const raw = await fs.readFile(file, 'utf8');
-    return JSON.parse(raw);
+    return JSON.parse(raw, reviver);
   } catch (_) {
     return null;
   }
@@ -31,17 +31,26 @@ function createFileAuthStore({ baseDir, sessionId }) {
 
   async function loadBaileysAuthState() {
     await ensureDir(dir);
-    const { initAuthCreds } = require('@whiskeysockets/baileys');
-    let creds = await readJsonSafe(credsFile);
+    const { initAuthCreds, WAProto, BufferJSON } = require('@whiskeysockets/baileys');
+    let creds = await readJsonSafe(credsFile, BufferJSON.reviver);
     if (!creds) creds = initAuthCreds();
-    let storedKeys = (await readJsonSafe(keysFile)) || {};
+    let storedKeys = (await readJsonSafe(keysFile, BufferJSON.reviver)) || {};
 
     const keys = {
       get: (type, ids) => {
         const out = {};
         const store = storedKeys[type] || {};
         for (const id of ids) {
-          if (store[id] !== undefined) out[id] = store[id];
+          if (store[id] !== undefined) {
+            let val = store[id];
+            // Preservar AppStateSyncKeyData como objeto WAProto após restore.
+            if (type === 'app-state-sync-key' && val) {
+              try {
+                val = WAProto.Message.AppStateSyncKeyData.fromObject(val);
+              } catch (_) {}
+            }
+            out[id] = val;
+          }
         }
         return out;
       },
@@ -54,15 +63,19 @@ function createFileAuthStore({ baseDir, sessionId }) {
             else storedKeys[type][id] = value;
           }
         }
-        await fs.writeFile(keysFile, JSON.stringify(storedKeys), 'utf8');
+        await fs.writeFile(keysFile, JSON.stringify(storedKeys, BufferJSON.replacer), 'utf8');
       },
     };
 
     const saveCreds = async () => {
-      await fs.writeFile(credsFile, JSON.stringify(creds), 'utf8');
+      await fs.writeFile(credsFile, JSON.stringify(creds, BufferJSON.replacer), 'utf8');
     };
 
-    return { state: { creds, keys }, saveCreds, registered: !!creds.registered };
+    function safeAuthStateObj(authState) {
+      return authState;
+    }
+
+    return { state: { creds, keys }, saveCreds, registered: !!creds.registered, safeAuthStateObj };
   }
 
   async function clear() {
@@ -70,7 +83,11 @@ function createFileAuthStore({ baseDir, sessionId }) {
     await rm(dir, { recursive: true, force: true });
   }
 
-  return { loadBaileysAuthState, clear };
+  function safeAuthStateObj(authState) {
+    return authState;
+  }
+
+  return { loadBaileysAuthState, clear, safeAuthStateObj };
 }
 
 module.exports = { createFileAuthStore };

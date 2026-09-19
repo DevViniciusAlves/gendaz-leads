@@ -2,6 +2,8 @@
 
 export function saveUser(user) {
   if (!user) return
+  // Nunca substituir usuário válido por valores null (ex.: /me incompleto).
+  if (user.email == null || user.userId == null) return
   localStorage.setItem(
     'gl_user',
     JSON.stringify({

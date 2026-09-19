@@ -19,14 +19,13 @@ function isValidRequestId(requestId) {
 }
 
 /**
- * Cria e retorna um objeto de gerenciamento de sessão WhatsApp.
- * O estado interno (seenRequests, sendChain, etc.) é encapsulado.
+ * Gerenciador de sessão WhatsApp (sessão única).
+ * Frontend -> Spring -> HTTP interno -> Node -> Baileys.
  */
 function createSessionManager({ config: cfg, authStore, socketFactory, baileysLib, logger } = {}) {
   const log = logger || console;
   const baileys = baileysLib || (() => { try { return require('@whiskeysockets/baileys'); } catch (_) { return null; } })();
 
-  // Estado interno do gerenciador
   const state = {
     status: STATES.NOT_CONNECTED,
     qr: null,
@@ -36,12 +35,11 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     reconnectTimer: null,
     sock: null,
     connecting: false,
-    // Write queue para creds.update - evita race condition com múltiplos eventos rápidos
+    socketGeneration: 0,
+    shuttingDown: false,
     credsWriteQueue: [],
     credsWriteInProgress: false,
-    // Idempotencia imediata em memoria (protecao tecnica; fonte duravel fica no Spring).
-    seenRequests: new Map(), // requestId -> { result, expiresAt }
-    // Serializacao de envio: promise chain.
+    seenRequests: new Map(),
     sendChain: Promise.resolve(),
   };
 
@@ -79,12 +77,18 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
   }
 
   function backoffDelay(attempt) {
-    const exp = cfg.reconnectBaseDelayMs * 2 ** Math.min(attempt, 6);
+    const exp = cfg.reconnectBaseDelayMs * 2 ** Math.min(Math.max(attempt, 1) - 1, 10);
     return Math.min(exp, cfg.reconnectMaxDelayMs);
   }
 
   function scheduleReconnect() {
-    if (state.reconnectTimer) return;
+    if (state.shuttingDown) return false;
+    if (state.reconnectTimer) return false;
+    const max = Number(cfg.reconnectMaxAttempts) || 0;
+    if (max > 0 && state.reconnectAttempts >= max) {
+      setStatus(STATES.DISCONNECTED, state.lastError || 'reconnect_max_attempts');
+      return false;
+    }
     state.reconnectAttempts += 1;
     const delay = backoffDelay(state.reconnectAttempts);
     state.reconnectTimer = setTimeout(() => {
@@ -93,112 +97,155 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
         log.warn && log.warn('Reconexao falhou:', e.message);
       });
     }, delay);
+    return true;
   }
 
-  // Write queue control para creds.update - serializa e persiste sequencialmente
-  async function enqueueCredsWrite(fn) {
-    return new Promise((resolve) => {
-      state.credsWriteQueue.push({ fn, resolve });
+  // Write queue serial para creds.update. Uma falha rejeita apenas aquele write,
+  // sem quebrar permanentemente writes posteriores.
+  function enqueueCredsWrite(fn) {
+    return new Promise((resolve, reject) => {
+      state.credsWriteQueue.push({ fn, resolve, reject });
       process.nextTick(() => dispatchCredsWrites());
     });
   }
 
   async function dispatchCredsWrites() {
     if (state.credsWriteInProgress) return;
-    if (state.credsWriteQueue.length === 0) {
+    const next = state.credsWriteQueue.shift();
+    if (!next) {
       state.credsWriteInProgress = false;
       return;
     }
     state.credsWriteInProgress = true;
-    const { fn, resolve } = state.credsWriteQueue.shift();
     try {
-      await fn();
-      resolve({ ok: true });
+      await next.fn();
+      next.resolve({ ok: true });
     } catch (e) {
       log.warn && log.warn('Falha ao persistir credenciais via write queue:', e.message);
-      resolve({ ok: false, error: e.message });
+      next.reject(e);
     } finally {
       state.credsWriteInProgress = false;
-      dispatchCredsWrites();
+      if (state.credsWriteQueue.length > 0) {
+        process.nextTick(() => dispatchCredsWrites());
+      }
     }
   }
 
-  function attachSocket(sock) {
+  function flushCredsWrites() {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (state.credsWriteQueue.length === 0 && !state.credsWriteInProgress) {
+          resolve({ ok: true });
+        } else {
+          setTimeout(check, 10);
+        }
+      };
+      // Garante que a dispatch loop esteja rodando.
+      process.nextTick(() => dispatchCredsWrites());
+      check();
+    });
+  }
+
+  function attachSocket(sock, localGeneration) {
     state.sock = sock;
     const { DisconnectReason } = baileys || {};
 
-    // --- UNICO listener para creds.update, controlado via write queue ---
-    // Apenas um listener, definido aqui em attachSocket. O connectInternal NÃO deve
-    // adicionar outro sock.ev.on('creds.update', ...).
-    sock.ev.on('creds.update', async () => {
-      try {
-        if (sock.authState && typeof sock.authState.saveCreds === 'function') {
-          await enqueueCredsWrite(() => sock.authState.saveCreds().catch((err) => {
-            log.warn && log.warn('Erro ao salvar credenciais:', err.message);
-          }));
-        }
-      } catch (e) {
-        log.warn && log.warn('Erro no creds.update handler:', e.message);
-      }
+    // EXATAMENTE UM listener creds.update — via queue, sem catch interno.
+    sock.ev.on('creds.update', () => {
+      enqueueCredsWrite(() => sock.authState.saveCreds());
     });
 
     sock.ev.on('connection.update', async (update) => {
+      // Socket antigo não pode alterar estado novo.
+      if (localGeneration !== state.socketGeneration) return;
+      if (state.shuttingDown) return;
       const { connection, lastDisconnect, qr } = update || {};
       if (qr) setQr(qr);
       if (connection === 'connecting') {
         if (state.status !== STATES.QR_REQUIRED) setStatus(STATES.CONNECTING);
       } else if (connection === 'open') {
-        // Conexão aberta: limpar QR, zerar tentativas, persistir, marcar registered
+        // Ordem: 1 limpar QR; 2 limpar timer; 3 zerar attempts; 4 registered=true;
+        // 5 await saveCreds pela queue; 6 somente depois CONNECTED.
         setQr(null);
-        state.reconnectAttempts = 0;
         clearReconnectTimer();
-        // Persistir auth state imediatamente
-        if (sock.authState && typeof sock.authState.saveCreds === 'function') {
-          try {
-            await sock.authState.saveCreds().catch((e) => {
-              log.warn && log.warn('Falha ao persistir creds após connect open:', e.message);
-            });
-          } catch (e) {
-            log.warn && log.warn('Falha crítica ao persistir creds:', e.message);
+        state.reconnectAttempts = 0;
+        try {
+          if (sock.authState && sock.authState.creds) {
+            sock.authState.creds.registered = true;
           }
+          if (sock.authState && typeof sock.authState.saveCreds === 'function') {
+            await enqueueCredsWrite(() => sock.authState.saveCreds());
+          }
+        } catch (e) {
+          // Persistência falhou: NÃO fingir CONNECTED.
+          log.warn && log.warn('Falha ao persistir creds no open; nao marcando CONNECTED:', e.message);
+          setStatus(STATES.ERROR, 'persist_failed');
+          scheduleReconnect();
+          return;
         }
+        if (localGeneration !== state.socketGeneration) return;
         setStatus(STATES.CONNECTED);
       } else if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const boomCode = lastDisconnect?.error?.output?.statusCode
+          ?? lastDisconnect?.error?.statusCode
+          ?? lastDisconnect?.statusCode;
+        const code = statusCode ?? boomCode;
         setQr(null);
-        const loggedOut = DisconnectReason && statusCode === DisconnectReason.loggedOut;
+        const loggedOut = DisconnectReason && code === DisconnectReason.loggedOut;
+        const forbidden = DisconnectReason && code === DisconnectReason.forbidden;
+        const replaced = DisconnectReason && code === DisconnectReason.connectionReplaced;
         if (loggedOut) {
+          await flushCredsWrites().catch(() => {});
           try { await authStore.clear(); } catch (_) {}
           state.reconnectAttempts = 0;
           setStatus(STATES.LOGGED_OUT);
-        } else {
-          scheduleReconnect();
+          return;
         }
+        if (forbidden) {
+          // Sem loop, sem apagar auth cegamente.
+          state.reconnectAttempts = 0;
+          setStatus(STATES.ERROR, 'forbidden');
+          return;
+        }
+        if (replaced) {
+          // Sem reconnect; encerra socket local.
+          try { if (state.sock && typeof state.sock.end === 'function') state.sock.end(); } catch (_) {}
+          state.reconnectAttempts = 0;
+          setStatus(STATES.DISCONNECTED, 'connection_replaced');
+          return;
+        }
+        setStatus(STATES.DISCONNECTED, code ? `disconnect_${code}` : 'disconnected');
+        scheduleReconnect();
       }
     });
   }
 
   async function connectInternal({ reason } = {}) {
+    if (state.shuttingDown) {
+      throw new Error('Servico em shutdown; novos connects bloqueados.');
+    }
     if (state.connecting) return publicStatus();
     if (!baileys) throw new Error('Baileys indisponivel.');
     state.connecting = true;
     clearReconnectTimer();
     setStatus(STATES.CONNECTING);
+    // Cada novo socket: generation++.
+    state.socketGeneration += 1;
+    const localGeneration = state.socketGeneration;
     try {
       const { state: authState, saveCreds, registered } = await authStore.loadBaileysAuthState();
-      // Aplicar safeAuthStateObj para garantir compatibilidade de tipos após restore
       const safeCreds = authStore.safeAuthStateObj ? authStore.safeAuthStateObj(authState) : authState;
       const { createSocket } = socketFactory || require('./socketFactory');
       let loggerLib = null;
       try { loggerLib = require('pino')({ level: 'silent' }); } catch (_) { loggerLib = null; }
       const sock = createSocket({ baileys, authState: safeCreds, logger: loggerLib });
-      sock.authState = { saveCreds };
-      // NÃO adicionar sock.ev.on('creds.update', saveCreds) aqui - ja foi feito em attachSocket()
-      // abaixo. Apenas garantir que o socket esteja conectado.
-      await attachSocket(sock);
+      sock.authState = { saveCreds, creds: safeCreds.creds };
+      await attachSocket(sock, localGeneration);
       if (registered) log.info && log.info('Sessao registrada encontrada; tentando restaurar.');
       return publicStatus();
     } catch (e) {
+      if (localGeneration !== state.socketGeneration) throw e;
       setStatus(STATES.ERROR, 'connect_failed');
       scheduleReconnect();
       throw e;
@@ -214,11 +261,14 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
 
   async function logout() {
     clearReconnectTimer();
+    // Invalida geração: sockets antigos não alteram mais o estado.
+    state.socketGeneration += 1;
     try {
       if (state.sock && typeof state.sock.logout === 'function') {
         await state.sock.logout().catch(() => {});
       }
     } finally {
+      await flushCredsWrites().catch(() => {});
       try { await authStore.clear(); } catch (_) {}
       try { if (state.sock && typeof state.sock.end === 'function') state.sock.end(); } catch (_) {}
       state.sock = null;
@@ -226,6 +276,16 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
       state.reconnectAttempts = 0;
       setStatus(STATES.LOGGED_OUT);
     }
+    return publicStatus();
+  }
+
+  async function shutdown() {
+    // Shutdown NÃO é logout: nunca chama logout nem authStore.clear.
+    state.shuttingDown = true;
+    clearReconnectTimer();
+    state.socketGeneration += 1;
+    await flushCredsWrites().catch(() => {});
+    try { if (state.sock && typeof state.sock.end === 'function') state.sock.end(); } catch (_) {}
     return publicStatus();
   }
 
@@ -295,21 +355,25 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
 
   async function defaultSender({ recipient, text }) {
     const jid = `${recipient}@s.whatsapp.net`;
-    try {
-      if (typeof state.sock.onWhatsApp === 'function') {
-        const check = await state.sock.onWhatsApp(jid);
-        // CORREÇÃO: Apenas aceita entry.exists === true como prova.
-        // Não considere JID presente como prova automática.
-        const exists = Array.isArray(check) ? check.some((c) => c && c.exists === true) : false;
-        if (!exists) {
-          const err = new Error('Destinatario nao possui WhatsApp.');
-          err.code = 'recipient_not_on_whatsapp';
-          err.httpStatus = 400;
-          throw err;
-        }
+    if (typeof state.sock.onWhatsApp === 'function') {
+      let check;
+      try {
+        check = await state.sock.onWhatsApp(jid);
+      } catch (e) {
+        // Falha técnica no lookup: não continuar para sendMessage.
+        const err = new Error('Falha tecnica ao verificar destinatario.');
+        err.code = 'recipient_check_failed';
+        err.httpStatus = 502;
+        err.cause = e;
+        throw err;
       }
-    } catch (e) {
-      if (e && e.httpStatus === 400) throw e;
+      const exists = Array.isArray(check) ? check.some((c) => c && c.exists === true) : false;
+      if (!exists) {
+        const err = new Error('Destinatario nao possui WhatsApp.');
+        err.code = 'recipient_not_on_whatsapp';
+        err.httpStatus = 400;
+        throw err;
+      }
     }
     const sent = await state.sock.sendMessage(jid, { text });
     const messageId = sent?.key?.id || null;
@@ -321,20 +385,35 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     setStatus(STATES.CONNECTED);
   }
   function _setStatusForTest(s) { setStatus(s); }
-  function _debug() { return { status: state.status, hasQr: !!state.qr, seen: state.seenRequests.size }; }
+  function _debug() {
+    return {
+      status: state.status,
+      hasQr: !!state.qr,
+      seen: state.seenRequests.size,
+      generation: state.socketGeneration,
+      reconnectAttempts: state.reconnectAttempts,
+      queue: state.credsWriteQueue.length,
+      shuttingDown: state.shuttingDown,
+    };
+  }
 
   return {
     STATES,
     connect,
     connectInternal,
     logout,
+    shutdown,
     getQr,
     publicStatus,
     sendText,
+    enqueueCredsWrite,
+    flushCredsWrites,
+    backoffDelay,
+    scheduleReconnect,
     restoreIfRegistered: async () => {
       try {
         const loaded = await authStore.loadBaileysAuthState();
-        if (loaded && loaded.registered && baileys) {
+        if (loaded && loaded.registered && baileys && !state.shuttingDown) {
           await connectInternal({ reason: 'boot-restore' });
         }
       } catch (_) {}
@@ -343,11 +422,10 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     _injectSocket,
     _setStatusForTest,
     _debug,
-    // Expor funções auxiliares para testes
     isValidRecipient,
     isValidRequestId,
+    _state: state,
   };
 }
 
-// Exportar no nível do módulo para testes e compatibilidade
 module.exports = { createSessionManager, STATES, isValidRecipient, isValidRequestId };

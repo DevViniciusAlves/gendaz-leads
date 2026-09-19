@@ -81,8 +81,7 @@ public class BaileysWhatsAppProvider implements WhatsAppServiceProvider {
         } catch (HttpStatusCodeException e) {
             throw mapNodeError(e, operation);
         } catch (ResourceAccessException e) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "WHATSAPP_SERVICE_UNREACHABLE",
-                    "Servico WhatsApp inacessivel. Verifique se o whatsapp-service esta no ar.");
+            throw mapNetworkError(e, operation);
         }
     }
 
@@ -93,9 +92,46 @@ public class BaileysWhatsAppProvider implements WhatsAppServiceProvider {
         } catch (HttpStatusCodeException e) {
             throw mapNodeError(e, operation);
         } catch (ResourceAccessException e) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "WHATSAPP_SERVICE_UNREACHABLE",
-                    "Servico WhatsApp inacessivel. Verifique se o whatsapp-service esta no ar.");
+            throw mapNetworkError(e, operation);
         }
+    }
+
+    ApiException mapNetworkError(ResourceAccessException e, String operation) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        String rootName = root.getClass().getName();
+        String msg = root.getMessage() == null ? "" : root.getMessage().toLowerCase(java.util.Locale.ROOT);
+        // ConnectException / connect timeout / UnknownHost / NoRouteToHost → falha de conexão.
+        if (root instanceof java.net.ConnectException
+                || root instanceof java.net.UnknownHostException
+                || root instanceof java.net.NoRouteToHostException
+                || (root instanceof java.net.SocketTimeoutException && msg.contains("connect"))) {
+            log.warn("whatsapp-service connect failed na operacao {} errorType={}", operation, root.getClass().getSimpleName());
+            return new ApiException(HttpStatus.BAD_GATEWAY, "WHATSAPP_SERVICE_CONNECT_FAILED",
+                    "Falha ao conectar no servico WhatsApp. Verifique se o whatsapp-service esta no ar.");
+        }
+        // SocketTimeout READ após request enviado → read timeout.
+        if (root instanceof java.net.SocketTimeoutException || rootName.contains("SocketTimeout")) {
+            log.warn("whatsapp-service read timeout na operacao {} errorType={}", operation, root.getClass().getSimpleName());
+            return new ApiException(HttpStatus.GATEWAY_TIMEOUT, "WHATSAPP_READ_TIMEOUT",
+                    "Tempo esgotado aguardando resposta do servico WhatsApp.");
+        }
+        if (msg.contains("connection refused") || msg.contains("connection reset")
+                || msg.contains("failed to connect") || msg.contains("connect timed out")) {
+            log.warn("whatsapp-service connect failed na operacao {} errorType={}", operation, root.getClass().getSimpleName());
+            return new ApiException(HttpStatus.BAD_GATEWAY, "WHATSAPP_SERVICE_CONNECT_FAILED",
+                    "Falha ao conectar no servico WhatsApp. Verifique se o whatsapp-service esta no ar.");
+        }
+        if (msg.contains("read timed out") || msg.contains("read timeout")) {
+            log.warn("whatsapp-service read timeout na operacao {} errorType={}", operation, root.getClass().getSimpleName());
+            return new ApiException(HttpStatus.GATEWAY_TIMEOUT, "WHATSAPP_READ_TIMEOUT",
+                    "Tempo esgotado aguardando resposta do servico WhatsApp.");
+        }
+        log.warn("whatsapp-service inacessivel na operacao {} errorType={}", operation, root.getClass().getSimpleName());
+        return new ApiException(HttpStatus.BAD_GATEWAY, "WHATSAPP_SERVICE_CONNECT_FAILED",
+                "Servico WhatsApp inacessivel. Verifique se o whatsapp-service esta no ar.");
     }
 
     ApiException mapNodeError(HttpStatusCodeException e, String operation) {
@@ -103,9 +139,16 @@ public class BaileysWhatsAppProvider implements WhatsAppServiceProvider {
         return switch (nodeError) {
             case "recipient_not_on_whatsapp" -> new ApiException(HttpStatus.BAD_REQUEST,
                     "RECIPIENT_NOT_ON_WHATSAPP", "Destinatario nao possui conta WhatsApp.");
-            case "invalid_recipient", "invalid_text", "text_too_long", "invalid_request_id" ->
-                    new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_" + nodeError.toUpperCase(),
-                            "Requisicao invalida para o WhatsApp (" + nodeError + ").");
+            case "recipient_check_failed" -> new ApiException(HttpStatus.BAD_GATEWAY,
+                    "WHATSAPP_RECIPIENT_CHECK_FAILED", "Falha ao verificar destinatario no WhatsApp.");
+            case "invalid_recipient" -> new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_RECIPIENT",
+                    "Requisicao invalida para o WhatsApp (invalid_recipient).");
+            case "invalid_text" -> new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_TEXT",
+                    "Requisicao invalida para o WhatsApp (invalid_text).");
+            case "text_too_long" -> new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_TEXT_TOO_LONG",
+                    "Requisicao invalida para o WhatsApp (text_too_long).");
+            case "invalid_request_id" -> new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_REQUEST_ID",
+                    "Requisicao invalida para o WhatsApp (invalid_request_id).");
             case "invalid_session_id" -> new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_SESSION",
                     "Sessao WhatsApp invalida.");
             case "session_not_connected" -> new ApiException(HttpStatus.CONFLICT, "WHATSAPP_NOT_CONNECTED",

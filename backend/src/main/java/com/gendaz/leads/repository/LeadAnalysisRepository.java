@@ -7,4 +7,5 @@ public interface LeadAnalysisRepository extends JpaRepository<LeadAnalysis, Long
     boolean existsByLeadId(Long leadId);
     void deleteByLeadId(Long leadId);
     java.util.Optional<LeadAnalysis> findByLeadId(Long leadId);
+    java.util.List<LeadAnalysis> findByLeadIdIn(java.util.Collection<Long> leadIds);
 }

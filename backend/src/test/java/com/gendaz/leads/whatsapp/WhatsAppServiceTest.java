@@ -22,7 +22,7 @@ class WhatsAppServiceTest {
         ApiException ex = assertThrows(ApiException.class,
                 () -> service.sendText("abc-def", "ola", "req-1"));
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-        assertEquals("INVALID_RECIPIENT", ex.getCode());
+        assertEquals("WHATSAPP_INVALID_RECIPIENT", ex.getCode());
     }
 
     @Test
@@ -32,7 +32,7 @@ class WhatsAppServiceTest {
         ApiException ex = assertThrows(ApiException.class,
                 () -> service.sendText("5565999999999", "   ", "req-1"));
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-        assertEquals("INVALID_TEXT", ex.getCode());
+        assertEquals("WHATSAPP_INVALID_TEXT", ex.getCode());
     }
 
     @Test
@@ -42,7 +42,7 @@ class WhatsAppServiceTest {
         ApiException ex = assertThrows(ApiException.class,
                 () -> service.sendText("5565999999999", "x".repeat(4001), "req-1"));
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-        assertEquals("TEXT_TOO_LONG", ex.getCode());
+        assertEquals("WHATSAPP_TEXT_TOO_LONG", ex.getCode());
     }
 
     @Test

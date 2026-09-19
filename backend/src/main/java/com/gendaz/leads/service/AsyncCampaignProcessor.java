@@ -69,6 +69,11 @@ public class AsyncCampaignProcessor {
             discoverStage(campaign);
             analyzeStage(campaign);
             finalizeCampaign(campaign);
+        } catch (ApiException e) {
+            log.error("Erro no processamento da campanha {}: {} ({})", campaignId, e.getMessage(), e.getCode(), e);
+            campaign.setStatus("FAILED");
+            campaign.setErrorMessage(truncate(e.getMessage()));
+            campaignRepository.save(campaign);
         } catch (Exception e) {
             log.error("Erro no processamento da campanha {}: {}", campaignId, e.getMessage(), e);
             campaign.setStatus("FAILED");
@@ -116,19 +121,24 @@ public class AsyncCampaignProcessor {
         totalBudget = Math.min(totalBudget, 200);
 
         List<LeadCandidate> candidates = new ArrayList<>();
-        boolean providerFailed = false;
-        String providerErrorMessage = null;
-        
+
         try {
             if (openStreetMapProvider.isEnabled()) {
                 candidates.addAll(openStreetMapProvider.discover(campaign.getNiche(), campaign.getLocation(), totalBudget));
             } else {
                 log.warn("OpenStreetMapProvider nao esta habilitado para campanha {}", campaign.getId());
             }
+        } catch (ApiException e) {
+            // Provider falhou (erro tipado): propaga para processCampaign marcar FAILED
+            // com errorMessage correto. NAO executa finalizeCampaign normal.
+            log.warn("Provider {} falhou: {} ({})", openStreetMapProvider.getName(), e.getMessage(), e.getCode());
+            throw e;
         } catch (RuntimeException e) {
             log.warn("Provider {} falhou: {}", openStreetMapProvider.getName(), e.getMessage());
-            providerFailed = true;
-            providerErrorMessage = e.getMessage();
+            throw new ApiException(
+                    org.springframework.http.HttpStatus.BAD_GATEWAY,
+                    "OSM_OVERPASS_ERROR",
+                    e.getMessage() != null ? e.getMessage() : "Falha ao consultar OpenStreetMap/Overpass.");
         }
 
         Set<String> batchSeen = new LinkedHashSet<>();
@@ -163,15 +173,8 @@ public class AsyncCampaignProcessor {
         }
         campaign.setDiscoveredCount(discovered);
         campaignRepository.save(campaign);
-
-        // If provider failed and no candidates were discovered, mark as failed early
-        if (providerFailed && discovered == 0) {
-            campaign.setStatus("FAILED");
-            campaign.setErrorMessage(providerErrorMessage != null ? providerErrorMessage : "Falha ao consultar OpenStreetMap/Overpass.");
-            campaignRepository.save(campaign);
-            log.info("Campanha {} finalizada com falha no provider: {}", campaign.getId(), campaign.getErrorMessage());
-            return;
-        }
+        // Zero real do provider (sem exception): segue para analyze/finalize,
+        // que marcara "Nenhum lead encontrado para os parametros informados."
     }
 
     private void analyzeStage(Campaign campaign) {

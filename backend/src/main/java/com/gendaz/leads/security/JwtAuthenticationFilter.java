@@ -46,7 +46,15 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         }
 
         if (email != null && SecurityContextHolder.getContext().getAuthentication() == null) {
-            UserDetails userDetails = userDetailsService.loadUserByUsername(email);
+            UserDetails userDetails;
+            try {
+                userDetails = userDetailsService.loadUserByUsername(email);
+            } catch (RuntimeException e) {
+                // Usuário removido/desabilitado ou falha técnica: segue sem autenticação.
+                // O SecurityConfig/entry point responde 401 sem vazar detalhes.
+                filterChain.doFilter(request, response);
+                return;
+            }
             if (jwtService.isTokenValid(token, userDetails)) {
                 UsernamePasswordAuthenticationToken authToken = new UsernamePasswordAuthenticationToken(
                         userDetails, null, userDetails.getAuthorities());

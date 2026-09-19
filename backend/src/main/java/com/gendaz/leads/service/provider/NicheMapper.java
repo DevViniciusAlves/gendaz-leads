@@ -1,5 +1,6 @@
 package com.gendaz.leads.service.provider;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -99,8 +100,11 @@ public final class NicheMapper {
         String key = normalizeKey(niche);
         List<String> tags = ALIAS_TO_TAGS.get(key);
         if (tags == null) {
-            // tenta match parcial: se a chave contem um alias conhecido, usa aquelas tags
-            for (Map.Entry<String, List<String>> e : ALIAS_TO_TAGS.entrySet()) {
+            // Match parcial deterministico: prefere alias mais especifico/mais longo.
+            // Nao usa iteracao aleatoria de HashMap.
+            List<Map.Entry<String, List<String>>> entries = new ArrayList<>(ALIAS_TO_TAGS.entrySet());
+            entries.sort((a, b) -> Integer.compare(b.getKey().length(), a.getKey().length()));
+            for (Map.Entry<String, List<String>> e : entries) {
                 if (!e.getKey().isBlank() && key.contains(e.getKey())) {
                     tags = e.getValue();
                     break;
@@ -108,7 +112,7 @@ public final class NicheMapper {
             }
         }
         if (tags == null) tags = List.of();
-        return new NicheStrategy(tags, sanitizeForRegex(niche));
+        return new NicheStrategy(tags, fallbackRegexFor(niche, key, tags));
     }
 
     /**
@@ -126,5 +130,16 @@ public final class NicheMapper {
         // Nao usa Pattern.quote. Para texto literal no Overpass, usar aliases
         // explicitos quando possivel. Aqui apenas limpamos para uso seguro.
         return s;
+    }
+
+    private static String fallbackRegexFor(String niche, String key, List<String> tags) {
+        // Barbearia: fallback por nome cobre barbearia/barber/barbershop.
+        // Nao tratar qualquer hairdresser como barbearia: tags estruturadas ja distinguem
+        // (shop=barber e hairdresser=barber), o regex aqui e apenas fallback por nome.
+        if (tags != null && (tags.contains("shop=barber")
+                || tags.contains("shop=hairdresser,hairdresser=barber"))) {
+            return "barbearia|barber|barbershop";
+        }
+        return sanitizeForRegex(niche);
     }
 }

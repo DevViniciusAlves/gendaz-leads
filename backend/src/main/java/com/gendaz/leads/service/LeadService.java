@@ -60,12 +60,14 @@ public class LeadService {
     private final LeadAnalysisService leadAnalysisService;
     private final LeadMapper leadMapper;
     private final SecurityService securityService;
+    private final CampaignCounterService counterService;
 
     public LeadService(LeadRepository leadRepository, LeadMessageRepository leadMessageRepository,
                        LeadAnalysisRepository leadAnalysisRepository, CampaignLeadRepository campaignLeadRepository,
                        CampaignRepository campaignRepository, MessageSendRepository messageSendRepository,
                        LeadEventRepository leadEventRepository, UserRepository userRepository,
-                       LeadAnalysisService leadAnalysisService, LeadMapper leadMapper, SecurityService securityService) {
+                       LeadAnalysisService leadAnalysisService, LeadMapper leadMapper, SecurityService securityService,
+                       CampaignCounterService counterService) {
         this.leadRepository = leadRepository;
         this.leadMessageRepository = leadMessageRepository;
         this.leadAnalysisRepository = leadAnalysisRepository;
@@ -77,6 +79,7 @@ public class LeadService {
         this.leadAnalysisService = leadAnalysisService;
         this.leadMapper = leadMapper;
         this.securityService = securityService;
+        this.counterService = counterService;
     }
 
     private Long currentUserId() {
@@ -252,28 +255,7 @@ public class LeadService {
     }
 
     private void recountCampaign(Long campaignId) {
-        if (campaignId == null) return;
-        Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
-        if (campaign == null) return;
-        List<Lead> leads = leadRepository.findByCampaign(campaignId);
-        int approved = 0, sent = 0, replied = 0, interested = 0, converted = 0, blocked = 0, messages = 0;
-        for (Lead l : leads) {
-            if (l.isDoNotContact()) blocked++;
-            if (MESSAGE_READY_LIKE.contains(l.getStatus())) messages++;
-            if (List.of("APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED").contains(l.getStatus())) approved++;
-            if (List.of("SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED").contains(l.getStatus())) sent++;
-            if (List.of("REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED").contains(l.getStatus())) replied++;
-            if (List.of("INTERESTED", "SCHEDULED", "CONVERTED").contains(l.getStatus())) interested++;
-            if ("CONVERTED".equals(l.getStatus())) converted++;
-        }
-        campaign.setApprovedCount(approved);
-        campaign.setSentCount(sent);
-        campaign.setRepliedCount(replied);
-        campaign.setInterestedCount(interested);
-        campaign.setConvertedCount(converted);
-        campaign.setBlockedCount(blocked);
-        campaign.setMessageCount(messages);
-        campaignRepository.save(campaign);
+        counterService.recount(campaignId);
     }
 
     public LeadResponse toResponse(Lead lead) {

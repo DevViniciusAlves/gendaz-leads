@@ -45,13 +45,6 @@ export function AppShell({ children }) {
           <IconChat />
           WhatsApp
         </NavLink>
-        <NavLink
-          to="/templates"
-          className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}
-        >
-          <IconLeads />
-          Templates
-        </NavLink>
       </aside>
       <div className="main">
         <header className="topbar">

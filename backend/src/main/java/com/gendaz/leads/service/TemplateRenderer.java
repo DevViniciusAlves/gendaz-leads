@@ -21,6 +21,9 @@ public class TemplateRenderer {
         if (templateText == null || templateText.isBlank()) {
             throw new IllegalArgumentException("O template não pode ser vazio.");
         }
+        if (templateText.length() > MAX_LENGTH) {
+            throw new IllegalArgumentException("Template excede o limite de " + MAX_LENGTH + " caracteres.");
+        }
 
         Matcher matcher = VAR_PATTERN.matcher(templateText);
         while (matcher.find()) {

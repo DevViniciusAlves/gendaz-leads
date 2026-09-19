@@ -12,9 +12,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
 import java.util.*;
 
 @Component
@@ -76,26 +80,23 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     public List<LeadCandidate> discover(String niche, String location, int limit) {
         if (!isEnabled()) return List.of();
         log.info("[osm] discovery_started niche={} location={} requested={}", niche, location, limit);
-        
-        Geo geo = geocode(location);
-        if (geo == null) {
-            log.warn("Nao foi possivel geocodificar: {}", location);
-            return List.of();
-        }
+
+        Geo geo = geocodeOrThrow(location);
         log.info("[osm] geocode_success=true bbox_source={}", geo.bboxValid ? "nominatim" : "fallback");
 
         String query = buildOverpassQuery(niche, geo, limit);
-        
+
         List<String> endpoints = new ArrayList<>();
         endpoints.add(overpassUrl);
         if (fallbackUrl != null && !fallbackUrl.isBlank()) {
             endpoints.add(fallbackUrl);
         }
 
+        Exception lastFailure = null;
         for (int i = 0; i < endpoints.size(); i++) {
             String url = endpoints.get(i);
             boolean isFallback = (i > 0);
-            
+
             for (int attempt = 1; attempt <= 3; attempt++) {
                 try {
                     log.info("[osm] overpass_attempt={} endpoint={}", attempt, url);
@@ -108,9 +109,10 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
                     JsonNode root = objectMapper.readTree(response);
                     JsonNode elements = root.path("elements");
-                    if (elements.isMissingNode() || !elements.isArray()) {
+                    if (elements.isMissingNode() || !elements.isArray() || elements.isEmpty()) {
+                        // Overpass 200 + elements=[]: resultado valido zero. Sem fallback.
                         log.info("[osm] discovery_finished returned=0");
-                        return List.of(); // Zero results is valid
+                        return List.of();
                     }
 
                     log.info("[osm] elements_received={}", elements.size());
@@ -125,25 +127,60 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                     }
                     log.info("[osm] candidates_after_dedupe={} discovery_finished returned={}", byKey.size(), byKey.size());
                     return new ArrayList<>(byKey.values());
-                    
+
                 } catch (RestClientException | java.io.IOException e) {
-                    log.warn("[osm] overpass_failed attempt={} errorType={}", attempt, e.getClass().getSimpleName());
-                    if (attempt == 3) {
-                        if (!isFallback && endpoints.size() > 1) {
-                            log.info("[osm] fallback_endpoint=true");
-                        }
-                    } else {
-                        try { Thread.sleep(1000 * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    lastFailure = e;
+                    boolean retryable = isRetryable(e);
+                    log.warn("[osm] overpass_failed attempt={} errorType={} retryable={}", attempt, e.getClass().getSimpleName(), retryable);
+                    if (!retryable) break; // falha definitiva: nao insistir neste endpoint
+                    if (attempt < 3) {
+                        sleepBackoff(attempt);
                     }
                 }
             }
+            // Fallback endpoint somente apos falha real do primary (nao em zero valido, que ja retornou).
+            if (!isFallback && endpoints.size() > 1 && lastFailure != null) {
+                log.info("[osm] fallback_endpoint=true");
+            }
+            if (isFallback || endpoints.size() == 1) {
+                break;
+            }
+            // Se primary falhou mas existe fallback, continua o loop para tentar o fallback.
+            if (lastFailure == null) break;
         }
-        
-        throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_ERROR", "Falha ao obter leads após retentativas.");
+
+        throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_OVERPASS_ERROR",
+                "Falha ao consultar Overpass após retentativas.");
     }
 
-    private Geo geocode(String location) {
-        for (int i = 0; i < 3; i++) {
+    static boolean isRetryable(Exception e) {
+        if (e instanceof HttpStatusCodeException http) {
+            int v = http.getStatusCode().value();
+            return v == 429 || v == 502 || v == 503 || v == 504;
+        }
+        if (e instanceof ResourceAccessException) {
+            // connect timeout / read timeout / conexao recusada: retry.
+            // Read timeout apos POST sera classificado como AMBIGUOUS no envio,
+            // mas na descoberta ainda vale retry limitado.
+            return true;
+        }
+        Throwable t = e;
+        while (t != null) {
+            if (t instanceof ConnectException || t instanceof SocketTimeoutException) return true;
+            t = t.getCause();
+        }
+        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+        return msg.contains("timed out") || msg.contains("timeout") || msg.contains("connect")
+                || msg.contains("429") || msg.contains("502") || msg.contains("503") || msg.contains("504");
+    }
+
+    private void sleepBackoff(int attempt) {
+        try { Thread.sleep(1000L * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+    }
+
+    private Geo geocodeOrThrow(String location) {
+        Exception lastFailure = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
             try {
                 String response = client().get()
                         .uri(uriBuilder -> uriBuilder
@@ -156,39 +193,56 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                         .retrieve()
                         .body(String.class);
                 JsonNode arr = objectMapper.readTree(response);
-                if (!arr.isArray() || arr.isEmpty()) return null;
-                
+                // Nominatim 200 + []: LOCATION_NOT_FOUND.
+                if (!arr.isArray() || arr.isEmpty()) {
+                    throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND",
+                            "Local não encontrado: " + location);
+                }
+
                 JsonNode hit = arr.get(0);
                 double lat = hit.path("lat").asDouble(Double.NaN);
                 double lon = hit.path("lon").asDouble(Double.NaN);
-                if (Double.isNaN(lat) || Double.isNaN(lon)) return null;
-                
+                if (Double.isNaN(lat) || Double.isNaN(lon)) {
+                    throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND",
+                            "Local não encontrado: " + location);
+                }
+
                 JsonNode address = hit.path("address");
                 String city = firstPresent(address, "city", "town", "village", "municipality");
                 String state = address.path("state").asText(null);
                 String country = address.path("country").asText(null);
                 if (country == null || country.isBlank()) country = "BR";
-                
+
                 double south = 0, north = 0, west = 0, east = 0;
                 boolean bboxValid = false;
                 JsonNode bboxNode = hit.path("boundingbox");
                 if (bboxNode.isArray() && bboxNode.size() == 4) {
+                    // Nominatim retorna south, north, west, east.
                     south = bboxNode.get(0).asDouble();
                     north = bboxNode.get(1).asDouble();
                     west = bboxNode.get(2).asDouble();
                     east = bboxNode.get(3).asDouble();
-                    
+
                     if (south < north && west < east && (north - south) < 2.0 && (east - west) < 2.0) {
                         bboxValid = true;
                     }
                 }
-                
+
                 return new Geo(lat, lon, blankToNull(city), blankToNull(state), country, south, north, west, east, bboxValid);
-            } catch (RuntimeException | java.io.IOException e) {
-                try { Thread.sleep(1000 * (i + 1)); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            } catch (ApiException e) {
+                throw e;
+            } catch (RestClientException | java.io.IOException e) {
+                lastFailure = e;
+                if (!isRetryable(e)) {
+                    throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR",
+                            "Falha ao geocodificar local: " + location);
+                }
+                if (attempt < 3) sleepBackoff(attempt);
             }
         }
-        return null;
+        // Falha Nominatim apos retries: OSM_GEOCODE_ERROR.
+        throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR",
+                "Falha ao geocodificar local após retentativas: " + location);
     }
 
     String buildOverpassQuery(String niche, Geo geo, int limit) {

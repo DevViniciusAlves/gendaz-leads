@@ -2,6 +2,7 @@ package com.gendaz.leads.security;
 
 import com.gendaz.leads.entity.User;
 import com.gendaz.leads.repository.UserRepository;
+import com.gendaz.leads.util.EmailNormalizer;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -21,7 +22,8 @@ public class UserDetailsServiceImpl implements UserDetailsService {
 
     @Override
     public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
-        User user = userRepository.findByEmail(email)
+        String normalized = EmailNormalizer.normalizeEmail(email);
+        User user = userRepository.findByEmail(normalized)
                 .orElseThrow(() -> new UsernameNotFoundException("Usuário não encontrado"));
         return new org.springframework.security.core.userdetails.User(
                 user.getEmail(),

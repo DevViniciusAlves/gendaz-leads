@@ -76,6 +76,25 @@ public class SecurityConfig {
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint((request, response, authException) -> {
+                            response.setStatus(401);
+                            response.setContentType("application/json");
+                            response.getWriter().write(
+                                    "{\"timestamp\":\"" + java.time.Instant.now()
+                                            + "\",\"status\":401,\"code\":\"UNAUTHENTICATED\","
+                                            + "\"message\":\"Autenticação necessária.\",\"path\":\""
+                                            + request.getRequestURI() + "\"}");
+                        })
+                        .accessDeniedHandler((request, response, accessDeniedException) -> {
+                            response.setStatus(403);
+                            response.setContentType("application/json");
+                            response.getWriter().write(
+                                    "{\"timestamp\":\"" + java.time.Instant.now()
+                                            + "\",\"status\":403,\"code\":\"FORBIDDEN\","
+                                            + "\"message\":\"Acesso negado.\",\"path\":\""
+                                            + request.getRequestURI() + "\"}");
+                        }))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**", "/actuator/health", "/actuator/health/**").permitAll()
                         .anyRequest().authenticated())

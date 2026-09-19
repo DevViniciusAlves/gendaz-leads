@@ -1,16 +1,10 @@
 package com.gendaz.leads.dto.campaign;
 
-import lombok.*;
-import java.util.*;
+import java.util.List;
 
-@Getter
-@Setter
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class SendPreviewResponse {
-    private int eligibleCount;
-    private int ineligibleCount;
-    private List<PreviewItem> previews;
-    private List<String> ineligibilityReasons;
-}
+public record SendPreviewResponse(
+    int eligibleCount,
+    int ineligibleCount,
+    List<PreviewItem> previews,
+    List<IneligibleLeadResponse> ineligible
+) {}

@@ -3,11 +3,21 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
 import { useToast } from '../components/Toast.jsx'
 import { CampaignStatusBadge } from '../components/StatusBadge.jsx'
-import { IconRefresh, IconCheck } from '../components/Icons.jsx'
+import { IconRefresh } from '../components/Icons.jsx'
 import { formatDate, formatNumber } from '../format.js'
 import { Modal } from '../components/Modal.jsx'
 
 const PROCESSING = ['CREATED', 'DISCOVERING', 'ANALYZING', 'GENERATING']
+
+function sendLabel(sendStatus, eligible) {
+  if (sendStatus === 'QUEUED') return 'Na fila'
+  if (sendStatus === 'SENDING') return 'Enviando'
+  if (sendStatus === 'SENT') return 'Enviado'
+  if (sendStatus === 'FAILED') return 'Falhou'
+  if (sendStatus === 'SKIPPED') return 'Ignorado'
+  if (sendStatus === 'DELIVERY_UNKNOWN') return 'Entrega incerta'
+  return eligible ? 'Pronto' : 'Pronto'
+}
 
 export function CampaignDetail() {
   const { id } = useParams()
@@ -20,12 +30,14 @@ export function CampaignDetail() {
   const [error, setError] = useState('')
   const [retrying, setRetrying] = useState(false)
   const timer = useRef(null)
+  const queueTimer = useRef(null)
 
   // Preview Modal state
   const [showPreview, setShowPreview] = useState(false)
   const [previewData, setPreviewData] = useState(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [sending, setSending] = useState(false)
+  const [previewMode, setPreviewMode] = useState('selected')
 
   function load() {
     return api
@@ -43,11 +55,35 @@ export function CampaignDetail() {
   }
 
   function loadLeads() {
-    api.get(`/api/campaigns/${id}/messaging-leads`)
+    return api.get(`/api/campaigns/${id}/messaging-leads`)
       .then(d => {
-        setLeads(d || [])
+        const list = d || []
+        setLeads(list)
+        return list
       })
-      .catch(() => {})
+      .catch(() => [])
+  }
+
+  function stopQueuePolling() {
+    if (queueTimer.current) {
+      clearTimeout(queueTimer.current)
+      queueTimer.current = null
+    }
+  }
+
+  function scheduleQueuePolling() {
+    stopQueuePolling()
+    queueTimer.current = setTimeout(async () => {
+      queueTimer.current = null
+      const [campaign, list] = await Promise.all([load(), loadLeads()])
+      const pending = (list || []).some(
+        (l) => l.sendStatus === 'QUEUED' || l.sendStatus === 'SENDING'
+      )
+      if (pending) {
+        scheduleQueuePolling()
+      }
+      void campaign
+    }, 4500)
   }
 
   useEffect(() => {
@@ -58,15 +94,21 @@ export function CampaignDetail() {
       if (d && PROCESSING.includes(d.status)) {
         timer.current = setTimeout(run, 4000)
       } else {
-        loadLeads()
+        const list = await loadLeads()
+        if (!alive) return
+        const pending = (list || []).some(
+          (l) => l.sendStatus === 'QUEUED' || l.sendStatus === 'SENDING'
+        )
+        if (pending) scheduleQueuePolling()
       }
     }
     run()
     return () => {
       alive = false
       if (timer.current) clearTimeout(timer.current)
+      stopQueuePolling()
     }
-  }, [id, push])
+  }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function retry() {
     setRetrying(true)
@@ -90,11 +132,19 @@ export function CampaignDetail() {
   }
 
   function toggleCheckbox(leadId, eligible) {
-    if (!eligible) return;
-    const next = new Set(selectedLeads)
-    if (next.has(leadId)) next.delete(leadId)
-    else next.add(leadId)
-    setSelectedLeads(next)
+    if (!eligible) return
+    toggleLead(leadId)
+  }
+
+  function selectAllEligible() {
+    const eligibleIds = leads
+      .filter((l) => l.eligible)
+      .map((l) => l.leadId)
+    if (eligibleIds.length > 0 && selectedLeads.size === eligibleIds.length) {
+      setSelectedLeads(new Set())
+    } else {
+      setSelectedLeads(new Set(eligibleIds))
+    }
   }
 
   async function handlePreview() {
@@ -104,9 +154,11 @@ export function CampaignDetail() {
     }
     setPreviewLoading(true)
     setShowPreview(true)
+    setPreviewMode('selected')
     try {
       const res = await api.post(`/api/campaigns/${id}/send-preview`, {
-        leadIds: Array.from(selectedLeads)
+        leadIds: Array.from(selectedLeads),
+        allEligible: false
       })
       setPreviewData(res)
     } catch (err) {
@@ -120,12 +172,12 @@ export function CampaignDetail() {
   async function handleSendAllEligible() {
     setPreviewLoading(true)
     setShowPreview(true)
+    setPreviewMode('all')
     try {
       const res = await api.post(`/api/campaigns/${id}/send-preview`, {
         allEligible: true
       })
       setPreviewData(res)
-      setShowPreview(true)
     } catch (err) {
       push(err.message, 'error')
       setShowPreview(false)
@@ -137,15 +189,20 @@ export function CampaignDetail() {
   async function confirmSend() {
     setSending(true)
     try {
-      await api.post(`/api/campaigns/${id}/send`, {
-        leadIds: Array.from(selectedLeads),
-        allEligible: false
-      })
-      push('Mensagens enviadas para a fila.', 'success')
+      const body = previewMode === 'all'
+        ? { allEligible: true }
+        : { leadIds: Array.from(selectedLeads), allEligible: false }
+      await api.post(`/api/campaigns/${id}/send`, body)
+      push('Mensagens adicionadas à fila.', 'success')
       setShowPreview(false)
+      setPreviewData(null)
       setSelectedLeads(new Set())
-      loadLeads()
-      load()
+      const [campaign, list] = await Promise.all([load(), loadLeads()])
+      void campaign
+      const pending = (list || []).some(
+        (l) => l.sendStatus === 'QUEUED' || l.sendStatus === 'SENDING'
+      )
+      if (pending) scheduleQueuePolling()
     } catch (err) {
       push(err.message, 'error')
     } finally {
@@ -177,7 +234,7 @@ export function CampaignDetail() {
     ['Bloqueados', c.blockedCount]
   ]
 
-  const eligibleCount = leads.filter(l => l.eligible).length
+  const eligibleCount = leads.filter((l) => l.eligible).length
 
   return (
     <div>
@@ -246,7 +303,7 @@ export function CampaignDetail() {
         <span>Leads desta campanha</span>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-sm" onClick={selectAllEligible}>
-            Selecionar Todos Elegiveis ({eligibleCount})
+            Selecionar Todos Elegíveis ({eligibleCount})
           </button>
           <button className="btn btn-secondary btn-sm" onClick={handleSendAllEligible} disabled={eligibleCount === 0}>
             Enviar para todos elegíveis ({eligibleCount})
@@ -274,8 +331,9 @@ export function CampaignDetail() {
               </tr>
             </thead>
             <tbody>
-              {leads.map(l => {
-                const isEligible = l.eligible
+              {leads.map((l) => {
+                const isEligible = l.eligible === true
+                const local = [l.city, l.state].filter(Boolean).join('/')
                 return (
                   <tr key={l.leadId} className={isEligible ? 'clickable' : ''} onClick={() => isEligible && toggleLead(l.leadId)}>
                     <td>
@@ -289,38 +347,43 @@ export function CampaignDetail() {
                     </td>
                     <td>
                       <strong>{l.businessName}</strong>
-                    </td>
-                    <td>
-                      {l.phone !== undefined && l.phone !== null ? l.phone : '-'}
-
-                      {l.ineligibilityCode === 'NO_PHONE' && (
-                        <span className="muted" style={{ fontSize: 12, color: 'red' }}>Sem telefone</span>
+                      {l.category && (
+                        <div className="muted" style={{ fontSize: 12 }}>{l.category}</div>
                       )}
                     </td>
                     <td>
-                      {l.instagramUsername != null ? '@' + l.instagramUsername : '-'}
+                      {l.phone ? l.phone : '—'}
                     </td>
                     <td>
-                      {l.city != null || l.state != null ? (
-                        <div>
-                          {l.city != null ? l.city : ''}{' '}
-                          {l.state != null ? l.state : ''}
-                        </div>
-                      ) : '-'}
-
-                      {l.ineligibilityCode === 'DO_NOT_CONTACT' && (
-                        <span className="muted" style={{ fontSize: 12, color: 'red' }}>Não prospectar</span>
+                      {l.instagramUrl ? (
+                        <a href={l.instagramUrl} target="_blank" rel="noreferrer">
+                          @{l.instagramUsername}
+                        </a>
+                      ) : (
+                        '—'
                       )}
                     </td>
-                    <td>{l.opportunityScore != null ? String(l.opportunityScore) : '-'}</td>
+                    <td>
+                      {local ? local : '—'}
+                    </td>
+                    <td>
+                      {l.website ? (
+                        <a href={l.website} target="_blank" rel="noreferrer">
+                          {l.website}
+                        </a>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td>{l.opportunityScore != null ? String(l.opportunityScore) : '—'}</td>
                     <td>{l.detectedSystem != null ? l.detectedSystem : 'Não identificado'}</td>
                     <td>
-                      {l.sendStatus !== null && l.sendStatus !== undefined ? (
-                        <span className={"badge ".concat(getBadgeClass(l.sendStatus))}>
-                          {l.sendStatus}
+                      {l.sendStatus ? (
+                        <span className={'badge '.concat(getBadgeClass(l.sendStatus))}>
+                          {sendLabel(l.sendStatus, isEligible)}
                         </span>
                       ) : (
-                        <span className="badge badge-gray">Pronto</span>
+                        <span className="badge badge-gray">{sendLabel(null, isEligible)}</span>
                       )}
                     </td>
                   </tr>
@@ -350,27 +413,32 @@ export function CampaignDetail() {
             <div className="loading">Gerando preview...</div>
           ) : previewData ? (
             <div>
-              <p>{previewData.eligibleCount} mensagens serão adicionadas à fila.</p>
+              <p>
+                {previewData.eligibleCount} {previewData.eligibleCount === 1 ? 'mensagem será' : 'mensagens serão'} adicionada à fila.
+              </p>
               {previewData.ineligibleCount > 0 && (
-                <p>{previewData.ineligibleCount} lead será{'s' .previewData.ineligibleCount > 1 ? '' : ''} ignorado.</p>
+                <p>
+                  {previewData.ineligibleCount} {previewData.ineligibleCount === 1 ? 'lead será ignorado.' : 'leads serão ignorados.'}
+                </p>
               )}
               <div style={{ marginTop: 16, maxHeight: 300, overflowY: 'auto' }}>
                 <strong>Pré-visualização:</strong>
                 <div>
-                  {previewData.previews.map((p, idx) => (
-                    <div key={idx} style={{ marginBottom: 12, whiteSpace: 'pre-wrap' }}>
-                      <strong>{p.businessName}</strong>: {p.message}
+                  {(previewData.previews || []).map((p, idx) => (
+                    <div key={p.leadId ?? idx} style={{ marginBottom: 12, whiteSpace: 'pre-wrap' }}>
+                      <strong>{p.businessName}</strong>
+                      <div>{p.message}</div>
                     </div>
                   ))}
                 </div>
               </div>
-              {previewData.ineligible.length > 0 && (
+              {(previewData.ineligible || []).length > 0 && (
                 <div style={{ marginTop: 16, marginBottom: 12 }}>
                   <strong>Ignorados:</strong>
                   <div>
-                    {previewData.ineligible.map((i, idx) => (
-                      <div key={idx} style={{ marginBottom: 6, fontSize: 14 }}>
-                        {i.businessName} — {i.reason}
+                    {(previewData.ineligible || []).map((item, idx) => (
+                      <div key={item.leadId ?? idx} style={{ marginBottom: 6, fontSize: 14 }}>
+                        {item.businessName} — {item.reason}
                       </div>
                     ))}
                   </div>
@@ -391,21 +459,12 @@ export function CampaignDetail() {
 
 function getBadgeClass(status) {
   switch (status) {
-    case 'QUEUED': return 'badge-blue';
-    case 'SENDING': return 'badge-orange';
-    case 'SENT': return 'badge-green';
-    case 'FAILED': return 'badge-red';
-    case 'SKIPPED': return 'badge-gray';
-    case 'DELIVERY_UNKNOWN': return 'badge-orange';
-    default: return 'badge-gray';
-  }
-}
-
-function selectAllEligible() {
-  const eligibleIds = leads.filter(l => l.eligible).map(l => l.leadId)
-  if (selectedLeads.size === eligibleIds.length) {
-    setSelectedLeads(new Set())
-  } else {
-    setSelectedLeads(new Set(eligibleIds))
+    case 'QUEUED': return 'badge-blue'
+    case 'SENDING': return 'badge-orange'
+    case 'SENT': return 'badge-green'
+    case 'FAILED': return 'badge-red'
+    case 'SKIPPED': return 'badge-gray'
+    case 'DELIVERY_UNKNOWN': return 'badge-orange'
+    default: return 'badge-gray'
   }
 }

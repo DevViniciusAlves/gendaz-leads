@@ -1,33 +1,27 @@
 package com.gendaz.leads.dto.campaign;
 
-import lombok.*;
 import java.time.Instant;
 
-@Getter
-@Setter
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class CampaignMessagingLeadResponse {
-    private Long leadId;
-    private String businessName;
-    private String category;
-    private String instagramUsername;
-    private String instagramUrl;
-    private String phone;
-    private String city;
-    private String state;
-    private String website;
-    private Integer opportunityScore;
-    private String detectedSystem;
-    private String leadStatus;
-    private boolean eligible;
-    private String ineligibilityCode;
-    private String ineligibilityReason;
-    private Long messageSendId;
-    private String sendStatus;
-    private Integer attempts;
-    private Instant queuedAt;
-    private Instant sentAt;
-    private String errorCode;
-}
+public record CampaignMessagingLeadResponse(
+    Long leadId,
+    String businessName,
+    String category,
+    String instagramUsername,
+    String instagramUrl,
+    String phone,
+    String city,
+    String state,
+    String website,
+    Integer opportunityScore,
+    String detectedSystem,
+    String leadStatus,
+    boolean eligible,
+    String ineligibilityCode,
+    String ineligibilityReason,
+    Long messageSendId,
+    String sendStatus,
+    Integer attempts,
+    Instant queuedAt,
+    Instant sentAt,
+    String errorCode
+) {}

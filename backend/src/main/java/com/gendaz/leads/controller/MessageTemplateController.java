@@ -1,11 +1,13 @@
 package com.gendaz.leads.controller;
 
+import com.gendaz.leads.dto.template.MessageTemplateResponse;
+import com.gendaz.leads.dto.template.UpdateMessageTemplateRequest;
 import com.gendaz.leads.entity.MessageTemplate;
 import com.gendaz.leads.service.TemplateService;
+import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import jakarta.validation.*;
 import java.util.List;
 
 @RestController
@@ -19,19 +21,17 @@ public class MessageTemplateController {
     }
 
     @GetMapping("/default")
-    public ResponseEntity<MessageTemplate> getDefault() {
+    public ResponseEntity<MessageTemplateResponse> getDefault() {
         return templateService.findDefault()
-                .map(ResponseEntity::ok)
+                .map(t -> ResponseEntity.ok(toResponse(t)))
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     @PutMapping("/default")
-    public ResponseEntity<MessageTemplate> setDefault(@RequestBody MessageTemplate template) {
-        MessageTemplate saved = templateService.save(template);
-        if (saved.isDefault()) {
-            templateService.setDefault(saved.getId());
-        }
-        return ResponseEntity.ok(saved);
+    public ResponseEntity<MessageTemplateResponse> putDefault(
+            @Valid @RequestBody UpdateMessageTemplateRequest request) {
+        MessageTemplate saved = templateService.upsertDefault(request.name(), request.templateText());
+        return ResponseEntity.ok(toResponse(saved));
     }
 
     @PostMapping
@@ -49,5 +49,10 @@ public class MessageTemplateController {
         return templateService.findById(id)
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    private MessageTemplateResponse toResponse(MessageTemplate t) {
+        return new MessageTemplateResponse(
+                t.getId(), t.getName(), t.getTemplateText(), t.isDefault(), t.getUpdatedAt());
     }
 }

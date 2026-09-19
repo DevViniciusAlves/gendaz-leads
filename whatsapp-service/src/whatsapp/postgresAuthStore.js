@@ -93,8 +93,9 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey, logger }) {
           }
           await client.query('COMMIT');
         } catch (err) {
-          await client.query('ROLLBACK');
+          try { await client.query('ROLLBACK'); } catch (_) {}
           log.warn && log.warn('Failed to save keys, rolled back:', err.message);
+          throw err;
         } finally {
           client.release();
         }
@@ -105,10 +106,17 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey, logger }) {
       await writeSession(stateCreds, !!stateCreds.registered);
     };
 
-    return { state: { creds: stateCreds, keys }, saveCreds, registered };
+    return { state: { creds: stateCreds, keys }, saveCreds, registered, safeAuthStateObj };
   }
 
-  return { readSession, writeSession, clear, loadBaileysAuthState, pool: db };
+  // Compatibilidade de tipos após restore (Baileys espera objetos WAProto).
+  // Aqui apenas garante passthrough; a conversão específica de app-state-sync-key
+  // ocorre no keys.get via WAProto.Message.AppStateSyncKeyData.fromObject.
+  function safeAuthStateObj(authState) {
+    return authState;
+  }
+
+  return { readSession, writeSession, clear, loadBaileysAuthState, pool: db, safeAuthStateObj };
 }
 
 module.exports = { createPostgresAuthStore };

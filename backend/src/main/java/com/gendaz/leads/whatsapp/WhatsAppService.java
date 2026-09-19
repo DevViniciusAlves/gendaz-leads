@@ -52,7 +52,7 @@ public class WhatsAppService {
                 ? UUID.randomUUID().toString()
                 : requestId.trim();
         if (key.length() > 120) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST_ID",
+            throw new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_REQUEST_ID",
                     "requestId excede 120 caracteres.");
         }
         WhatsAppSendResult result = provider.sendText(normalized, cleanText, key);
@@ -63,12 +63,12 @@ public class WhatsAppService {
 
     static String normalizeRecipient(String recipient) {
         if (recipient == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_RECIPIENT",
+            throw new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_RECIPIENT",
                     "Destinatario obrigatorio (somente digitos, 8-15).");
         }
         String digits = recipient.replaceAll("\\D", "");
         if (!digits.matches("[0-9]{8,15}")) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_RECIPIENT",
+            throw new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_RECIPIENT",
                     "Destinatario invalido (somente digitos, 8-15).");
         }
         return digits;
@@ -76,11 +76,11 @@ public class WhatsAppService {
 
     static String validateText(String text) {
         if (text == null || text.trim().isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_TEXT",
+            throw new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_INVALID_TEXT",
                     "Texto obrigatorio e nao vazio.");
         }
         if (text.length() > MAX_TEXT_LENGTH) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "TEXT_TOO_LONG",
+            throw new ApiException(HttpStatus.BAD_REQUEST, "WHATSAPP_TEXT_TOO_LONG",
                     "Texto excede o limite de " + MAX_TEXT_LENGTH + " caracteres.");
         }
         return text;

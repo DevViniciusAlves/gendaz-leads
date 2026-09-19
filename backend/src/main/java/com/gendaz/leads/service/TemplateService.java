@@ -43,6 +43,32 @@ public class TemplateService {
         templateRepository.updateDefaultTrue(id);
     }
 
+    /**
+     * PUT /default: se existe default atualiza; senão cria
+     * name="Abordagem padrão", isDefault=true. Garante um único default
+     * (índice parcial uq_message_template_default).
+     */
+    @Transactional
+    public com.gendaz.leads.entity.MessageTemplate upsertDefault(String name, String templateText) {
+        return findDefault()
+                .map(existing -> {
+                    existing.setTemplateText(templateText);
+                    if (name != null && !name.isBlank()) {
+                        existing.setName(name.trim());
+                    }
+                    return templateRepository.save(existing);
+                })
+                .orElseGet(() -> {
+                    com.gendaz.leads.entity.MessageTemplate created =
+                            com.gendaz.leads.entity.MessageTemplate.builder()
+                                    .name(name != null && !name.isBlank() ? name.trim() : "Abordagem padrão")
+                                    .templateText(templateText)
+                                    .isDefault(true)
+                                    .build();
+                    return templateRepository.save(created);
+                });
+    }
+
     @Transactional
     public void delete(Long id) {
         templateRepository.deleteById(id);

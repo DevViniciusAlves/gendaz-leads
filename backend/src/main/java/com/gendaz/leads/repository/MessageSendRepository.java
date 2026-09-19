@@ -16,6 +16,10 @@ public interface MessageSendRepository extends JpaRepository<MessageSend, Long> 
 
     List<MessageSend> findByLeadId(Long leadId);
 
+    List<MessageSend> findByLeadIdIn(java.util.Collection<Long> leadIds);
+
+    List<MessageSend> findByCampaignId(Long campaignId);
+
     long countByCampaignIdAndStatus(Long campaignId, String status);
 
     @Query("SELECT COUNT(ms) FROM MessageSend ms WHERE ms.campaignId = :campaignId")

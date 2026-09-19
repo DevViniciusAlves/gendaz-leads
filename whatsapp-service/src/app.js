@@ -16,10 +16,13 @@ function createApp({ sessionManager, cfg } = {}) {
   app.use(express.json({ limit: '64kb' }));
 
   const auth = internalAuth(effectiveConfig);
-  const manager = sessionManager || createSessionManager({
-    config: effectiveConfig,
-    authStore: createAuthStore({ config: effectiveConfig }),
-  });
+  // Só cria authStore real quando o caller não injetou um sessionManager (testes).
+  let store = null;
+  let manager = sessionManager;
+  if (!manager) {
+    store = createAuthStore({ config: effectiveConfig });
+    manager = createSessionManager({ config: effectiveConfig, authStore: store });
+  }
 
   app.use(healthRouter());
   app.use(sessionsRouter({ sessionManager: manager, config: effectiveConfig, auth }));
@@ -28,7 +31,7 @@ function createApp({ sessionManager, cfg } = {}) {
   // 404 padrao sem vazar detalhes.
   app.use((req, res) => res.status(404).json({ error: 'not_found' }));
 
-  return { app, sessionManager: manager };
+  return { app, sessionManager: manager, authStore: store };
 }
 
 module.exports = { createApp };

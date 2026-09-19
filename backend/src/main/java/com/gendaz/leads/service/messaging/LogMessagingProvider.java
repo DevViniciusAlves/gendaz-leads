@@ -16,7 +16,11 @@ public class LogMessagingProvider implements MessagingProvider {
 
     @Override
     public MessagingSendResult send(MessagingCommand command) {
-        log.info("[LOG_PROVIDER] Enviando mensagem para lead {}: {}", command.leadId(), command.message());
+        // Privacidade: nunca logar command.message() integral.
+        int chars = command.message() != null ? command.message().length() : 0;
+        boolean hasRequestId = command.requestId() != null && !command.requestId().isBlank();
+        log.info("[LOG_PROVIDER] messageSendId={} leadId={} chars={} requestIdPresent={}",
+                command.messageSendId(), command.leadId(), chars, hasRequestId);
         return new MessagingSendResult(true, FailureCategory.NONE, "log-id-" + System.currentTimeMillis(), null, "Log provider simulated success");
     }
 }

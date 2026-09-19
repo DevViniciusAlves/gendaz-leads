@@ -12,7 +12,6 @@ import { CampaignDetail } from './pages/CampaignDetail.jsx'
 import { Leads } from './pages/Leads.jsx'
 import { LeadDetail } from './pages/LeadDetail.jsx'
 import { WhatsApp } from './pages/WhatsApp.jsx'
-import { Templates } from './pages/Templates.jsx'
 
 function Verifier({ children }) {
   const [checked, setChecked] = useState(false)
@@ -26,7 +25,7 @@ function Verifier({ children }) {
     api
       .get('/api/auth/me')
       .then((d) => {
-        if (d && d.email) saveUser(d)
+        if (d && d.email && d.userId) saveUser(d)
         setChecked(true)
       })
       .catch(() => {
@@ -108,13 +107,7 @@ export default function App() {
             />
             <Route
               path="/templates"
-              element={
-                <ProtectedRoute>
-                  <AppShell>
-                    <Templates />
-                  </AppShell>
-                </ProtectedRoute>
-              }
+              element={<Navigate to="/whatsapp" replace />}
             />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>

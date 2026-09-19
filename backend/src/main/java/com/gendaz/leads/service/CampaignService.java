@@ -88,6 +88,13 @@ public class CampaignService {
         }
     }
 
+    public Campaign requireOwnedCampaign(Long campaignId) {
+        Campaign campaign = campaignRepository.findById(campaignId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Campanha nao encontrada."));
+        ensureOwner(campaign);
+        return campaign;
+    }
+
     public CampaignResponse toResponse(Campaign c) {
         return new CampaignResponse(c.getId(), c.getName(), c.getNiche(), c.getLocation(),
                 c.getRequestedQuantity(), c.getStatus(), c.getDiscoveredCount(), c.getAnalyzedCount(),

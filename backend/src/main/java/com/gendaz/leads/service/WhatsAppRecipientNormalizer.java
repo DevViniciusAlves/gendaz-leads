@@ -9,45 +9,52 @@ public class WhatsAppRecipientNormalizer {
         if (phone == null || phone.isBlank()) return null;
 
         String digits = phone.replaceAll("\\D", "");
+        if (digits.isBlank()) return null;
 
-        if ("BR".equals(country) || country == null) {
-            return normalizeBrazil(digits);
-        } else {
-            return normalizeForeign(digits);
+        // Remove prefixo internacional 00 (ex: 0055... -> 55...)
+        while (digits.startsWith("00") && digits.length() > 2) {
+            digits = digits.substring(2);
         }
+
+        boolean isBr = (country == null || country.isBlank() || "BR".equalsIgnoreCase(country.trim()));
+        if (isBr) {
+            return normalizeBrazil(digits);
+        }
+        return normalizeForeign(digits);
     }
 
     private String normalizeBrazil(String digits) {
-        if (digits.length() == 11 && digits.startsWith("55")) {
-            // Already has DDI 55, maintain
-            if (digits.length() == 13) {
-                return digits; // 55 + 2 digits area + 8 digits number
-            }
-            if (digits.length() == 12) {
-                // 55 + 1 digit + 8 digits or 55 + 2 digit + 7 digits - check pattern
-                // Brazil DDD is 2 digits: 55XX9XXXXXXX = 13 chars total including 55
-                // So 12 chars means something is off, but let's be permissive
-                return digits;
-            }
-            return "55" + digits; // Add 55 if not present
-        }
-
+        // 10 ou 11 digitos sem DDI -> adicionar 55
         if (digits.length() == 10 || digits.length() == 11) {
-            // Brazilian number without DDI: add 55
+            if (!hasValidDdd(digits)) return null;
             return "55" + digits;
         }
-
-        if (digits.length() >= 12 && digits.length() <= 13 && digits.startsWith("55")) {
-            // Already has 55, return as is (validated later by WhatsAppService)
+        // 12 ou 13 iniciando com 55 -> manter (sem duplicar)
+        if ((digits.length() == 12 || digits.length() == 13) && digits.startsWith("55")) {
+            // Nao duplicar: 5555... indica DDI duplicado
+            if (digits.startsWith("5555")) return null;
+            String rest = digits.substring(2);
+            if (rest.length() != 10 && rest.length() != 11) return null;
+            if (!hasValidDdd(rest)) return null;
             return digits;
         }
+        // Sem DDD (8 ou 9 digitos) ou qualquer outro tamanho -> invalido
+        return null;
+    }
 
-        // If 12+ digits starting with other codes, don't add 55
-        return digits;
+    private boolean hasValidDdd(String national) {
+        // national tem 10 (DDD + 8) ou 11 (DDD + 9) digitos.
+        // DDD: 2 digitos, 11..99 (primeiro digito != 0).
+        if (national == null || (national.length() != 10 && national.length() != 11)) return false;
+        char d1 = national.charAt(0);
+        char d2 = national.charAt(1);
+        if (!Character.isDigit(d1) || !Character.isDigit(d2)) return false;
+        int ddd = (d1 - '0') * 10 + (d2 - '0');
+        return ddd >= 11 && ddd <= 99;
     }
 
     private String normalizeForeign(String digits) {
-        // For non-BR countries, accept only number with explicit DDI, 8 to 15 digits
+        // Para paises != BR: nao adicionar 55. Exige DDI explicito seguro: 8 a 15 digitos.
         if (digits.length() >= 8 && digits.length() <= 15) {
             return digits;
         }
