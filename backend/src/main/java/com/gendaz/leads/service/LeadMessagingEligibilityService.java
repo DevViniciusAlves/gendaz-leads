@@ -72,9 +72,9 @@ public class LeadMessagingEligibilityService {
         // Global Cross-Campaign Blocking: checa se o mesmo normalizedRecipient já foi prospectado
         // em QUALQUER campanha com status bloqueador.
         if (normalized != null) {
-            boolean blockedGlobally = messageSendRepository.existsByRecipientSnapshotAndStatusIn(
+            List<MessageSend> blockers = messageSendRepository.findBlockingByRecipientSnapshot(
                     normalized, List.of("QUEUED", "SENDING", "SENT", "DELIVERY_UNKNOWN"));
-            if (blockedGlobally) {
+            if (!blockers.isEmpty()) {
                 // Checa se o blocker é desta mesma campanha (já tratado acima) ou de outra.
                 // Na dúvida, bloqueia para garantir segurança de produção.
                 return new EligibilityResult(false, "GLOBAL_BLOCK", "Destinatário já prospectado em outra campanha.", normalized);

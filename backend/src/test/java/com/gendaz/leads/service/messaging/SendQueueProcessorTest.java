@@ -4,7 +4,9 @@ import com.gendaz.leads.entity.Lead;
 import com.gendaz.leads.entity.MessageSend;
 import com.gendaz.leads.repository.LeadRepository;
 import com.gendaz.leads.repository.MessageSendRepository;
+import com.gendaz.leads.whatsapp.WhatsAppService;
 import org.junit.jupiter.api.BeforeEach;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -34,13 +36,15 @@ class SendQueueProcessorTest {
     MessagingScheduleProperties scheduleProperties;
     @Mock
     MessagingProvider provider;
+    @Mock
+    WhatsAppService whatsAppService;
 
     SendQueueProcessor processor;
 
     @BeforeEach
     void setup() {
         processor = new SendQueueProcessor(claimService, completionService,
-                messageSendRepository, leadRepository, providerRouter, scheduleProperties);
+                messageSendRepository, leadRepository, providerRouter, scheduleProperties, whatsAppService);
     }
 
     private MessageSend claimed(int attempts) {

@@ -75,11 +75,40 @@ public class CampaignService {
         return toResponse(campaign);
     }
 
+    @Transactional
     public void retry(Long id) {
-        Campaign campaign = campaignRepository.findById(id)
+        // 1. Lock for update
+        Campaign campaign = campaignRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Campanha nao encontrada."));
         ensureOwner(campaign);
-        processor.retryFailedLeads(id);
+
+        String status = campaign.getStatus();
+
+        // 2. validar status atual
+        if ("CREATED".equals(status) || "DISCOVERING".equals(status) || 
+            "ANALYZING".equals(status) || "GENERATING".equals(status)) {
+             throw new ApiException(HttpStatus.CONFLICT, "CAMPAIGN_ALREADY_PROCESSING", "Esta campanha já está sendo processada.");
+        }
+
+        // 3. decidir qual retry executar
+        if ("FAILED".equals(status) && campaign.getDiscoveredCount() == 0) {
+             // Caso A: FAILED + ZERO LEADS -> Reinicia DISCOVERY real.
+             campaign.setErrorMessage(null);
+             campaign.setProgressCurrent(0);
+             campaign.setProgressStage("DISCOVERY");
+             campaign.setStatus("DISCOVERING");
+             campaignRepository.save(campaign);
+             // 4. disparar processamento apropriado (fora da transação)
+             processor.processCampaign(id);
+        } else if ("FAILED".equals(status) || "ERROR".equals(status)) {
+             // Caso B: FAILED COM LEADS ERROR -> retry específico de análise
+             processor.retryFailedLeads(id);
+        } else if ("PARTIAL".equals(status)) {
+             // Caso C: PARTIAL -> Tentar completar.
+             processor.retryFailedLeads(id); // Placeholder para PARTIAL, precisará de ajuste
+        } else {
+             throw new ApiException(HttpStatus.CONFLICT, "INVALID_STATUS", "Status de campanha inválido para retry.");
+        }
     }
 
     private void ensureOwner(Campaign campaign) {

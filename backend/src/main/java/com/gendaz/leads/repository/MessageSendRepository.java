@@ -33,4 +33,7 @@ public interface MessageSendRepository extends JpaRepository<MessageSend, Long> 
     boolean existsByLeadIdAndStatus(Long leadId, String status);
 
     boolean existsByRequestId(String requestId);
+
+    @Query("SELECT ms FROM MessageSend ms WHERE ms.recipientSnapshot = :snapshot AND ms.status IN :statuses")
+    List<MessageSend> findBlockingByRecipientSnapshot(@Param("snapshot") String snapshot, @Param("statuses") List<String> statuses);
 }

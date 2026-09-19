@@ -17,7 +17,8 @@ public interface CampaignRepository extends JpaRepository<Campaign, Long> {
 
     long countByOwnerIdAndStatusIn(Long ownerId, List<String> statuses);
 
-    @Query("SELECT c FROM Campaign c WHERE c.ownerId = :ownerId AND " +
-            "LOWER(c.name) LIKE LOWER(CONCAT('%', :q, '%')) ORDER BY c.createdAt DESC")
-    List<Campaign> searchByOwner(@Param("ownerId") Long ownerId, @Param("q") String q);
+    @Query("SELECT c FROM Campaign c WHERE c.id = :id")
+    @org.springframework.data.jpa.repository.Lock(org.springframework.data.jpa.repository.LockModeType.PESSIMISTIC_WRITE)
+    java.util.Optional<Campaign> findByIdForUpdate(@Param("id") Long id);
+
 }

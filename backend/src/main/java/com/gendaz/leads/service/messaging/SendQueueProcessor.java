@@ -13,7 +13,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
 
-import com.gendaz.leads.whatsapp.FailureCategory;
 import com.gendaz.leads.whatsapp.WhatsAppService;
 import com.gendaz.leads.whatsapp.WhatsAppSessionStatus;
 

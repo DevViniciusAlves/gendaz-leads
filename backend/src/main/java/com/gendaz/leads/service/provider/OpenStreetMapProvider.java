@@ -2,7 +2,6 @@ package com.gendaz.leads.service.provider;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.service.InstagramDetector;
@@ -27,12 +26,24 @@ import java.util.*;
 public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenStreetMapProvider.class);
-    private static final SerializationFeature IGNORE_DATES_AS_NULLS = SerializationFeature.IgnoreDatesAsNulls;
+    record FailureDetails(String rootCauseType, String safeMessage) {}
 
-    private static String rootCause(Throwable t) {
-        // Returns a short summary for log correlation without leaking sensitive data.
-        return (t.getMessage() != null ? t.getMessage() : "") +
-                (t.getCause() != null ? " cause=" + rootCause(t.getCause()) : "");
+    private static FailureDetails getFailureDetails(Throwable t) {
+        Throwable root = t;
+        while (root.getCause() != null) {
+            root = root.getCause();
+        }
+        
+        String type = root.getClass().getSimpleName();
+        String message = root.getMessage() != null ? root.getMessage() : "";
+        
+        // Sanitizar (simples, melhora conforme necessidade)
+        message = message.replaceAll("(?i)(password|token|secret|url|database_url|key)=[^\\s&]+", "$1=***");
+        if (message.length() > 300) {
+            message = message.substring(0, 300);
+        }
+        
+        return new FailureDetails(type, message);
     }
 
     private static final double BBOX_DELTA = 0.18;
@@ -146,8 +157,14 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
                 } catch (RestClientException | java.io.IOException e) {
                     lastFailure = e;
-                    log.warn("[osm] overpass_failed attempt={} errorType={} rootCause={} retryable={}", 
-                            attempt, e.getClass().getSimpleName(), rootCause(e), isRetryable(e));
+                    boolean retryable = isRetryable(e);
+                    FailureDetails fd = getFailureDetails(e);
+                    String host = "unknown";
+                    try { host = java.net.URI.create(url).getHost(); } catch (Exception ignored) {}
+                    
+                    log.warn("[osm] overpass_failed attempt={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} retryable={}", 
+                            attempt, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
+                    
                     if (!retryable) break; // falha definitiva: nao insistir neste endpoint
                     if (attempt < 3) {
                         sleepBackoff(attempt);
@@ -249,8 +266,11 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 throw e;
             } catch (RestClientException | java.io.IOException e) {
                 lastFailure = e;
-                log.warn("[osm] geocode_failed attempt={} errorType={} rootCause={}", 
-                        attempt, e.getClass().getSimpleName(), rootCause(e));
+                boolean retryable = isRetryable(e);
+                FailureDetails fd = getFailureDetails(e);
+                log.warn("[osm] geocode_failed attempt={} errorType={} rootCauseType={} rootCauseMessage={} retryable={}", 
+                        attempt, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
+                if (!retryable) throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR", "Falha não recuperável: " + fd.safeMessage());
             }
         }
         // Falha Nominatim apos retries: OSM_GEOCODE_ERROR.

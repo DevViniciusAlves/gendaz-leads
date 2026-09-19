@@ -86,10 +86,6 @@ public class Campaign {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
-    @Version
-    @Column(name = "campanha_version")
-    private int version = 0;
-
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
     private Instant createdAt;
 
