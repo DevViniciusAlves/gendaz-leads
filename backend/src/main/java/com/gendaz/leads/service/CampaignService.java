@@ -5,6 +5,7 @@ import com.gendaz.leads.dto.campaign.CreateCampaignRequest;
 import com.gendaz.leads.entity.Campaign;
 import com.gendaz.leads.entity.User;
 import com.gendaz.leads.exception.ApiException;
+import com.gendaz.leads.repository.CampaignLeadRepository;
 import com.gendaz.leads.repository.CampaignRepository;
 import com.gendaz.leads.repository.UserRepository;
 import com.gendaz.leads.security.SecurityService;
@@ -26,18 +27,24 @@ public class CampaignService {
 
     private final CampaignRepository campaignRepository;
     private final UserRepository userRepository;
+    private final CampaignLeadRepository campaignLeadRepository;
     private final AsyncCampaignProcessor processor;
     private final CampaignRetryTransactionService retryService;
+    private final CampaignCreateTransactionService createTransactionService;
     private final SecurityService securityService;
 
     public CampaignService(CampaignRepository campaignRepository, UserRepository userRepository,
-                           AsyncCampaignProcessor processor, 
+                           CampaignLeadRepository campaignLeadRepository,
+                           AsyncCampaignProcessor processor,
                            CampaignRetryTransactionService retryService,
+                           CampaignCreateTransactionService createTransactionService,
                            SecurityService securityService) {
         this.campaignRepository = campaignRepository;
         this.userRepository = userRepository;
+        this.campaignLeadRepository = campaignLeadRepository;
         this.processor = processor;
         this.retryService = retryService;
+        this.createTransactionService = createTransactionService;
         this.securityService = securityService;
     }
 
@@ -48,22 +55,8 @@ public class CampaignService {
         return user.getId();
     }
 
-    @Transactional
     public CampaignResponse create(CreateCampaignRequest request) {
-        if (request.quantity() < minLeads || request.quantity() > maxLeads) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_QUANTITY",
-                    String.format("A quantidade deve estar entre %d e %d leads.", minLeads, maxLeads));
-        }
-        Long ownerId = currentUserId();
-        Campaign campaign = Campaign.builder()
-                .ownerId(ownerId)
-                .name(String.format("%s — %s", request.niche(), request.location()))
-                .niche(request.niche())
-                .location(request.location())
-                .requestedQuantity(request.quantity())
-                .status("CREATED")
-                .build();
-        campaign = campaignRepository.save(campaign);
+        Campaign campaign = createTransactionService.createCampaign(request);
         processor.processCampaign(campaign.getId());
         return toResponse(campaign);
     }
@@ -89,8 +82,14 @@ public class CampaignService {
         } else if (plan == CampaignRetryTransactionService.RetryPlan.ANALYSIS) {
              processor.retryFailedLeads(id);
         } else if (plan == CampaignRetryTransactionService.RetryPlan.PARTIAL) {
-             // 9/10/11. Implementar PARTIAL real
-             processor.retryFailedLeads(id);
+             long existingCount = campaignLeadRepository.countByCampaignId(id);
+             int remaining = campaign.getRequestedQuantity() - (int)existingCount;
+             if (remaining <= 0) {
+                 processor.recompute(campaign);
+                 campaignRepository.save(campaign);
+             } else {
+                 processor.processPartialCampaign(id, remaining);
+             }
         }
     }
 

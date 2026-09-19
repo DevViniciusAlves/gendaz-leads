@@ -14,6 +14,8 @@ import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
 import java.util.List;
 import java.util.function.Function;
 
@@ -122,9 +124,21 @@ class OpenStreetMapProviderTest {
     }
 
     @Test
-    void networkFailureIsRetryable() {
-        assertTrue(OpenStreetMapProvider.isRetryable(new ResourceAccessException("connect timed out")));
+    void isRetryableClassification() {
+        // Retryable
+        assertTrue(OpenStreetMapProvider.isRetryable(new ConnectException("connection refused")));
+        assertTrue(OpenStreetMapProvider.isRetryable(new SocketTimeoutException("read timed out")));
+        assertTrue(OpenStreetMapProvider.isRetryable(new java.net.NoRouteToHostException("no route")));
+        assertTrue(OpenStreetMapProvider.isRetryable(new java.net.UnknownHostException("unknown")));
+        assertTrue(OpenStreetMapProvider.isRetryable(new RuntimeException("connection reset")));
+        
+        // Not retryable
+        assertFalse(OpenStreetMapProvider.isRetryable(new javax.net.ssl.SSLHandshakeException("handshake")));
+        
+        // Wrapped retryable
+        assertTrue(OpenStreetMapProvider.isRetryable(new RuntimeException("wrap", new ConnectException())));
     }
+
 
     // ---------- Zero real vs erro (HTTP mockado) ----------
 
@@ -202,13 +216,13 @@ class OpenStreetMapProviderTest {
     void fallbackEndpointUsedOnlyAfterPrimaryFailure() {
         RestClient.Builder builder = mock(RestClient.Builder.class);
         RestClient restClient = stubHttp(builder, GEO_JSON,
-                new ResourceAccessException("connect timed out"));
+                new RuntimeException(new ConnectException("connect timed out")));
         OpenStreetMapProvider p = providerWith(builder);
         ReflectionTestUtils.setField(p, "fallbackUrl", "https://fallback.test/api/interpreter");
 
         // Primary falha 3x (retry), fallback tambem falha -> erro tipado, nunca zero silencioso.
-        ApiException ex = assertThrows(ApiException.class, () -> p.discover("cilios", "Cuiaba", 10));
-        assertEquals("OSM_OVERPASS_ERROR", ex.getCode());
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> p.discover("cilios", "Cuiaba", 10));
+        assertTrue(ex.getMessage().contains("Falha ao consultar Overpass"));
         // 3 tentativas no primary + 3 no fallback
         verify(restClient, times(6)).post();
     }

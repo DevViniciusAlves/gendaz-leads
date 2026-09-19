@@ -36,4 +36,6 @@ public interface MessageSendRepository extends JpaRepository<MessageSend, Long> 
 
     @Query("SELECT ms FROM MessageSend ms WHERE ms.recipientSnapshot = :snapshot AND ms.status IN :statuses")
     List<MessageSend> findBlockingByRecipientSnapshot(@Param("snapshot") String snapshot, @Param("statuses") List<String> statuses);
+    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:recipient))", nativeQuery = true)
+    void acquireLock(@Param("recipient") String recipient);
 }

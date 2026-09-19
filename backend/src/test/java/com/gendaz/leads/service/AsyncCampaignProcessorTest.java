@@ -9,6 +9,7 @@ import com.gendaz.leads.repository.LeadEventRepository;
 import com.gendaz.leads.repository.LeadRepository;
 import com.gendaz.leads.repository.LeadSourceRepository;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
+import com.gendaz.leads.service.CampaignLeadPersistenceService;
 import com.gendaz.leads.util.Normalizer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -46,6 +47,8 @@ class AsyncCampaignProcessorTest {
     Normalizer normalizer;
     @Mock
     OpenStreetMapProvider openStreetMapProvider;
+    @Mock
+    CampaignLeadPersistenceService persistenceService;
 
     @InjectMocks
     AsyncCampaignProcessor processor;

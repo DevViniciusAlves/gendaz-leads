@@ -1,17 +1,10 @@
 package com.gendaz.leads.service;
 
 import com.gendaz.leads.dto.campaign.*;
-import com.gendaz.leads.entity.Campaign;
-import com.gendaz.leads.entity.Lead;
-import com.gendaz.leads.entity.LeadEvent;
-import com.gendaz.leads.entity.MessageSend;
-import com.gendaz.leads.entity.MessageTemplate;
+import com.gendaz.leads.entity.*;
 import com.gendaz.leads.exception.ApiException;
-import com.gendaz.leads.repository.CampaignLeadRepository;
-import com.gendaz.leads.repository.LeadEventRepository;
-import com.gendaz.leads.repository.LeadRepository;
-import com.gendaz.leads.repository.MessageSendRepository;
-import com.gendaz.leads.repository.MessageTemplateRepository;
+import com.gendaz.leads.repository.*;
+import com.gendaz.leads.whatsapp.WhatsAppService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -32,6 +25,8 @@ public class CampaignSendService {
     private final LeadEventRepository leadEventRepository;
     private final TemplateRenderer templateRenderer;
     private final LeadMessagingEligibilityService eligibilityService;
+    private final WhatsAppService whatsappService;
+    private final CampaignMessageEnqueueTransactionService enqueueTransactionService;
 
     @Value("${app.messaging.provider:whatsapp}")
     private String defaultProvider;
@@ -43,7 +38,9 @@ public class CampaignSendService {
                                MessageTemplateRepository templateRepository,
                                LeadEventRepository leadEventRepository,
                                TemplateRenderer templateRenderer,
-                               LeadMessagingEligibilityService eligibilityService) {
+                               LeadMessagingEligibilityService eligibilityService,
+                               WhatsAppService whatsappService,
+                               CampaignMessageEnqueueTransactionService enqueueTransactionService) {
         this.campaignService = campaignService;
         this.leadRepository = leadRepository;
         this.campaignLeadRepository = campaignLeadRepository;
@@ -52,6 +49,8 @@ public class CampaignSendService {
         this.leadEventRepository = leadEventRepository;
         this.templateRenderer = templateRenderer;
         this.eligibilityService = eligibilityService;
+        this.whatsappService = whatsappService;
+        this.enqueueTransactionService = enqueueTransactionService;
     }
 
     @Transactional(readOnly = true)
@@ -96,9 +95,14 @@ public class CampaignSendService {
         return new SendPreviewResponse(previews.size(), ineligible.size(), previews, ineligible);
     }
 
-    @Transactional
     public SendResultEnqueue enqueueMessages(Long campaignId, List<Long> leadIds, Long templateId, Boolean allEligible) {
         Campaign campaign = campaignService.requireOwnedCampaign(campaignId);
+
+        if ("whatsapp".equals(defaultProvider)) {
+            if (!"CONNECTED".equals(whatsappService.status().status())) {
+                 throw new ApiException(HttpStatus.CONFLICT, "WHATSAPP_NOT_CONNECTED", "Conecte o WhatsApp antes de enviar mensagens.");
+            }
+        }
 
         MessageTemplate template;
         if (templateId != null) {
@@ -160,27 +164,7 @@ public class CampaignSendService {
                     .queuedAt(Instant.now())
                     .build();
 
-            try {
-                messageSendRepository.saveAndFlush(send);
-            } catch (DataIntegrityViolationException e) {
-                throw new ApiException(HttpStatus.CONFLICT, "ALREADY_QUEUED_OR_SENT",
-                        "Lead já possui envio na fila ou concluído.");
-            }
-
-            // Evento sem mensagem integral ou telefone no metadata.
-            leadEventRepository.save(LeadEvent.builder()
-                    .leadId(lead.getId())
-                    .campaignId(campaign.getId())
-                    .eventType("message_queued")
-                    .eventMetadata("messageSendId=" + send.getId() + ";status=QUEUED")
-                    .build());
-
-            sentResults.add(new MessageSentResult(
-                    send.getId(),
-                    lead.getBusinessName(),
-                    normalizedRecipient,
-                    "QUEUED"
-            ));
+            sentResults.add(enqueueTransactionService.enqueue(send, lead, campaign));
         }
 
         return new SendResultEnqueue(sentResults, skippedResults);

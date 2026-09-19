@@ -66,7 +66,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     private final ObjectMapper objectMapper;
     private final InstagramDetector instagramDetector;
     private final Normalizer normalizer;
-    private final Map<String, String> instagramCache = new HashMap<>();
 
     public OpenStreetMapProvider(RestClient.Builder builder, ObjectMapper objectMapper,
                                  InstagramDetector instagramDetector, Normalizer normalizer) {
@@ -113,6 +112,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         log.info("[osm] geocode_success=true bbox_source={}", geo.bboxValid ? "nominatim" : "fallback");
 
         String query = buildOverpassQuery(niche, geo, limit);
+        Map<String, Optional<String>> instagramCache = new HashMap<>();
 
         List<String> endpoints = new ArrayList<>();
         endpoints.add(overpassUrl);
@@ -127,7 +127,9 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
             for (int attempt = 1; attempt <= 3; attempt++) {
                 try {
-                    log.info("[osm] overpass_attempt={} endpoint={}", attempt, url);
+                    String host = "unknown";
+                    try { host = java.net.URI.create(url).getHost(); } catch (Exception ignored) {}
+                    log.info("[osm] overpass_attempt={} endpointHost={}", attempt, host);
                     String response = client().post()
                             .uri(url)
                             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -138,7 +140,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                     JsonNode root = objectMapper.readTree(response);
                     JsonNode elements = root.path("elements");
                     if (elements.isMissingNode() || !elements.isArray() || elements.isEmpty()) {
-                        // Overpass 200 + elements=[]: resultado valido zero. Sem fallback.
                         log.info("[osm] discovery_finished returned=0");
                         return List.of();
                     }
@@ -147,7 +148,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                     Map<String, LeadCandidate> byKey = new LinkedHashMap<>();
                     for (JsonNode el : elements) {
                         if (byKey.size() >= limit) break;
-                        LeadCandidate candidate = mapElement(el, geo);
+                        LeadCandidate candidate = mapElement(el, geo, instagramCache);
                         if (candidate != null) {
                             String key = "osm:" + candidate.getSourceId();
                             byKey.putIfAbsent(key, candidate);
@@ -172,14 +173,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                     }
                 }
             }
-            // Fallback endpoint somente apos falha real do primary (nao em zero valido, que ja retornou).
             if (!isFallback && endpoints.size() > 1 && lastFailure != null) {
                 log.info("[osm] fallback_endpoint=true");
             }
             if (isFallback || endpoints.size() == 1) {
                 break;
             }
-            // Se primary falhou mas existe fallback, continua o loop para tentar o fallback.
             if (lastFailure == null) break;
         }
 
@@ -192,20 +191,23 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             int v = http.getStatusCode().value();
             return v == 429 || v == 502 || v == 503 || v == 504;
         }
-        if (e instanceof ResourceAccessException) {
-            // connect timeout / read timeout / conexao recusada: retry.
-            // Read timeout apos POST sera classificado como AMBIGUOUS no envio,
-            // mas na descoberta ainda vale retry limitado.
-            return true;
+
+        Throwable root = e;
+        while (root != null) {
+            if (root instanceof ConnectException || root instanceof SocketTimeoutException
+                || root instanceof java.net.NoRouteToHostException
+                || root instanceof java.net.UnknownHostException
+                || (root.getMessage() != null && root.getMessage().toLowerCase().contains("connection reset"))) {
+                return true;
+            }
+            if (root instanceof javax.net.ssl.SSLHandshakeException) return false;
+            root = root.getCause();
         }
-        Throwable t = e;
-        while (t != null) {
-            if (t instanceof ConnectException || t instanceof SocketTimeoutException) return true;
-            t = t.getCause();
-        }
-        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        return msg.contains("timed out") || msg.contains("timeout") || msg.contains("connect")
-                || msg.contains("429") || msg.contains("502") || msg.contains("503") || msg.contains("504");
+        
+        // Mantemos comportamento padrão para ResourceAccessException genérico se não identificar causa específica
+        // mas o prompt pede para não tratar "todo ResourceAccessException" como retryable.
+        // Já identifiquei os casos retryable específicos.
+        return false;
     }
 
     private void sleepBackoff(int attempt) {
@@ -310,7 +312,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return sb.toString();
     }
 
-    LeadCandidate mapElement(JsonNode el, Geo geo) {
+    LeadCandidate mapElement(JsonNode el, Geo geo, Map<String, Optional<String>> instagramCache) {
         JsonNode tags = el.path("tags");
         if (tags.isMissingNode() || !tags.isObject()) return null;
         String name = asTextOrNull(tags, "name");
@@ -340,11 +342,13 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             String website = candidate.getWebsite();
             if (website != null && !website.isBlank() && instagramDetector != null) {
                 String normalizedWebsite = website.trim().toLowerCase();
-                String detected = instagramCache.computeIfAbsent(normalizedWebsite, instagramDetector::detectFromWebsite);
                 
-                if (detected != null && !detected.isBlank()) {
-                    candidate.setInstagramUsername(detected);
-                    candidate.setInstagramUrl("https://instagram.com/" + detected);
+                Optional<String> detected = instagramCache.computeIfAbsent(normalizedWebsite, 
+                        key -> Optional.ofNullable(instagramDetector.detectFromWebsite(key)));
+                
+                if (detected.isPresent()) {
+                    candidate.setInstagramUsername(detected.get());
+                    candidate.setInstagramUrl("https://instagram.com/" + detected.get());
                     candidate.setInstagramStatus("FOUND");
                 } else {
                     candidate.setInstagramStatus("NOT_FOUND");

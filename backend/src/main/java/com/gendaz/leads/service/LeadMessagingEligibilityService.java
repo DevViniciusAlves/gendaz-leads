@@ -56,28 +56,43 @@ public class LeadMessagingEligibilityService {
         for (MessageSend send : sends) {
             String status = send.getStatus();
             if ("QUEUED".equals(status)) {
-                return new EligibilityResult(false, "ALREADY_QUEUED", "Lead já está na fila de envio.", normalized);
+                return new EligibilityResult(false, "ALREADY_QUEUED", "Lead já está na fila de envio nesta campanha.", normalized);
             }
             if ("SENDING".equals(status)) {
-                return new EligibilityResult(false, "ALREADY_SENDING", "Lead está em envio no momento.", normalized);
+                return new EligibilityResult(false, "ALREADY_SENDING", "Lead está em envio nesta campanha.", normalized);
             }
             if ("SENT".equals(status)) {
-                return new EligibilityResult(false, "ALREADY_SENT", "Lead já foi enviado.", normalized);
+                return new EligibilityResult(false, "ALREADY_SENT", "Lead já recebeu mensagem nesta campanha.", normalized);
             }
             if ("DELIVERY_UNKNOWN".equals(status)) {
-                return new EligibilityResult(false, "DELIVERY_UNKNOWN", "Entrega anterior incerta; sem reenvio automático.", normalized);
+                return new EligibilityResult(false, "DELIVERY_UNKNOWN", "Existe uma entrega anterior incerta nesta campanha.", normalized);
             }
         }
 
         // Global Cross-Campaign Blocking: checa se o mesmo normalizedRecipient já foi prospectado
-        // em QUALQUER campanha com status bloqueador.
+        // em QUALQUER outra campanha.
         if (normalized != null) {
             List<MessageSend> blockers = messageSendRepository.findBlockingByRecipientSnapshot(
                     normalized, List.of("QUEUED", "SENDING", "SENT", "DELIVERY_UNKNOWN"));
+            
+            // Filtra: mantem apenas sends de outras campanhas
+            blockers = blockers.stream().filter(b -> !b.getCampaignId().equals(campaignId)).toList();
+            
             if (!blockers.isEmpty()) {
-                // Checa se o blocker é desta mesma campanha (já tratado acima) ou de outra.
-                // Na dúvida, bloqueia para garantir segurança de produção.
-                return new EligibilityResult(false, "GLOBAL_BLOCK", "Destinatário já prospectado em outra campanha.", normalized);
+                MessageSend blocker = blockers.get(0);
+                String status = blocker.getStatus();
+                if ("QUEUED".equals(status)) {
+                    return new EligibilityResult(false, "ALREADY_QUEUED", "Lead já está na fila de outra campanha.", normalized);
+                }
+                if ("SENDING".equals(status)) {
+                    return new EligibilityResult(false, "ALREADY_SENDING", "Lead possui envio em andamento em outra campanha.", normalized);
+                }
+                if ("SENT".equals(status)) {
+                    return new EligibilityResult(false, "ALREADY_SENT", "Lead já recebeu mensagem em outra campanha.", normalized);
+                }
+                if ("DELIVERY_UNKNOWN".equals(status)) {
+                    return new EligibilityResult(false, "DELIVERY_UNKNOWN", "Existe uma entrega anterior incerta em outra campanha.", normalized);
+                }
             }
         }
 

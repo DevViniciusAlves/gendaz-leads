@@ -2,6 +2,7 @@ package com.gendaz.leads.service;
 
 import com.gendaz.leads.entity.Campaign;
 import com.gendaz.leads.exception.ApiException;
+import com.gendaz.leads.repository.CampaignLeadRepository;
 import com.gendaz.leads.repository.CampaignRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -11,9 +12,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class CampaignRetryTransactionService {
 
     private final CampaignRepository campaignRepository;
+    private final CampaignLeadRepository campaignLeadRepository;
 
-    public CampaignRetryTransactionService(CampaignRepository campaignRepository) {
+    public CampaignRetryTransactionService(CampaignRepository campaignRepository, CampaignLeadRepository campaignLeadRepository) {
         this.campaignRepository = campaignRepository;
+        this.campaignLeadRepository = campaignLeadRepository;
     }
 
     public enum RetryPlan {
@@ -36,7 +39,8 @@ public class CampaignRetryTransactionService {
         }
 
         // 7. FAILED + ZERO LEADS
-        if ("FAILED".equals(status) && campaign.getDiscoveredCount() == 0) {
+        long existingCount = campaignLeadRepository.countByCampaignId(id);
+        if ("FAILED".equals(status) && existingCount == 0) {
              campaign.setErrorMessage(null);
              campaign.setProgressCurrent(0);
              campaign.setProgressStage("DISCOVERY");
