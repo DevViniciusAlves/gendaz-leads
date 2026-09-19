@@ -25,6 +25,19 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         this.userDetailsService = userDetailsService;
     }
 
+    private boolean isTechnicalFailure(Throwable e) {
+        Throwable t = e;
+        while (t != null) {
+            if (t instanceof org.springframework.dao.DataAccessException
+                    || t instanceof java.sql.SQLException
+                    || t.getClass().getName().contains("Hikari")) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
+    }
+
     @Override
     protected void doFilterInternal(@NonNull HttpServletRequest request,
                                     @NonNull HttpServletResponse response,
@@ -49,9 +62,19 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             UserDetails userDetails;
             try {
                 userDetails = userDetailsService.loadUserByUsername(email);
-            } catch (RuntimeException e) {
-                // Usuário removido/desabilitado ou falha técnica: segue sem autenticação.
-                // O SecurityConfig/entry point responde 401 sem vazar detalhes.
+            } catch (org.springframework.security.core.userdetails.UsernameNotFoundException e) {
+                // Usuário não encontrado no DB: segue sem autenticação (401 via EntryPoint).
+                filterChain.doFilter(request, response);
+                return;
+            } catch (Exception e) {
+                // Falha técnica (JPA/JDBC/Hikari): responde 503 para que o frontend NÃO limpe o token.
+                if (isTechnicalFailure(e)) {
+                    log.warn("JWT filter technical failure: {} ({})", e.getMessage(), e.getClass().getSimpleName());
+                    response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+                    response.setContentType("application/json");
+                    response.getWriter().write("{\"code\":\"AUTH_SERVICE_UNAVAILABLE\",\"message\":\"Serviço indisponível.\"}");
+                    return;
+                }
                 filterChain.doFilter(request, response);
                 return;
             }

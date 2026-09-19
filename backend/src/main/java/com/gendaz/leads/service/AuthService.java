@@ -54,7 +54,7 @@ public class AuthService {
                 .enabled(true)
                 .build();
         try {
-            user = userRepository.save(user);
+            user = userRepository.saveAndFlush(user);
         } catch (org.springframework.dao.DataIntegrityViolationException e) {
             // Race: unique constraint de e-mail atingida entre existsByEmail e save.
             log.warn("register email conflict errorType={}", e.getClass().getSimpleName());

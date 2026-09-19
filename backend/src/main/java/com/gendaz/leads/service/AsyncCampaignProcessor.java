@@ -65,21 +65,64 @@ public class AsyncCampaignProcessor {
     public void processCampaign(Long campaignId) {
         Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
         if (campaign == null) return;
-        try {
-            discoverStage(campaign);
-            analyzeStage(campaign);
-            finalizeCampaign(campaign);
-        } catch (ApiException e) {
-            log.error("Erro no processamento da campanha {}: {} ({})", campaignId, e.getMessage(), e.getCode(), e);
-            campaign.setStatus("FAILED");
-            campaign.setErrorMessage(truncate(e.getMessage()));
-            campaignRepository.save(campaign);
-        } catch (Exception e) {
-            log.error("Erro no processamento da campanha {}: {}", campaignId, e.getMessage(), e);
-            campaign.setStatus("FAILED");
-            campaign.setErrorMessage(truncate(e.getMessage()));
-            campaignRepository.save(campaign);
+        synchronized (campaign) {
+            try {
+                discoverStage(campaign);
+                analyzeStage(campaign);
+                finalizeCampaign(campaign);
+            } catch (ApiException e) {
+                log.error("Erro no processamento da campanha {}: {} ({})", campaignId, e.getMessage(), e.getCode(), e);
+                campaign.setStatus("FAILED");
+                campaign.setErrorMessage(truncate(e.getMessage()));
+                campaignRepository.save(campaign);
+            } catch (Exception e) {
+                log.error("Erro no processamento da campanha {}: {}", campaignId, e.getMessage(), e);
+                campaign.setStatus("FAILED");
+                campaign.setErrorMessage(truncate(e.getMessage()));
+                campaignRepository.save(campaign);
+            }
         }
+    }
+
+    @Async
+    public void retry(Long campaignId) {
+        Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
+        if (campaign == null) return;
+
+        // 409 guard: se ja nao esta em estado FAILED, nao re-tente.
+        if (!"FAILED".equals(campaign.getStatus())) {
+            log.warn("Campanha {} nao pode ser re-tentada: status atual={}", campaignId, campaign.getStatus());
+            throw new ApiException(org.springframework.http.HttpStatus.CONFLICT,
+                    "CONCURRENT_PROCESSING", "Campanha nao esta em estado FAILED; nao ha o que re-tentar.");
+        }
+
+        // CAS A: FAILED + discoveredCount=0 => restart discovery via processCampaign
+        if (campaign.getDiscoveredCount() == 0) {
+            log.info("CAS A: campanha {} FAILED sem leads descobertos -> reiniciando discovery", campaignId);
+            try {
+                discoverStage(campaign);
+                analyzeStage(campaign);
+                finalizeCampaign(campaign);
+            } catch (Exception e) {
+                log.error("CAS A falha ao reiniciar discovery para campanha {}: {}", campaignId, e.getMessage(), e);
+                campaign.setStatus("FAILED");
+                campaign.setErrorMessage(truncate(e.getMessage()));
+                campaignRepository.save(campaign);
+            }
+            return;
+        }
+
+        // CAS B: FAILED com leads com status ERROR => retryFailedLeads
+        List<Lead> leads = leadRepository.findByCampaign(campaign.getId());
+        long errorLeads = leads.stream().filter(l -> "ERROR".equals(l.getStatus())).count();
+        if (errorLeads > 0) {
+            log.info("CAS B: campanha {} FAILED com {} leads com ERROR -> retryFailedLeads", campaignId, errorLeads);
+            retryFailedLeads(campaignId);
+            return;
+        }
+
+        // Nenhuma das condicoes aplica: ja tem leads nao-ERROR em campanha finalizada.
+        log.warn("Campanha {} FAILED mas nao ha leads ERROR nem discoveredCount=0; nada a fazer.", campaignId);
     }
 
     @Async

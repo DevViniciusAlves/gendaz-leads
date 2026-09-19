@@ -36,55 +36,59 @@ public class Campaign {
     @Builder.Default
     private String status = "CREATED";
 
-    @Builder.Default
     @Column(name = "discovered_count")
+    @Builder.Default
     private int discoveredCount = 0;
 
-    @Builder.Default
     @Column(name = "analyzed_count")
+    @Builder.Default
     private int analyzedCount = 0;
 
-    @Builder.Default
     @Column(name = "message_count")
+    @Builder.Default
     private int messageCount = 0;
 
-    @Builder.Default
     @Column(name = "approved_count")
+    @Builder.Default
     private int approvedCount = 0;
 
-    @Builder.Default
     @Column(name = "sent_count")
+    @Builder.Default
     private int sentCount = 0;
 
-    @Builder.Default
     @Column(name = "replied_count")
+    @Builder.Default
     private int repliedCount = 0;
 
-    @Builder.Default
     @Column(name = "interested_count")
+    @Builder.Default
     private int interestedCount = 0;
 
-    @Builder.Default
     @Column(name = "converted_count")
+    @Builder.Default
     private int convertedCount = 0;
 
-    @Builder.Default
     @Column(name = "blocked_count")
+    @Builder.Default
     private int blockedCount = 0;
 
     @Column(name = "progress_stage")
     private String progressStage;
 
-    @Builder.Default
     @Column(name = "progress_current")
+    @Builder.Default
     private int progressCurrent = 0;
 
-    @Builder.Default
     @Column(name = "progress_total")
+    @Builder.Default
     private int progressTotal = 0;
 
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
+
+    @Version
+    @Column(name = "campanha_version")
+    private int version = 0;
 
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
     private Instant createdAt;

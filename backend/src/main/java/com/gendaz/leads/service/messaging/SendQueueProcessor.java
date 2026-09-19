@@ -13,6 +13,10 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
 
+import com.gendaz.leads.whatsapp.FailureCategory;
+import com.gendaz.leads.whatsapp.WhatsAppService;
+import com.gendaz.leads.whatsapp.WhatsAppSessionStatus;
+
 @Component
 public class SendQueueProcessor {
 
@@ -49,19 +53,22 @@ public class SendQueueProcessor {
     private final LeadRepository leadRepository;
     private final MessagingProviderRouter providerRouter;
     private final MessagingScheduleProperties scheduleProperties;
+    private final WhatsAppService whatsAppService;
 
     public SendQueueProcessor(MessageSendClaimService claimService,
                               MessageSendCompletionService completionService,
                               MessageSendRepository messageSendRepository,
                               LeadRepository leadRepository,
                               MessagingProviderRouter providerRouter,
-                              MessagingScheduleProperties scheduleProperties) {
+                              MessagingScheduleProperties scheduleProperties,
+                              WhatsAppService whatsAppService) {
         this.claimService = claimService;
         this.completionService = completionService;
         this.messageSendRepository = messageSendRepository;
         this.leadRepository = leadRepository;
         this.providerRouter = providerRouter;
         this.scheduleProperties = scheduleProperties;
+        this.whatsAppService = whatsAppService;
     }
 
     @Scheduled(fixedDelayString = "#{@messagingScheduleProperties.delayMillis}")
@@ -122,6 +129,16 @@ public class SendQueueProcessor {
             completionService.completeTerminalFailure(sendId, "PROVIDER_NOT_FOUND",
                     "Provider inexistente: " + fresh.getProvider());
             return;
+        }
+
+        // Guard: WhatsApp status must be CONNECTED to send.
+        if ("whatsapp".equals(fresh.getProvider()) && whatsAppService != null) {
+            WhatsAppSessionStatus ws = whatsAppService.status();
+            if (ws.status() != null && !ws.status().equals("CONNECTED")) {
+                completionService.completeDeliveryUnknown(sendId, "WHATSAPP_NOT_CONNECTED",
+                        "WhatsApp status is " + ws.status() + "; send blocked.");
+                return;
+            }
         }
 
         MessagingSendResult result;

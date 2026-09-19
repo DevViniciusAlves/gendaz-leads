@@ -12,13 +12,18 @@ import java.util.Optional;
 public class TemplateService {
 
     private final MessageTemplateRepository templateRepository;
+    private final TemplateRenderer templateRenderer;
 
-    public TemplateService(MessageTemplateRepository templateRepository) {
+    public TemplateService(MessageTemplateRepository templateRepository, TemplateRenderer templateRenderer) {
         this.templateRepository = templateRepository;
+        this.templateRenderer = templateRenderer;
     }
 
     @Transactional
     public MessageTemplate save(MessageTemplate template) {
+        if (template.getTemplateText() != null) {
+            templateRenderer.validateTemplate(template.getTemplateText());
+        }
         return templateRepository.save(template);
     }
 
@@ -50,6 +55,7 @@ public class TemplateService {
      */
     @Transactional
     public com.gendaz.leads.entity.MessageTemplate upsertDefault(String name, String templateText) {
+        templateRenderer.validateTemplate(templateText);
         return findDefault()
                 .map(existing -> {
                     existing.setTemplateText(templateText);

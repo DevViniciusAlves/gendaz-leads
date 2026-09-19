@@ -17,7 +17,7 @@ public class TemplateRenderer {
     private static final Set<String> ALLOWED_VARS = Set.of("{{nome}}", "{{cidade}}", "{{nicho}}", "{{instagram}}");
     private static final Pattern VAR_PATTERN = Pattern.compile("\\{\\{[^}]+\\}\\}");
 
-    public String render(String templateText, Lead lead, Campaign campaign) {
+    public void validateTemplate(String templateText) {
         if (templateText == null || templateText.isBlank()) {
             throw new IllegalArgumentException("O template não pode ser vazio.");
         }
@@ -32,6 +32,10 @@ public class TemplateRenderer {
                 throw new IllegalArgumentException("Variável desconhecida no template: " + var);
             }
         }
+    }
+
+    public String render(String templateText, Lead lead, Campaign campaign) {
+        validateTemplate(templateText);
 
         String result = templateText;
 
@@ -39,8 +43,6 @@ public class TemplateRenderer {
         result = replaceVariable(result, "{{cidade}}", lead.getCity() != null ? lead.getCity() : "");
         result = replaceVariable(result, "{{nicho}}", campaign != null ? campaign.getNiche() : "");
         result = replaceVariable(result, "{{instagram}}", lead.getInstagramUsername() != null ? lead.getInstagramUsername() : "");
-
-        result = result.trim();
 
         if (result.length() > MAX_LENGTH) {
             throw new IllegalArgumentException("Template renderizado excede o limite de " + MAX_LENGTH + " caracteres.");

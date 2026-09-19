@@ -2,10 +2,12 @@ package com.gendaz.leads.service.provider;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.service.InstagramDetector;
 import com.gendaz.leads.util.Normalizer;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,6 +27,13 @@ import java.util.*;
 public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenStreetMapProvider.class);
+    private static final SerializationFeature IGNORE_DATES_AS_NULLS = SerializationFeature.IgnoreDatesAsNulls;
+
+    private static String rootCause(Throwable t) {
+        // Returns a short summary for log correlation without leaking sensitive data.
+        return (t.getMessage() != null ? t.getMessage() : "") +
+                (t.getCause() != null ? " cause=" + rootCause(t.getCause()) : "");
+    }
 
     private static final double BBOX_DELTA = 0.18;
     private static final int MIN_OUT = 80;
@@ -53,6 +62,13 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         this.objectMapper = objectMapper;
         this.instagramDetector = instagramDetector;
         this.normalizer = normalizer;
+    }
+
+    @PostConstruct
+    void logOsmConfig() {
+        // Sem expor URL: apenas se o fallback esta configurado.
+        log.info("[osm] config enabled={} timeoutMs={} osmFallbackConfigured={}",
+                enabled, timeoutMs, fallbackUrl != null && !fallbackUrl.isBlank());
     }
 
     private RestClient client() {
@@ -130,8 +146,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
                 } catch (RestClientException | java.io.IOException e) {
                     lastFailure = e;
-                    boolean retryable = isRetryable(e);
-                    log.warn("[osm] overpass_failed attempt={} errorType={} retryable={}", attempt, e.getClass().getSimpleName(), retryable);
+                    log.warn("[osm] overpass_failed attempt={} errorType={} rootCause={} retryable={}", 
+                            attempt, e.getClass().getSimpleName(), rootCause(e), isRetryable(e));
                     if (!retryable) break; // falha definitiva: nao insistir neste endpoint
                     if (attempt < 3) {
                         sleepBackoff(attempt);
@@ -233,11 +249,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 throw e;
             } catch (RestClientException | java.io.IOException e) {
                 lastFailure = e;
-                if (!isRetryable(e)) {
-                    throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR",
-                            "Falha ao geocodificar local: " + location);
-                }
-                if (attempt < 3) sleepBackoff(attempt);
+                log.warn("[osm] geocode_failed attempt={} errorType={} rootCause={}", 
+                        attempt, e.getClass().getSimpleName(), rootCause(e));
             }
         }
         // Falha Nominatim apos retries: OSM_GEOCODE_ERROR.
