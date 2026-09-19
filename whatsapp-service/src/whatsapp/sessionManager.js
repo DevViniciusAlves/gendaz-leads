@@ -413,10 +413,22 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     restoreIfRegistered: async () => {
       try {
         const loaded = await authStore.loadBaileysAuthState();
-        if (loaded && loaded.registered && baileys && !state.shuttingDown) {
+        if (loaded && loaded.registered) {
+          if (!baileys) {
+            log.error && log.error('Baileys indisponivel no boot-restore.');
+            return publicStatus();
+          }
+          if (state.shuttingDown) {
+            log.info && log.info('Servico em shutdown; abortando restore.');
+            return publicStatus();
+          }
+          log.info && log.info('Sessao registrada encontrada; tentando restaurar.');
           await connectInternal({ reason: 'boot-restore' });
         }
-      } catch (_) {}
+      } catch (e) {
+        log.error && log.error('restore_failed=true', { errorType: e.name, safeMessage: e.message });
+        setStatus(STATES.ERROR, 'restore_failed');
+      }
       return publicStatus();
     },
     _injectSocket,

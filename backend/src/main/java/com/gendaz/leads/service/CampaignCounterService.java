@@ -1,7 +1,7 @@
 package com.gendaz.leads.service;
 
 import com.gendaz.leads.entity.Campaign;
-import com.gendaz.leads.entity.Lead;
+import com.gendaz.leads.repository.CampaignLeadRepository;
 import com.gendaz.leads.repository.CampaignRepository;
 import com.gendaz.leads.repository.LeadRepository;
 import org.springframework.stereotype.Service;
@@ -22,13 +22,19 @@ public class CampaignCounterService {
             "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED");
     private static final List<String> INTERESTED_LIKE = List.of(
             "INTERESTED", "SCHEDULED", "CONVERTED");
+    private static final List<String> ANALYZED_LIKE = List.of(
+            "ANALYZED", "MESSAGE_READY", "APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED");
 
     private final CampaignRepository campaignRepository;
     private final LeadRepository leadRepository;
+    private final CampaignLeadRepository campaignLeadRepository;
 
-    public CampaignCounterService(CampaignRepository campaignRepository, LeadRepository leadRepository) {
+    public CampaignCounterService(CampaignRepository campaignRepository, 
+                                  LeadRepository leadRepository,
+                                  CampaignLeadRepository campaignLeadRepository) {
         this.campaignRepository = campaignRepository;
         this.leadRepository = leadRepository;
+        this.campaignLeadRepository = campaignLeadRepository;
     }
 
     @Transactional
@@ -36,24 +42,17 @@ public class CampaignCounterService {
         if (campaignId == null) return;
         Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
         if (campaign == null) return;
-        List<Lead> leads = leadRepository.findByCampaign(campaignId);
-        int approved = 0, sent = 0, replied = 0, interested = 0, converted = 0, blocked = 0, messages = 0;
-        for (Lead l : leads) {
-            if (l.isDoNotContact()) blocked++;
-            if (MESSAGE_READY_LIKE.contains(l.getStatus())) messages++;
-            if (APPROVED_LIKE.contains(l.getStatus())) approved++;
-            if (SENT_LIKE.contains(l.getStatus())) sent++;
-            if (REPLIED_LIKE.contains(l.getStatus())) replied++;
-            if (INTERESTED_LIKE.contains(l.getStatus())) interested++;
-            if ("CONVERTED".equals(l.getStatus())) converted++;
-        }
-        campaign.setApprovedCount(approved);
-        campaign.setSentCount(sent);
-        campaign.setRepliedCount(replied);
-        campaign.setInterestedCount(interested);
-        campaign.setConvertedCount(converted);
-        campaign.setBlockedCount(blocked);
-        campaign.setMessageCount(messages);
+        
+        campaign.setDiscoveredCount((int) campaignLeadRepository.countByCampaignId(campaignId));
+        campaign.setAnalyzedCount((int) leadRepository.countByCurrentCampaignIdWithAnalysis(campaignId));
+        campaign.setMessageCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, MESSAGE_READY_LIKE));
+        campaign.setApprovedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, APPROVED_LIKE));
+        campaign.setSentCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, SENT_LIKE));
+        campaign.setRepliedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, REPLIED_LIKE));
+        campaign.setInterestedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, INTERESTED_LIKE));
+        campaign.setConvertedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, List.of("CONVERTED")));
+        campaign.setBlockedCount((int) leadRepository.countByCurrentCampaignIdAndDoNotContactTrue(campaignId));
+        
         campaignRepository.save(campaign);
     }
 }

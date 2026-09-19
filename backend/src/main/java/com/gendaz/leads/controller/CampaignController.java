@@ -1,5 +1,6 @@
 package com.gendaz.leads.controller;
 
+import com.gendaz.leads.dto.PageResponse;
 import com.gendaz.leads.dto.campaign.*;
 import com.gendaz.leads.service.*;
 import org.springframework.data.domain.*;
@@ -30,10 +31,10 @@ public class CampaignController {
     }
 
     @GetMapping
-    public ResponseEntity<Page<CampaignResponse>> list(@RequestParam(defaultValue = "0") int page,
+    public ResponseEntity<PageResponse<CampaignResponse>> list(@RequestParam(defaultValue = "0") int page,
                                                        @RequestParam(defaultValue = "20") int size) {
         Pageable pageable = PageRequest.of(Math.max(0, page), Math.max(1, Math.min(100, size)));
-        return ResponseEntity.ok(campaignService.list(pageable));
+        return ResponseEntity.ok(PageResponse.from(campaignService.list(pageable)));
     }
 
     @GetMapping("/{id}")

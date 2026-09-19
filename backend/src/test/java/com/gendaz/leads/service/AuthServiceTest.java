@@ -52,12 +52,14 @@ class AuthServiceTest {
     void registerSuccessNormalizesEmailAndHashesWithBCrypt() {
         when(userRepository.existsByEmail("user@test.com")).thenReturn(false);
         when(passwordEncoder.encode("password123")).thenReturn("$2a$12$hashed");
-        when(userRepository.save(any(User.class))).thenAnswer(inv -> {
+        when(jwtService.generateToken("user@test.com")).thenReturn("jwt-1");
+        
+        // Corrigido: Mockar saveAndFlush pois é o que AuthService usa
+        when(userRepository.saveAndFlush(any(User.class))).thenAnswer(inv -> {
             User u = inv.getArgument(0);
             u.setId(7L);
             return u;
         });
-        when(jwtService.generateToken("user@test.com")).thenReturn("jwt-1");
 
         AuthResponse res = authService.register(
                 new RegisterRequest("  Maria Silva  ", "  USER@Test.COM ", "password123"));
@@ -69,7 +71,7 @@ class AuthServiceTest {
         assertEquals("jwt-1", res.token());
 
         ArgumentCaptor<User> cap = ArgumentCaptor.forClass(User.class);
-        verify(userRepository).save(cap.capture());
+        verify(userRepository).saveAndFlush(cap.capture()); // Corrigido para saveAndFlush
         User saved = cap.getValue();
         assertEquals("user@test.com", saved.getEmail());
         assertEquals("$2a$12$hashed", saved.getPasswordHash());
@@ -94,7 +96,7 @@ class AuthServiceTest {
     void registerRaceConstraintReturns409Not500() {
         when(userRepository.existsByEmail("race@test.com")).thenReturn(false);
         when(passwordEncoder.encode(anyString())).thenReturn("h");
-        when(userRepository.save(any(User.class)))
+        when(userRepository.saveAndFlush(any(User.class))) // Corrigido para saveAndFlush
                 .thenThrow(new DataIntegrityViolationException("unique email"));
         ApiException ex = assertThrows(ApiException.class, () ->
                 authService.register(new RegisterRequest("Nome", " RACE@test.com ", "password123")));

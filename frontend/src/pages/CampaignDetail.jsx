@@ -9,14 +9,42 @@ import { Modal } from '../components/Modal.jsx'
 
 const PROCESSING = ['CREATED', 'DISCOVERING', 'ANALYZING', 'GENERATING']
 
-function sendLabel(sendStatus, eligible) {
-  if (sendStatus === 'QUEUED') return 'Na fila'
-  if (sendStatus === 'SENDING') return 'Enviando'
-  if (sendStatus === 'SENT') return 'Enviado'
-  if (sendStatus === 'FAILED') return 'Falhou'
-  if (sendStatus === 'SKIPPED') return 'Ignorado'
-  if (sendStatus === 'DELIVERY_UNKNOWN') return 'Entrega incerta'
-  return eligible ? 'Pronto' : 'Pronto'
+const INELIGIBILITY_DESCRIPTIONS = {
+  'DO_NOT_CONTACT': 'Lead marcado como não prospectar.',
+  'NO_PHONE': 'Lead não possui telefone cadastrado.',
+  'INVALID_PHONE': 'O telefone do lead é inválido.',
+  'ALREADY_QUEUED': 'Lead já está na fila de envio.',
+  'ALREADY_SENDING': 'O envio para este lead já está em andamento.',
+  'ALREADY_SENT': 'Lead já recebeu mensagem em outra campanha.',
+  'DELIVERY_UNKNOWN': 'A entrega anterior para este lead é incerta.',
+  'WRONG_CAMPAIGN': 'Lead pertence a outra campanha.'
+}
+
+function getSendLabel(lead) {
+  const { sendStatus, eligible, ineligibilityReason } = lead
+  if (sendStatus) {
+    switch (sendStatus) {
+      case 'QUEUED': return 'Na fila'
+      case 'SENDING': return 'Enviando'
+      case 'SENT': return 'Enviado'
+      case 'FAILED': return 'Falhou'
+      case 'SKIPPED': return 'Ignorado'
+      case 'DELIVERY_UNKNOWN': return 'Entrega incerta'
+    }
+  }
+  if (eligible) return 'Pronto'
+
+  switch (ineligibilityReason) {
+    case 'DO_NOT_CONTACT': return 'Não prospectar'
+    case 'NO_PHONE': return 'Sem telefone'
+    case 'INVALID_PHONE': return 'Telefone inválido'
+    case 'ALREADY_QUEUED': return 'Já está na fila'
+    case 'ALREADY_SENDING': return 'Envio em andamento'
+    case 'ALREADY_SENT': return 'Já enviado'
+    case 'DELIVERY_UNKNOWN': return 'Entrega anterior incerta'
+    case 'WRONG_CAMPAIGN': return 'Fora da campanha'
+    default: return 'Indisponível'
+  }
 }
 
 export function CampaignDetail() {
@@ -204,7 +232,17 @@ export function CampaignDetail() {
       )
       if (pending) scheduleQueuePolling()
     } catch (err) {
-      push(err.message, 'error')
+      if (err.code === 'WHATSAPP_NOT_CONNECTED') {
+        push(
+          <div className="flex-between">
+            {err.message}
+            <button className="btn btn-sm" onClick={() => navigate('/whatsapp')} style={{marginLeft: 8}}>Ir para WhatsApp</button>
+          </div>,
+          'error'
+        )
+      } else {
+        push(err.message, 'error')
+      }
     } finally {
       setSending(false)
     }
@@ -380,10 +418,15 @@ export function CampaignDetail() {
                     <td>
                       {l.sendStatus ? (
                         <span className={'badge '.concat(getBadgeClass(l.sendStatus))}>
-                          {sendLabel(l.sendStatus, isEligible)}
+                          {getSendLabel(l)}
                         </span>
                       ) : (
-                        <span className="badge badge-gray">{sendLabel(null, isEligible)}</span>
+                        <span className="badge badge-gray">{getSendLabel(l)}</span>
+                      )}
+                      {!l.eligible && l.ineligibilityReason && INELIGIBILITY_DESCRIPTIONS[l.ineligibilityReason] && (
+                        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                          {INELIGIBILITY_DESCRIPTIONS[l.ineligibilityReason]}
+                        </div>
                       )}
                     </td>
                   </tr>

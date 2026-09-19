@@ -28,18 +28,42 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey, logger }) {
   }
 
   async function writeSession(creds, registered) {
-    const payload = encryptJson(encryptionKey, creds);
-    await db.query(
-      `INSERT INTO whatsapp_auth_sessions(session_id, payload, registered, created_at, updated_at)
-       VALUES ($1, $2, $3, now(), now())
-       ON CONFLICT (session_id) DO UPDATE SET payload = EXCLUDED.payload, registered = EXCLUDED.registered, updated_at = now()`,
-      [sessionId, payload, !!registered]
-    );
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const payload = encryptJson(encryptionKey, creds);
+      await client.query(
+        `INSERT INTO whatsapp_auth_sessions(session_id, payload, registered, created_at, updated_at)
+         VALUES ($1, $2, $3, now(), now())
+         ON CONFLICT (session_id) DO UPDATE SET payload = EXCLUDED.payload, registered = EXCLUDED.registered, updated_at = now()`,
+        [sessionId, payload, !!registered]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function saveAndFlush(creds, registered) {
+    await writeSession(creds, registered);
   }
 
   async function clear() {
-    await db.query('DELETE FROM whatsapp_auth_keys WHERE session_id = $1', [sessionId]);
-    await db.query('DELETE FROM whatsapp_auth_sessions WHERE session_id = $1', [sessionId]);
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM whatsapp_auth_keys WHERE session_id = $1', [sessionId]);
+      await client.query('DELETE FROM whatsapp_auth_sessions WHERE session_id = $1', [sessionId]);
+      await client.query('COMMIT');
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async function loadBaileysAuthState() {
@@ -103,7 +127,7 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey, logger }) {
     };
 
     const saveCreds = async () => {
-      await writeSession(stateCreds, !!stateCreds.registered);
+      await saveAndFlush(stateCreds, !!stateCreds.registered);
     };
 
     return { state: { creds: stateCreds, keys }, saveCreds, registered, safeAuthStateObj };
@@ -116,7 +140,7 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey, logger }) {
     return authState;
   }
 
-  return { readSession, writeSession, clear, loadBaileysAuthState, pool: db, safeAuthStateObj };
+  return { readSession, writeSession, saveAndFlush, clear, loadBaileysAuthState, pool: db, safeAuthStateObj };
 }
 
 module.exports = { createPostgresAuthStore };

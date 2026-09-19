@@ -5,6 +5,7 @@ import com.gendaz.leads.entity.MessageSend;
 import com.gendaz.leads.repository.LeadRepository;
 import com.gendaz.leads.repository.MessageSendRepository;
 import com.gendaz.leads.whatsapp.WhatsAppService;
+import com.gendaz.leads.whatsapp.WhatsAppSessionStatus;
 import org.junit.jupiter.api.BeforeEach;
 
 import org.junit.jupiter.api.Test;
@@ -73,6 +74,7 @@ class SendQueueProcessorTest {
         when(messageSendRepository.findById(1L)).thenReturn(Optional.of(c));
         when(providerRouter.getProvider("whatsapp")).thenReturn(provider);
         when(provider.send(any())).thenReturn(new MessagingSendResult(true, FailureCategory.NONE, "wa-1", null, "ok"));
+        when(whatsAppService.status()).thenReturn(new WhatsAppSessionStatus("CONNECTED", false, null));
 
         processor.processOneOutsideTransaction(c);
 
@@ -93,6 +95,7 @@ class SendQueueProcessorTest {
         when(providerRouter.getProvider("whatsapp")).thenReturn(provider);
         when(provider.send(any())).thenReturn(new MessagingSendResult(false,
                 FailureCategory.TERMINAL, null, "RECIPIENT_NOT_ON_WHATSAPP", "sem zap"));
+        when(whatsAppService.status()).thenReturn(new WhatsAppSessionStatus("CONNECTED", false, null));
 
         processor.processOneOutsideTransaction(c);
 
@@ -109,6 +112,7 @@ class SendQueueProcessorTest {
         when(providerRouter.getProvider("whatsapp")).thenReturn(provider);
         when(provider.send(any())).thenReturn(new MessagingSendResult(false,
                 FailureCategory.TRANSIENT, null, "WHATSAPP_NOT_CONNECTED", "down"));
+        when(whatsAppService.status()).thenReturn(new WhatsAppSessionStatus("CONNECTED", false, null));
 
         processor.processOneOutsideTransaction(c);
 
@@ -123,6 +127,7 @@ class SendQueueProcessorTest {
         when(providerRouter.getProvider("whatsapp")).thenReturn(provider);
         when(provider.send(any())).thenReturn(new MessagingSendResult(false,
                 FailureCategory.TRANSIENT, null, "WHATSAPP_NOT_CONNECTED", "down"));
+        when(whatsAppService.status()).thenReturn(new WhatsAppSessionStatus("CONNECTED", false, null));
 
         processor.processOneOutsideTransaction(c);
 
@@ -137,6 +142,7 @@ class SendQueueProcessorTest {
         when(providerRouter.getProvider("whatsapp")).thenReturn(provider);
         when(provider.send(any())).thenReturn(new MessagingSendResult(false,
                 FailureCategory.AMBIGUOUS, null, "WHATSAPP_READ_TIMEOUT", "timeout"));
+        when(whatsAppService.status()).thenReturn(new WhatsAppSessionStatus("CONNECTED", false, null));
 
         processor.processOneOutsideTransaction(c);
 

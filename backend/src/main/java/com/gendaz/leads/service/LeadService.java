@@ -211,10 +211,14 @@ public class LeadService {
         lead.setStatus("DO_NOT_CONTACT");
         leadRepository.save(lead);
         messageSendRepository.findByLeadId(id).forEach(s -> {
-            if ("QUEUED".equals(s.getStatus()) || "SENDING".equals(s.getStatus())) {
+            if ("QUEUED".equals(s.getStatus())) {
                 s.setStatus("SKIPPED");
-                s.setResult("Lead marcado como nao prospectar.");
+                s.setErrorCode("DO_NOT_CONTACT");
                 messageSendRepository.save(s);
+                leadEventRepository.save(LeadEvent.builder().leadId(id).campaignId(lead.getCurrentCampaignId())
+                        .eventType("message_skipped").eventMetadata("DO_NOT_CONTACT").build());
+            } else if ("SENDING".equals(s.getStatus())) {
+                // Do not change status, let it finish.
             }
         });
         leadEventRepository.save(LeadEvent.builder().leadId(id).campaignId(lead.getCurrentCampaignId())

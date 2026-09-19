@@ -1,5 +1,6 @@
 package com.gendaz.leads.controller;
 
+import com.gendaz.leads.dto.PageResponse;
 import com.gendaz.leads.dto.lead.LeadResponse;
 import com.gendaz.leads.dto.lead.StatusRequest;
 import com.gendaz.leads.dto.lead.UpdateLeadMessageRequest;
@@ -24,13 +25,13 @@ public class LeadController {
     }
 
     @GetMapping
-    public ResponseEntity<Page<LeadResponse>> list(@RequestParam(required = false) Long campaignId,
+    public ResponseEntity<PageResponse<LeadResponse>> list(@RequestParam(required = false) Long campaignId,
                                                    @RequestParam(required = false) String status,
                                                    @RequestParam(required = false) String search,
                                                    @RequestParam(defaultValue = "0") int page,
                                                    @RequestParam(defaultValue = "20") int size) {
         Pageable pageable = PageRequest.of(Math.max(0, page), Math.max(1, Math.min(100, size)));
-        return ResponseEntity.ok(leadService.list(campaignId, status, search, pageable));
+        return ResponseEntity.ok(PageResponse.from(leadService.list(campaignId, status, search, pageable)));
     }
 
     @GetMapping("/{id}")
@@ -39,11 +40,11 @@ public class LeadController {
     }
 
     @GetMapping("/{id}/events")
-    public ResponseEntity<Page<LeadEvent>> events(@PathVariable Long id,
+    public ResponseEntity<PageResponse<LeadEvent>> events(@PathVariable Long id,
                                                   @RequestParam(defaultValue = "0") int page,
                                                   @RequestParam(defaultValue = "30") int size) {
         Pageable pageable = PageRequest.of(Math.max(0, page), Math.max(1, Math.min(100, size)));
-        return ResponseEntity.ok(leadService.events(id, pageable));
+        return ResponseEntity.ok(PageResponse.from(leadService.events(id, pageable)));
     }
 
     @PatchMapping("/{id}/message")

@@ -12,9 +12,7 @@ async function main() {
   });
   // Boot: tenta restaurar sessao registrada do banco/arquivo.
   // Restore não deve gerar novo QR se auth válida existe.
-  try {
-    await sessionManager.restoreIfRegistered();
-  } catch (_) {}
+  await sessionManager.restoreIfRegistered();
 
   // Shutdown NÃO é logout: parar reconnect, bloquear novos connects,
   // flush writes, socket.end. NUNCA logout nem authStore.clear. Fechar Pool.
@@ -22,18 +20,38 @@ async function main() {
   async function gracefulShutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
+    console.log(`Shutdown signal ${signal} recebido. Iniciando encerramento...`);
+
+    // Watchdog de 10s
+    const watchdog = setTimeout(() => {
+      console.error('Shutdown demorou demais. Forçando saída.');
+      process.exit(1);
+    }, 10000);
+    watchdog.unref();
+
     try {
       await sessionManager.shutdown();
-    } catch (_) {}
-    server.close(() => {});
+    } catch (e) {
+      console.error('Erro no shutdown do sessionManager:', e);
+    }
+    
+    try {
+      await new Promise((resolve) => server.close(resolve));
+    } catch (e) {
+      console.error('Erro ao fechar servidor HTTP:', e);
+    }
+
     try {
       const pool = authStore && authStore.pool;
       if (pool && typeof pool.end === 'function') {
         await pool.end();
       }
-    } catch (_) {}
-    // Pequena janela para flush final antes de sair.
-    setTimeout(() => process.exit(0), 500).unref?.();
+    } catch (e) {
+      console.error('Erro ao fechar pool de conexoes:', e);
+    }
+    
+    console.log('Shutdown concluído.');
+    process.exit(0);
   }
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));

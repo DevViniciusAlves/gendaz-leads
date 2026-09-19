@@ -20,8 +20,12 @@ class TemplateServiceTest {
     @Mock
     MessageTemplateRepository repository;
 
+    @Mock
+    TemplateRenderer templateRenderer;
+
     @InjectMocks
     TemplateService service;
+
 
     @Test
     void upsertUpdatesExistingDefault() {

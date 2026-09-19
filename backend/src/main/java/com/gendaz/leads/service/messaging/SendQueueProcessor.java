@@ -133,7 +133,7 @@ public class SendQueueProcessor {
         // Guard: WhatsApp status must be CONNECTED to send.
         if ("whatsapp".equals(fresh.getProvider()) && whatsAppService != null) {
             WhatsAppSessionStatus ws = whatsAppService.status();
-            if (ws.status() != null && !ws.status().equals("CONNECTED")) {
+            if (ws != null && ws.status() != null && !ws.status().equals("CONNECTED")) {
                 completionService.completeDeliveryUnknown(sendId, "WHATSAPP_NOT_CONNECTED",
                         "WhatsApp status is " + ws.status() + "; send blocked.");
                 return;

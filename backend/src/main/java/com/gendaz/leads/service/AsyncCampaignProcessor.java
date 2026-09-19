@@ -107,6 +107,8 @@ public class AsyncCampaignProcessor {
         // ... (implementacao simplificada para manter o foco)
         discoverStage(campaign); // Simplificacao
     }
+
+    public void retryFailedLeads(Long campaignId) {
         Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
         if (campaign == null) return;
         List<Lead> leads = leadRepository.findByCampaign(campaignId);

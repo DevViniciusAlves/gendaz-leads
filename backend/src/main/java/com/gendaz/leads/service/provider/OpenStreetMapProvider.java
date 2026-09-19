@@ -66,6 +66,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     private final ObjectMapper objectMapper;
     private final InstagramDetector instagramDetector;
     private final Normalizer normalizer;
+    private final Map<String, String> instagramCache = new HashMap<>();
 
     public OpenStreetMapProvider(RestClient.Builder builder, ObjectMapper objectMapper,
                                  InstagramDetector instagramDetector, Normalizer normalizer) {
@@ -330,12 +331,27 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
         String rawIg = firstPresent(tags, "contact:instagram", "instagram");
         String username = normalizer.normalizeInstagram(rawIg);
+
         if (username != null && !username.isBlank()) {
             candidate.setInstagramUsername(username);
             candidate.setInstagramUrl("https://instagram.com/" + username);
             candidate.setInstagramStatus("FOUND");
         } else {
-            candidate.setInstagramStatus("NOT_FOUND");
+            String website = candidate.getWebsite();
+            if (website != null && !website.isBlank() && instagramDetector != null) {
+                String normalizedWebsite = website.trim().toLowerCase();
+                String detected = instagramCache.computeIfAbsent(normalizedWebsite, instagramDetector::detectFromWebsite);
+                
+                if (detected != null && !detected.isBlank()) {
+                    candidate.setInstagramUsername(detected);
+                    candidate.setInstagramUrl("https://instagram.com/" + detected);
+                    candidate.setInstagramStatus("FOUND");
+                } else {
+                    candidate.setInstagramStatus("NOT_FOUND");
+                }
+            } else {
+                candidate.setInstagramStatus("NOT_FOUND");
+            }
         }
         return candidate;
     }

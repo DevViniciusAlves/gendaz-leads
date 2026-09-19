@@ -35,6 +35,15 @@ public interface LeadRepository extends JpaRepository<Lead, Long>, JpaSpecificat
     @Query("SELECT l.status, COUNT(l) FROM Lead l GROUP BY l.status")
     List<Object[]> countByStatus();
 
+    long countByCurrentCampaignId(Long campaignId);
+
+    long countByCurrentCampaignIdAndStatusIn(Long campaignId, java.util.Collection<String> statuses);
+
+    long countByCurrentCampaignIdAndDoNotContactTrue(Long campaignId);
+
+    @Query("SELECT COUNT(l) FROM Lead l JOIN LeadAnalysis la ON la.leadId = l.id WHERE l.currentCampaignId = :campaignId")
+    long countByCurrentCampaignIdWithAnalysis(@Param("campaignId") Long campaignId);
+
     @Query("SELECT COUNT(l) FROM Lead l JOIN CampaignLead cl ON cl.leadId = l.id JOIN Campaign c ON c.id = cl.campaignId WHERE l.id = :leadId AND c.ownerId = :ownerId")
     long countOwnedByUser(@Param("leadId") Long leadId, @Param("ownerId") Long ownerId);
 
