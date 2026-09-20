@@ -216,7 +216,7 @@ class OpenStreetMapProviderTest {
     void fallbackEndpointUsedOnlyAfterPrimaryFailure() {
         RestClient.Builder builder = mock(RestClient.Builder.class);
         RestClient restClient = stubHttp(builder, GEO_JSON,
-                new RuntimeException(new ConnectException("connect timed out")));
+                new org.springframework.web.client.ResourceAccessException("connect timed out", new ConnectException("connect timed out")));
         OpenStreetMapProvider p = providerWith(builder);
         ReflectionTestUtils.setField(p, "fallbackUrl", "https://fallback.test/api/interpreter");
 

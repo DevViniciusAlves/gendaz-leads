@@ -2,7 +2,9 @@ package com.gendaz.leads.service;
 
 import com.gendaz.leads.entity.Campaign;
 import com.gendaz.leads.entity.Lead;
+import com.gendaz.leads.exception.ApiException;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -56,20 +58,28 @@ class TemplateRendererTest {
         String single = renderer.render("Olá {nome}", lead(), campaign());
         assertTrue(single.contains("{nome}"));
         // Unknown com double braces deve falhar:
-        assertThrows(IllegalArgumentException.class,
+        ApiException ex = assertThrows(ApiException.class,
                 () -> renderer.render("Olá {{unknown}}", lead(), campaign()));
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
+        assertEquals("INVALID_TEMPLATE_VARIABLE", ex.getCode());
     }
 
     @Test
     void rejectsBlank() {
-        assertThrows(IllegalArgumentException.class, () -> renderer.render("   ", lead(), campaign()));
-        assertThrows(IllegalArgumentException.class, () -> renderer.render(null, lead(), campaign()));
+        ApiException ex1 = assertThrows(ApiException.class, () -> renderer.render("   ", lead(), campaign()));
+        assertEquals(HttpStatus.BAD_REQUEST, ex1.getStatus());
+        assertEquals("INVALID_TEMPLATE", ex1.getCode());
+        ApiException ex2 = assertThrows(ApiException.class, () -> renderer.render(null, lead(), campaign()));
+        assertEquals(HttpStatus.BAD_REQUEST, ex2.getStatus());
+        assertEquals("INVALID_TEMPLATE", ex2.getCode());
     }
 
     @Test
     void rejectsOver4000() {
-        assertThrows(IllegalArgumentException.class,
+        ApiException ex = assertThrows(ApiException.class,
                 () -> renderer.render("x".repeat(4001), lead(), campaign()));
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
+        assertEquals("INVALID_TEMPLATE_TOO_LONG", ex.getCode());
     }
 
     @Test

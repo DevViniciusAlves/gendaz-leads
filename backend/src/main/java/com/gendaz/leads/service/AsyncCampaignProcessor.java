@@ -35,12 +35,14 @@ public class AsyncCampaignProcessor {
     private final Normalizer normalizer;
     private final OpenStreetMapProvider openStreetMapProvider;
     private final CampaignLeadPersistenceService persistenceService;
+    private final CampaignLeadRepository campaignLeadRepository;
 
     public AsyncCampaignProcessor(CampaignRepository campaignRepository, LeadRepository leadRepository,
                                   LeadEventRepository leadEventRepository, LeadAnalysisService leadAnalysisService,
                                   DeduplicationService deduplicationService, Normalizer normalizer,
                                   OpenStreetMapProvider openStreetMapProvider,
-                                  CampaignLeadPersistenceService persistenceService) {
+                                  CampaignLeadPersistenceService persistenceService,
+                                  CampaignLeadRepository campaignLeadRepository) {
         this.campaignRepository = campaignRepository;
         this.leadRepository = leadRepository;
         this.leadEventRepository = leadEventRepository;
@@ -49,6 +51,7 @@ public class AsyncCampaignProcessor {
         this.normalizer = normalizer;
         this.openStreetMapProvider = openStreetMapProvider;
         this.persistenceService = persistenceService;
+        this.campaignLeadRepository = campaignLeadRepository;
     }
 
     @Async
@@ -78,13 +81,28 @@ public class AsyncCampaignProcessor {
         Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
         if (campaign == null) return;
         
+        if (remaining <= 0) {
+            // Remaining <= 0: recount and finalize without new discovery
+            recomputeAndFinalize(campaign);
+            return;
+        }
+
         try {
-            // Reutilizar discoverStage mas com limite reduzido
-            discoverAdditionalLeads(campaign, remaining);
+            // 1. Discover additional leads (preserve existing)
+            int discovered = discoverAdditionalLeads(campaign, remaining);
             
-            // 2. Analisar novos + ERRORs
-            analyzeStage(campaign);
-            finalizeCampaign(campaign);
+            // 2. Analyze only new leads + ERROR leads
+            analyzeOnlyPendingOrError(campaign);
+            
+            // 3. Recount and finalize
+            recomputeAndFinalize(campaign);
+            
+        } catch (ApiException e) {
+            // Discovery failure: keep old leads, mark FAILED with safe error
+            log.error("Discovery falhou na campanha parcial {}: {} ({})", campaignId, e.getMessage(), e.getCode());
+            campaign.setStatus("FAILED");
+            campaign.setErrorMessage(truncate(e.getMessage()));
+            campaignRepository.save(campaign);
         } catch (Exception e) {
             log.error("Erro no processamento parcial da campanha {}: {}", campaignId, e.getMessage(), e);
             campaign.setStatus("FAILED");
@@ -93,7 +111,16 @@ public class AsyncCampaignProcessor {
         }
     }
 
-    private void discoverAdditionalLeads(Campaign campaign, int needed) {
+    private void recomputeAndFinalize(Campaign campaign) {
+        recompute(campaign);
+        finalizeCampaign(campaign);
+    }
+
+    public void recomputeAndFinalizeCampaign(Campaign campaign) {
+        recomputeAndFinalize(campaign);
+    }
+
+    private int discoverAdditionalLeads(Campaign campaign, int needed) {
         campaign.setStatus("DISCOVERING");
         campaign.setProgressStage("Buscando leads adicionais");
         campaign.setProgressTotal(needed);
@@ -156,14 +183,14 @@ public class AsyncCampaignProcessor {
                         .leadId(lead.getId()).campaignId(campaign.getId())
                         .eventType("lead_found").eventMetadata("source=" + candidate.getSource()).build());
                 discovered++;
-                campaign.setDiscoveredCount(campaign.getDiscoveredCount() + 1);
                 campaign.setProgressCurrent(discovered);
                 campaignRepository.save(campaign);
             } catch (DataIntegrityViolationException e) {
                 log.warn("Conflito de unicidade ao inserir lead (possivel duplicata): {}", candidate.getBusinessName());
             }
         }
-        campaignRepository.save(campaign);
+        // Note: discoveredCount will be recounted from DB in recomputeAndFinalize
+        return discovered;
     }
 
     private String batchKeyFromLead(Lead lead) {
@@ -302,6 +329,56 @@ public class AsyncCampaignProcessor {
         }
     }
 
+    /**
+     * Analisa apenas leads com status NEW ou ERROR (novos ou que falharam anteriormente).
+     * Preserva leads já analisados (MESSAGE_READY, APPROVED, SENT, etc).
+     */
+    private void analyzeOnlyPendingOrError(Campaign campaign) {
+        List<Lead> leads = leadRepository.findByCampaign(campaign.getId());
+        if (leads.isEmpty()) return;
+
+        campaign.setStatus("ANALYZING");
+        campaign.setProgressStage("Reanalisando pendentes e erros");
+        campaign.setProgressTotal(leads.size());
+        campaign.setProgressCurrent(0);
+        campaignRepository.save(campaign);
+
+        int analyzed = 0;
+        int messages = 0;
+        int current = 0;
+        for (Lead lead : leads) {
+            if (lead.isDoNotContact()) {
+                current++;
+                campaign.setProgressCurrent(current);
+                continue;
+            }
+            String status = lead.getStatus();
+            // Analisar apenas NEW (novos descobertos) ou ERROR (falharam antes)
+            if (!"NEW".equals(status) && !"ERROR".equals(status)) {
+                current++;
+                campaign.setProgressCurrent(current);
+                continue;
+            }
+            try {
+                leadAnalysisService.analyzeAndGenerate(lead, campaign.getId());
+                analyzed++;
+                messages++;
+            } catch (RuntimeException e) {
+                lead.setStatus("ERROR");
+                leadRepository.save(lead);
+                leadEventRepository.save(LeadEvent.builder()
+                        .leadId(lead.getId()).campaignId(campaign.getId())
+                        .eventType("lead_analysis_error").eventMetadata(truncate(e.getMessage())).build());
+                log.warn("Erro ao analisar lead {}: {}", lead.getId(), e.getMessage());
+            }
+            current++;
+            campaign.setProgressCurrent(current);
+            campaign.setAnalyzedCount(analyzed);
+            campaign.setMessageCount(messages);
+            campaignRepository.save(campaign);
+        }
+    }
+
     private void finalizeCampaign(Campaign campaign) {
         if (campaign.getDiscoveredCount() == 0) {
             campaign.setStatus("FAILED");
@@ -319,8 +396,9 @@ public class AsyncCampaignProcessor {
     }
 
     public void recompute(Campaign campaign) {
+        long discoveredCount = campaignLeadRepository.countByCampaignId(campaign.getId());
+        campaign.setDiscoveredCount((int) discoveredCount);
         List<Lead> leads = leadRepository.findByCampaign(campaign.getId());
-        campaign.setDiscoveredCount(leads.size());
         int analyzed = 0, messages = 0;
         for (Lead l : leads) {
             if ("MESSAGE_READY".equals(l.getStatus()) || "APPROVED".equals(l.getStatus())

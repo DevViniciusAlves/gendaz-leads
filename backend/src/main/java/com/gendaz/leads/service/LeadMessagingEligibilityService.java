@@ -9,6 +9,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @Service
 public class LeadMessagingEligibilityService {
@@ -54,6 +55,8 @@ public class LeadMessagingEligibilityService {
 
         List<MessageSend> sends = sendsForLead != null ? sendsForLead : List.of();
         for (MessageSend send : sends) {
+            // Apenas considera sends desta campanha
+            if (!Objects.equals(send.getCampaignId(), campaignId)) continue;
             String status = send.getStatus();
             if ("QUEUED".equals(status)) {
                 return new EligibilityResult(false, "ALREADY_QUEUED", "Lead já está na fila de envio nesta campanha.", normalized);

@@ -44,14 +44,14 @@ public class CampaignCounterService {
         if (campaign == null) return;
         
         campaign.setDiscoveredCount((int) campaignLeadRepository.countByCampaignId(campaignId));
-        campaign.setAnalyzedCount((int) leadRepository.countByCurrentCampaignIdWithAnalysis(campaignId));
-        campaign.setMessageCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, MESSAGE_READY_LIKE));
-        campaign.setApprovedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, APPROVED_LIKE));
-        campaign.setSentCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, SENT_LIKE));
-        campaign.setRepliedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, REPLIED_LIKE));
-        campaign.setInterestedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, INTERESTED_LIKE));
-        campaign.setConvertedCount((int) leadRepository.countByCurrentCampaignIdAndStatusIn(campaignId, List.of("CONVERTED")));
-        campaign.setBlockedCount((int) leadRepository.countByCurrentCampaignIdAndDoNotContactTrue(campaignId));
+        campaign.setAnalyzedCount((int) leadRepository.countByCampaignIdWithAnalysis(campaignId));
+        campaign.setMessageCount((int) leadRepository.countByCampaignIdAndStatusIn(campaignId, MESSAGE_READY_LIKE));
+        campaign.setApprovedCount((int) leadRepository.countByCampaignIdAndStatusIn(campaignId, APPROVED_LIKE));
+        campaign.setSentCount((int) leadRepository.countByCampaignIdAndStatusIn(campaignId, SENT_LIKE));
+        campaign.setRepliedCount((int) leadRepository.countByCampaignIdAndStatusIn(campaignId, REPLIED_LIKE));
+        campaign.setInterestedCount((int) leadRepository.countByCampaignIdAndStatusIn(campaignId, INTERESTED_LIKE));
+        campaign.setConvertedCount((int) leadRepository.countByCampaignIdAndStatusIn(campaignId, List.of("CONVERTED")));
+        campaign.setBlockedCount((int) leadRepository.countByCampaignIdAndDoNotContactTrue(campaignId));
         
         campaignRepository.save(campaign);
     }

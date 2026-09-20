@@ -27,7 +27,8 @@ class OpenStreetMapProviderMappingTest {
                   "name":"Studio Bella","contact:instagram":"@studio.bella",
                   "addr:city":"Curitiba"}}""");
         var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
-        LeadCandidate c = provider.mapElement(node, geo);
+        var cache = new java.util.HashMap<String, java.util.Optional<String>>();
+        LeadCandidate c = provider.mapElement(node, geo, cache);
         assertNotNull(c);
         assertEquals("node/123", c.getSourceId());
         assertEquals("studio.bella", c.getInstagramUsername());
@@ -42,7 +43,8 @@ class OpenStreetMapProviderMappingTest {
                   "name":"Lash Lab","instagram":"https://instagram.com/lashlab/",
                   "addr:city":"Curitiba"}}""");
         var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
-        LeadCandidate c = provider.mapElement(node, geo);
+        var cache = new java.util.HashMap<String, java.util.Optional<String>>();
+        LeadCandidate c = provider.mapElement(node, geo, cache);
         assertEquals("lashlab", c.getInstagramUsername());
         assertEquals("FOUND", c.getInstagramStatus());
     }
@@ -52,7 +54,8 @@ class OpenStreetMapProviderMappingTest {
         var node = el("""
                 {"type":"node","id":7,"tags":{"name":"Studio X"}}""");
         var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
-        LeadCandidate c = provider.mapElement(node, geo);
+        var cache = new java.util.HashMap<String, java.util.Optional<String>>();
+        LeadCandidate c = provider.mapElement(node, geo, cache);
         assertNotNull(c);
         assertNull(c.getPhone());
         assertNull(c.getWebsite());
@@ -70,7 +73,8 @@ class OpenStreetMapProviderMappingTest {
                   "contact:phone":"+55 41 99999-0000","phone":"111",
                   "contact:website":"https://salao.com","website":"https://outro.com"}}""");
         var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, null, null, "BR", 0,0,0,0,false);
-        LeadCandidate c = provider.mapElement(node, geo);
+        var cache = new java.util.HashMap<String, java.util.Optional<String>>();
+        LeadCandidate c = provider.mapElement(node, geo, cache);
         assertEquals("+55 41 99999-0000", c.getPhone());
         assertEquals("https://salao.com", c.getWebsite());
     }

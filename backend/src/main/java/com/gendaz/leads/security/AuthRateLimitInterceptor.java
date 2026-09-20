@@ -11,18 +11,23 @@ import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
-public class RateLimitInterceptor implements HandlerInterceptor {
+public class AuthRateLimitInterceptor implements HandlerInterceptor {
 
-    @Value("${app.security.rate-limit.requests-per-window}")
+    @Value("${app.security.auth-rate-limit.requests-per-window:20}")
     private int capacity;
 
-    @Value("${app.security.rate-limit.window-seconds}")
+    @Value("${app.security.auth-rate-limit.window-seconds:60}")
     private int windowSeconds;
 
     private final ConcurrentHashMap<String, Bucket> buckets = new ConcurrentHashMap<>();
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        // Allow OPTIONS requests (CORS preflight)
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
+
         String ip = resolveClientIp(request);
         Bucket bucket = buckets.computeIfAbsent(ip, k -> new Bucket(capacity, Instant.now()));
         boolean allowed = bucket.tryConsume(Instant.now(), windowSeconds, capacity);
@@ -35,7 +40,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
             response.setCharacterEncoding("UTF-8");
             response.getWriter().write(
                     "{\"timestamp\":\"" + Instant.now() + "\",\"status\":429,\"code\":\"RATE_LIMITED\"," +
-                            "\"message\":\"Muitas requisições. Tente novamente em instantes.\"}");
+                            "\"message\":\"Muitas requisições de autenticação. Tente novamente em instantes.\"}");
             return false;
         }
         return true;

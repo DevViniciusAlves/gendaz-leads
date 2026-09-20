@@ -13,9 +13,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
 
-import com.gendaz.leads.whatsapp.WhatsAppService;
-import com.gendaz.leads.whatsapp.WhatsAppSessionStatus;
-
 @Component
 public class SendQueueProcessor {
 
@@ -52,45 +49,36 @@ public class SendQueueProcessor {
     private final LeadRepository leadRepository;
     private final MessagingProviderRouter providerRouter;
     private final MessagingScheduleProperties scheduleProperties;
-    private final WhatsAppService whatsAppService;
 
     public SendQueueProcessor(MessageSendClaimService claimService,
                               MessageSendCompletionService completionService,
                               MessageSendRepository messageSendRepository,
                               LeadRepository leadRepository,
                               MessagingProviderRouter providerRouter,
-                              MessagingScheduleProperties scheduleProperties,
-                              WhatsAppService whatsAppService) {
+                              MessagingScheduleProperties scheduleProperties) {
         this.claimService = claimService;
         this.completionService = completionService;
         this.messageSendRepository = messageSendRepository;
         this.leadRepository = leadRepository;
         this.providerRouter = providerRouter;
         this.scheduleProperties = scheduleProperties;
-        this.whatsAppService = whatsAppService;
     }
 
     @Scheduled(fixedDelayString = "#{@messagingScheduleProperties.delayMillis}")
     public void processQueue() {
-        // Um por tick: no maximo um MessageSend por execucao.
-        int max = Math.max(1, scheduleProperties.getMaxConcurrentSends());
-        int processed = 0;
-        while (processed < max) {
-            MessageSend claimed;
-            try {
-                claimed = claimService.claimNextDue(); // COMMIT curto
-            } catch (Exception e) {
-                log.warn("Falha ao reivindicar envio: {}", e.getMessage());
-                break;
-            }
-            if (claimed == null) break;
-            try {
-                processOneOutsideTransaction(claimed);
-            } catch (Exception e) {
-                log.warn("Erro ao processar envio {}: {}", claimed.getId(), e.getMessage());
-            } finally {
-                processed++;
-            }
+        // Exatamente 1 send por tick
+        MessageSend claimed;
+        try {
+            claimed = claimService.claimNextDue(); // COMMIT curto
+        } catch (Exception e) {
+            log.warn("Falha ao reivindicar envio: {}", e.getMessage());
+            return;
+        }
+        if (claimed == null) return;
+        try {
+            processOneOutsideTransaction(claimed);
+        } catch (Exception e) {
+            log.warn("Erro ao processar envio {}: {}", claimed.getId(), e.getMessage());
         }
     }
 
@@ -130,16 +118,6 @@ public class SendQueueProcessor {
             return;
         }
 
-        // Guard: WhatsApp status must be CONNECTED to send.
-        if ("whatsapp".equals(fresh.getProvider()) && whatsAppService != null) {
-            WhatsAppSessionStatus ws = whatsAppService.status();
-            if (ws != null && ws.status() != null && !ws.status().equals("CONNECTED")) {
-                completionService.completeDeliveryUnknown(sendId, "WHATSAPP_NOT_CONNECTED",
-                        "WhatsApp status is " + ws.status() + "; send blocked.");
-                return;
-            }
-        }
-
         MessagingSendResult result;
         try {
             MessagingCommand command = new MessagingCommand(
@@ -177,7 +155,7 @@ public class SendQueueProcessor {
                 if (send.getAttempts() >= MAX_ATTEMPTS) {
                     completionService.completeMaxAttemptsFailed(send.getId(), code, detail);
                 } else {
-                    Instant next = Instant.now().plus(2L * Math.max(1, send.getAttempts()), ChronoUnit.MINUTES);
+                    Instant next = Instant.now().plus(retryDelayMinutes(send.getAttempts()), ChronoUnit.MINUTES);
                     completionService.completeTransientRetry(send.getId(), code, detail, next);
                 }
             }
@@ -185,7 +163,7 @@ public class SendQueueProcessor {
         }
     }
 
-    static FailureCategory categorize(String errorCode, FailureCategory providerCategory) {
+static FailureCategory categorize(String errorCode, FailureCategory providerCategory) {
         if (errorCode == null) return FailureCategory.AMBIGUOUS;
         if (TERMINAL_CODES.contains(errorCode)) return FailureCategory.TERMINAL;
         if (TRANSIENT_CODES.contains(errorCode)) return FailureCategory.TRANSIENT;
@@ -194,4 +172,10 @@ public class SendQueueProcessor {
         // Codigo desconhecido apos POST: trata como ambiguo (seguro contra duplo envio).
         return FailureCategory.AMBIGUOUS;
     }
+
+    static long retryDelayMinutes(int attempts) {
+        // Exponencial: 1->2, 2->4, 3->8, 4->16, 5->32
+        return 1L << attempts;
+    }
+
 }

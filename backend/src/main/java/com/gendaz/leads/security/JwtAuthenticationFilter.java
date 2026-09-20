@@ -1,5 +1,6 @@
 package com.gendaz.leads.security;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -23,10 +24,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
     private final UserDetailsServiceImpl userDetailsService;
+    private final ObjectMapper objectMapper;
 
-    public JwtAuthenticationFilter(JwtService jwtService, UserDetailsServiceImpl userDetailsService) {
+    public JwtAuthenticationFilter(JwtService jwtService, UserDetailsServiceImpl userDetailsService, ObjectMapper objectMapper) {
         this.jwtService = jwtService;
         this.userDetailsService = userDetailsService;
+        this.objectMapper = objectMapper;
     }
 
     private boolean isTechnicalFailure(Throwable e) {
@@ -34,6 +37,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         while (t != null) {
             if (t instanceof org.springframework.dao.DataAccessException
                     || t instanceof java.sql.SQLException
+                    || t instanceof jakarta.persistence.PersistenceException
                     || t.getClass().getName().contains("Hikari")) {
                 return true;
             }
@@ -41,6 +45,14 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         }
         return false;
     }
+
+    private void writeJsonError(HttpServletResponse response, int status, String code, String message) throws IOException {
+        response.setStatus(status);
+        response.setContentType("application/json");
+        objectMapper.writeValue(response.getWriter(), new TechnicalErrorResponse(code, message));
+    }
+
+    private record TechnicalErrorResponse(String code, String message) {}
 
     @Override
     protected void doFilterInternal(@NonNull HttpServletRequest request,
@@ -74,9 +86,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 // Falha técnica (JPA/JDBC/Hikari): responde 503 para que o frontend NÃO limpe o token.
                 if (isTechnicalFailure(e)) {
                     log.warn("JWT filter technical failure: {} ({})", e.getMessage(), e.getClass().getSimpleName());
-                    response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
-                    response.setContentType("application/json");
-                    response.getWriter().write("{\"code\":\"AUTH_SERVICE_UNAVAILABLE\",\"message\":\"Serviço indisponível.\"}");
+                    writeJsonError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+                            "AUTH_SERVICE_UNAVAILABLE", "Serviço temporariamente indisponível.");
                     return;
                 }
                 filterChain.doFilter(request, response);
@@ -91,4 +102,5 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         }
         filterChain.doFilter(request, response);
     }
+
 }

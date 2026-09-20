@@ -1,5 +1,6 @@
 package com.gendaz.leads.service;
 
+import com.gendaz.leads.dto.campaign.MessageSentResult;
 import com.gendaz.leads.dto.campaign.SendPreviewResponse;
 import com.gendaz.leads.dto.campaign.SendResultEnqueue;
 import com.gendaz.leads.entity.Campaign;
@@ -12,6 +13,8 @@ import com.gendaz.leads.repository.LeadEventRepository;
 import com.gendaz.leads.repository.LeadRepository;
 import com.gendaz.leads.repository.MessageSendRepository;
 import com.gendaz.leads.repository.MessageTemplateRepository;
+import com.gendaz.leads.whatsapp.WhatsAppService;
+import com.gendaz.leads.whatsapp.WhatsAppSessionStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -48,6 +51,10 @@ class CampaignSendServiceTest {
     TemplateRenderer templateRenderer;
     @Mock
     LeadMessagingEligibilityService eligibilityService;
+    @Mock
+    WhatsAppService whatsappService;
+    @Mock
+    CampaignMessageEnqueueTransactionService enqueueTransactionService;
 
     @InjectMocks
     CampaignSendService sendService;
@@ -183,7 +190,12 @@ class CampaignSendServiceTest {
         when(eligibilityService.checkEligibility(any(), eq(10L), anyList()))
                 .thenReturn(new EligibilityResult(true, null, null, "5511999999999"));
         when(templateRenderer.render(any(), any(), any())).thenReturn("Ola Empresa 1");
-        when(messageSendRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(whatsappService.status()).thenReturn(new WhatsAppSessionStatus("CONNECTED", false, null));
+        when(enqueueTransactionService.enqueue(any(), any(), any()))
+                .thenAnswer(inv -> {
+                    MessageSend send = inv.getArgument(0);
+                    return new MessageSentResult(send.getId(), send.getLeadId().toString(), send.getRecipientSnapshot(), "QUEUED");
+                });
 
         // defaultProvider field is @Value; set via reflection
         org.springframework.test.util.ReflectionTestUtils.setField(sendService, "defaultProvider", "whatsapp");
@@ -191,8 +203,9 @@ class CampaignSendServiceTest {
         SendResultEnqueue res = sendService.enqueueMessages(10L, List.of(1L), null, false);
 
         assertEquals(1, res.getSent().size());
+        // Verify the transaction service was called with correct MessageSend
         ArgumentCaptor<MessageSend> captor = ArgumentCaptor.forClass(MessageSend.class);
-        verify(messageSendRepository).saveAndFlush(captor.capture());
+        verify(enqueueTransactionService).enqueue(captor.capture(), any(), any());
         MessageSend saved = captor.getValue();
         assertEquals("Ola Empresa 1", saved.getMessageTextSnapshot());
         assertEquals("5511999999999", saved.getRecipientSnapshot());
@@ -203,10 +216,6 @@ class CampaignSendServiceTest {
         assertEquals(0, saved.getAttempts());
         assertNotNull(saved.getQueuedAt());
         assertEquals(3L, saved.getTemplateId());
-        // message_queued event without phone/message
-        verify(leadEventRepository).save(argThat(e ->
-                "message_queued".equals(e.getEventType())
-                        && (e.getEventMetadata() == null || !e.getEventMetadata().contains("5511999999999"))));
     }
 
     @Test
@@ -236,8 +245,12 @@ class CampaignSendServiceTest {
         when(eligibilityService.checkEligibility(any(), eq(10L), anyList()))
                 .thenReturn(new EligibilityResult(true, null, null, "5511999999999"));
         when(templateRenderer.render(any(), any(), any())).thenReturn("msg");
-        when(messageSendRepository.saveAndFlush(any()))
-                .thenThrow(new DataIntegrityViolationException("duplicate"));
+        when(whatsappService.status()).thenReturn(new WhatsAppSessionStatus("CONNECTED", false, null));
+        when(enqueueTransactionService.enqueue(any(), any(), any()))
+                .thenThrow(new ApiException(HttpStatus.CONFLICT, "ALREADY_QUEUED_OR_SENT", "Lead já possui envio na fila ou concluído."));
+
+        // defaultProvider field is @Value; set via reflection
+        org.springframework.test.util.ReflectionTestUtils.setField(sendService, "defaultProvider", "whatsapp");
 
         ApiException ex = assertThrows(ApiException.class,
                 () -> sendService.enqueueMessages(10L, List.of(1L), null, false));

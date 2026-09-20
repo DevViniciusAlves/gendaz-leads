@@ -1,5 +1,6 @@
 package com.gendaz.leads.config;
 
+import com.gendaz.leads.security.AuthRateLimitInterceptor;
 import com.gendaz.leads.security.RateLimitInterceptor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
@@ -9,15 +10,20 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class WebConfig implements WebMvcConfigurer {
 
     private final RateLimitInterceptor rateLimitInterceptor;
+    private final AuthRateLimitInterceptor authRateLimitInterceptor;
 
-    public WebConfig(RateLimitInterceptor rateLimitInterceptor) {
+    public WebConfig(RateLimitInterceptor rateLimitInterceptor, AuthRateLimitInterceptor authRateLimitInterceptor) {
         this.rateLimitInterceptor = rateLimitInterceptor;
+        this.authRateLimitInterceptor = authRateLimitInterceptor;
     }
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(rateLimitInterceptor)
                 .addPathPatterns("/api/**")
-                .excludePathPatterns("/api/auth/login", "/api/auth/register");
+                .excludePathPatterns("/api/auth/login", "/api/auth/register", "/api/health");
+
+        registry.addInterceptor(authRateLimitInterceptor)
+                .addPathPatterns("/api/auth/login", "/api/auth/register");
     }
 }

@@ -28,3 +28,6 @@ whatsapp-service/data/
 frontend/public/fonts/*.woff2
 frontend/public/fonts/*.woff
 frontend/public/fonts/*.ttf
+
+# Nested copy do repositorio (evitar gitlink/submodule acidental)
+gendaz-leads/

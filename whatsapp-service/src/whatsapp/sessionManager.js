@@ -196,8 +196,8 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
         const forbidden = DisconnectReason && code === DisconnectReason.forbidden;
         const replaced = DisconnectReason && code === DisconnectReason.connectionReplaced;
         if (loggedOut) {
-          await flushCredsWrites().catch(() => {});
-          try { await authStore.clear(); } catch (_) {}
+          await flushCredsWrites(); // propagate errors for observability
+          await authStore.clear(); // propagate errors for observability
           state.reconnectAttempts = 0;
           setStatus(STATES.LOGGED_OUT);
           return;
@@ -210,7 +210,9 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
         }
         if (replaced) {
           // Sem reconnect; encerra socket local.
-          try { if (state.sock && typeof state.sock.end === 'function') state.sock.end(); } catch (_) {}
+          if (state.sock && typeof state.sock.end === 'function') {
+            await state.sock.end();
+          }
           state.reconnectAttempts = 0;
           setStatus(STATES.DISCONNECTED, 'connection_replaced');
           return;
@@ -263,19 +265,18 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     clearReconnectTimer();
     // Invalida geração: sockets antigos não alteram mais o estado.
     state.socketGeneration += 1;
-    try {
-      if (state.sock && typeof state.sock.logout === 'function') {
-        await state.sock.logout().catch(() => {});
-      }
-    } finally {
-      await flushCredsWrites().catch(() => {});
-      try { await authStore.clear(); } catch (_) {}
-      try { if (state.sock && typeof state.sock.end === 'function') state.sock.end(); } catch (_) {}
-      state.sock = null;
-      setQr(null);
-      state.reconnectAttempts = 0;
-      setStatus(STATES.LOGGED_OUT);
+    if (state.sock && typeof state.sock.logout === 'function') {
+      await state.sock.logout(); // propagate errors for observability
     }
+    await flushCredsWrites(); // propagate errors for observability
+    await authStore.clear(); // propagate errors for observability
+    if (state.sock && typeof state.sock.end === 'function') {
+      await state.sock.end();
+    }
+    state.sock = null;
+    setQr(null);
+    state.reconnectAttempts = 0;
+    setStatus(STATES.LOGGED_OUT);
     return publicStatus();
   }
 
@@ -284,8 +285,10 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     state.shuttingDown = true;
     clearReconnectTimer();
     state.socketGeneration += 1;
-    await flushCredsWrites().catch(() => {});
-    try { if (state.sock && typeof state.sock.end === 'function') state.sock.end(); } catch (_) {}
+    await flushCredsWrites(); // propagate errors for observability
+    if (state.sock && typeof state.sock.end === 'function') {
+      await state.sock.end(); // propagate errors for observability
+    }
     return publicStatus();
   }
 
@@ -303,7 +306,10 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
 
   function enqueueSend(fn) {
     const run = state.sendChain.then(fn, fn);
-    state.sendChain = run.catch(() => {});
+    state.sendChain = run.catch((e) => {
+      // Log send chain errors for observability but don't break the chain
+      log.warn && log.warn('Send chain error:', e.message);
+    });
     return run;
   }
 

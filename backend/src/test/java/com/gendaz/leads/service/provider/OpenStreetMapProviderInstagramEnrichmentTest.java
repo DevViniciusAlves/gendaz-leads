@@ -32,7 +32,8 @@ class OpenStreetMapProviderInstagramEnrichmentTest {
         
         when(instagramDetector.detectFromWebsite("https://studiobella.com")).thenReturn("studio.bella");
         
-        LeadCandidate c = provider.mapElement(node, geo);
+        var cache = new java.util.HashMap<String, java.util.Optional<String>>();
+        LeadCandidate c = provider.mapElement(node, geo, cache);
         
         assertNotNull(c);
         assertEquals("studio.bella", c.getInstagramUsername());
@@ -52,10 +53,11 @@ class OpenStreetMapProviderInstagramEnrichmentTest {
         
         when(instagramDetector.detectFromWebsite("https://studiobella.com")).thenReturn("studio.bella");
         
+        var cache = new java.util.HashMap<String, java.util.Optional<String>>();
         // First call
-        provider.mapElement(node, geo);
+        provider.mapElement(node, geo, cache);
         // Second call with same website
-        provider.mapElement(node, geo);
+        provider.mapElement(node, geo, cache);
         
         verify(instagramDetector, times(1)).detectFromWebsite("https://studiobella.com");
     }
@@ -71,7 +73,8 @@ class OpenStreetMapProviderInstagramEnrichmentTest {
         
         when(instagramDetector.detectFromWebsite("https://studiobella.com")).thenReturn(null);
         
-        LeadCandidate c = provider.mapElement(node, geo);
+        var cache = new java.util.HashMap<String, java.util.Optional<String>>();
+        LeadCandidate c = provider.mapElement(node, geo, cache);
         
         assertEquals("NOT_FOUND", c.getInstagramStatus());
         assertNull(c.getInstagramUsername());

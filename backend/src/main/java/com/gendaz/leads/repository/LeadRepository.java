@@ -44,6 +44,15 @@ public interface LeadRepository extends JpaRepository<Lead, Long>, JpaSpecificat
     @Query("SELECT COUNT(l) FROM Lead l JOIN LeadAnalysis la ON la.leadId = l.id WHERE l.currentCampaignId = :campaignId")
     long countByCurrentCampaignIdWithAnalysis(@Param("campaignId") Long campaignId);
 
+    @Query("SELECT COUNT(l) FROM Lead l JOIN CampaignLead cl ON cl.leadId = l.id WHERE cl.campaignId = :campaignId AND l.status IN ('ANALYZED', 'MESSAGE_READY', 'APPROVED', 'SENT', 'REPLIED', 'INTERESTED', 'SCHEDULED', 'CONVERTED')")
+    long countByCampaignIdWithAnalysis(@Param("campaignId") Long campaignId);
+
+    @Query("SELECT COUNT(l) FROM Lead l JOIN CampaignLead cl ON cl.leadId = l.id WHERE cl.campaignId = :campaignId AND l.status IN :statuses")
+    long countByCampaignIdAndStatusIn(@Param("campaignId") Long campaignId, @Param("statuses") java.util.Collection<String> statuses);
+
+    @Query("SELECT COUNT(l) FROM Lead l JOIN CampaignLead cl ON cl.leadId = l.id WHERE cl.campaignId = :campaignId AND l.doNotContact = true")
+    long countByCampaignIdAndDoNotContactTrue(@Param("campaignId") Long campaignId);
+
     @Query("SELECT COUNT(l) FROM Lead l JOIN CampaignLead cl ON cl.leadId = l.id JOIN Campaign c ON c.id = cl.campaignId WHERE l.id = :leadId AND c.ownerId = :ownerId")
     long countOwnedByUser(@Param("leadId") Long leadId, @Param("ownerId") Long ownerId);
 

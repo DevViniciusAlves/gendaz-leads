@@ -21,7 +21,7 @@ const INELIGIBILITY_DESCRIPTIONS = {
 }
 
 function getSendLabel(lead) {
-  const { sendStatus, eligible, ineligibilityReason } = lead
+  const { sendStatus, eligible, ineligibilityCode } = lead
   if (sendStatus) {
     switch (sendStatus) {
       case 'QUEUED': return 'Na fila'
@@ -34,7 +34,7 @@ function getSendLabel(lead) {
   }
   if (eligible) return 'Pronto'
 
-  switch (ineligibilityReason) {
+  switch (ineligibilityCode) {
     case 'DO_NOT_CONTACT': return 'Não prospectar'
     case 'NO_PHONE': return 'Sem telefone'
     case 'INVALID_PHONE': return 'Telefone inválido'
@@ -423,9 +423,9 @@ export function CampaignDetail() {
                       ) : (
                         <span className="badge badge-gray">{getSendLabel(l)}</span>
                       )}
-                      {!l.eligible && l.ineligibilityReason && INELIGIBILITY_DESCRIPTIONS[l.ineligibilityReason] && (
-                        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                          {INELIGIBILITY_DESCRIPTIONS[l.ineligibilityReason]}
+                      {!l.eligible && l.ineligibilityCode && INELIGIBILITY_DESCRIPTIONS[l.ineligibilityCode] && (
+                        <div className="muted" style={{ fontSize: 11, marginTop: 4 }} title={l.ineligibilityReason}>
+                          {INELIGIBILITY_DESCRIPTIONS[l.ineligibilityCode]}
                         </div>
                       )}
                     </td>

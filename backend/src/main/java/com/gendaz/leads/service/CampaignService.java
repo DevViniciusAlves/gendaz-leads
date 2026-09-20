@@ -81,16 +81,15 @@ public class CampaignService {
              processor.processCampaign(id);
         } else if (plan == CampaignRetryTransactionService.RetryPlan.ANALYSIS) {
              processor.retryFailedLeads(id);
-        } else if (plan == CampaignRetryTransactionService.RetryPlan.PARTIAL) {
-             long existingCount = campaignLeadRepository.countByCampaignId(id);
-             int remaining = campaign.getRequestedQuantity() - (int)existingCount;
-             if (remaining <= 0) {
-                 processor.recompute(campaign);
-                 campaignRepository.save(campaign);
-             } else {
-                 processor.processPartialCampaign(id, remaining);
-             }
-        }
+} else if (plan == CampaignRetryTransactionService.RetryPlan.PARTIAL) {
+              long existingCount = campaignLeadRepository.countByCampaignId(id);
+              int remaining = campaign.getRequestedQuantity() - (int)existingCount;
+              if (remaining <= 0) {
+                  processor.recomputeAndFinalizeCampaign(campaign);
+              } else {
+                  processor.processPartialCampaign(id, remaining);
+              }
+         }
     }
 
     private void ensureOwner(Campaign campaign) {

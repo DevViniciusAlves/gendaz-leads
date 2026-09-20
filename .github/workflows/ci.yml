@@ -10,9 +10,9 @@ jobs:
   backend-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up JDK 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -26,29 +26,45 @@ jobs:
   frontend-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Build Frontend
+        working-directory: frontend
         run: |
-          cd frontend
           npm ci
           npm run build
 
   wpp-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           cache: npm
+          cache-dependency-path: whatsapp-service/package-lock.json
       - name: Test WPP Service
+        working-directory: whatsapp-service
         run: |
-          cd whatsapp-service
           npm ci
           npm test
+
+  backend-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Backend Docker Image
+        run: docker build -f Dockerfile . -t gendaz-leads-backend-ci
+
+  wpp-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build WPP Docker Image
+        run: docker build -f whatsapp-service/Dockerfile whatsapp-service -t gendaz-leads-whatsapp-ci

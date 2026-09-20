@@ -9,6 +9,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 public interface MessageSendRepository extends JpaRepository<MessageSend, Long> {
 
@@ -36,6 +37,21 @@ public interface MessageSendRepository extends JpaRepository<MessageSend, Long> 
 
     @Query("SELECT ms FROM MessageSend ms WHERE ms.recipientSnapshot = :snapshot AND ms.status IN :statuses")
     List<MessageSend> findBlockingByRecipientSnapshot(@Param("snapshot") String snapshot, @Param("statuses") List<String> statuses);
+    
     @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:recipient))", nativeQuery = true)
     void acquireLock(@Param("recipient") String recipient);
+
+    @Query(value = """
+            SELECT * FROM message_sends
+            WHERE status = 'QUEUED'
+              AND (next_attempt_at IS NULL OR next_attempt_at <= :now)
+            ORDER BY next_attempt_at NULLS FIRST, id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+            """, nativeQuery = true)
+    Optional<MessageSend> claimNextDueNative(@Param("now") Instant now);
+
+    @Query("SELECT ms FROM MessageSend ms WHERE ms.status = 'SENDING' AND ms.lastAttemptAt <= :threshold")
+    List<MessageSend> findStuckSending(@Param("threshold") Instant threshold);
+
 }

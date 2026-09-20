@@ -22,8 +22,12 @@ function createPostgresAuthStore({ pool, sessionId, encryptionKey, logger }) {
       const creds = decryptJson(encryptionKey, rows[0].payload);
       return { creds, registered: !!rows[0].registered };
     } catch (e) {
-      log.warn && log.warn('legacy_auth_incompatible=true');
-      return { creds: null, registered: false };
+      // Decrypt failure on existing row -> observable error, don't mask as "no session"
+      const err = new Error('Falha ao descriptografar estado de sessao.');
+      err.code = 'AUTH_STATE_DECRYPT_FAILED';
+      err.cause = e;
+      log.error && log.error('readSession decrypt failed', { code: err.code, safeMessage: e.message });
+      throw err;
     }
   }
 

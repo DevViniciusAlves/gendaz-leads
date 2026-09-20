@@ -3,6 +3,8 @@ package com.gendaz.leads.service;
 import com.gendaz.leads.entity.Lead;
 import com.gendaz.leads.entity.MessageTemplate;
 import com.gendaz.leads.entity.Campaign;
+import com.gendaz.leads.exception.ApiException;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.regex.Matcher;
@@ -19,17 +21,17 @@ public class TemplateRenderer {
 
     public void validateTemplate(String templateText) {
         if (templateText == null || templateText.isBlank()) {
-            throw new IllegalArgumentException("O template não pode ser vazio.");
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_TEMPLATE", "O template não pode ser vazio.");
         }
         if (templateText.length() > MAX_LENGTH) {
-            throw new IllegalArgumentException("Template excede o limite de " + MAX_LENGTH + " caracteres.");
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_TEMPLATE_TOO_LONG", "Template excede o limite de " + MAX_LENGTH + " caracteres.");
         }
 
         Matcher matcher = VAR_PATTERN.matcher(templateText);
         while (matcher.find()) {
             String var = matcher.group();
             if (!ALLOWED_VARS.contains(var)) {
-                throw new IllegalArgumentException("Variável desconhecida no template: " + var);
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_TEMPLATE_VARIABLE", "Variável desconhecida no template: " + var);
             }
         }
     }
@@ -45,7 +47,7 @@ public class TemplateRenderer {
         result = replaceVariable(result, "{{instagram}}", lead.getInstagramUsername() != null ? lead.getInstagramUsername() : "");
 
         if (result.length() > MAX_LENGTH) {
-            throw new IllegalArgumentException("Template renderizado excede o limite de " + MAX_LENGTH + " caracteres.");
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_TEMPLATE_TOO_LONG", "Template renderizado excede o limite de " + MAX_LENGTH + " caracteres.");
         }
 
         return result;
