@@ -77,9 +77,13 @@ app:
   discovery:
     osm:
       enabled: ${OSM_ENABLED:true}
-      timeout-ms: ${OSM_TIMEOUT_MS:30000}
+      timeout-ms: ${OSM_TIMEOUT_MS:20000}
+      discovery-deadline-ms: ${OSM_DISCOVERY_DEADLINE_MS:60000}
+      overpass-endpoints: ${OSM_OVERPASS_ENDPOINTS:https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter}
       overpass-url: ${OSM_OVERPASS_URL:https://overpass-api.de/api/interpreter}
       fallback-url: ${OSM_OVERPASS_FALLBACK_URL:}
+      max-concurrency: ${OSM_OVERPASS_MAX_CONCURRENCY:1}
+      circuit-open-seconds: ${OSM_CIRCUIT_OPEN_SECONDS:180}
   groq:
     api-key: ${GROQ_API_KEY:}
     model: ${GROQ_MODEL:llama-3.3-70b-versatile}

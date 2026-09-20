@@ -122,7 +122,7 @@ public class AsyncCampaignProcessor {
 
     private int discoverAdditionalLeads(Campaign campaign, int needed) {
         campaign.setStatus("DISCOVERING");
-        campaign.setProgressStage("Buscando leads adicionais");
+        campaign.setProgressStage("Complementando resultados (filtros estruturados)");
         campaign.setProgressTotal(needed);
         campaign.setProgressCurrent(0);
         campaignRepository.save(campaign);
@@ -228,7 +228,7 @@ public class AsyncCampaignProcessor {
 
     private void discoverStage(Campaign campaign) {
         campaign.setStatus("DISCOVERING");
-        campaign.setProgressStage("Buscando leads");
+        campaign.setProgressStage("Localizando região");
         campaign.setProgressTotal(campaign.getRequestedQuantity());
         campaign.setProgressCurrent(0);
         campaignRepository.save(campaign);
@@ -242,6 +242,8 @@ public class AsyncCampaignProcessor {
 
         try {
             if (openStreetMapProvider.isEnabled()) {
+                campaign.setProgressStage("Buscando leads (filtros estruturados)");
+                campaignRepository.save(campaign);
                 candidates.addAll(openStreetMapProvider.discover(campaign.getNiche(), campaign.getLocation(), totalBudget));
             } else {
                 log.warn("OpenStreetMapProvider nao esta habilitado para campanha {}", campaign.getId());

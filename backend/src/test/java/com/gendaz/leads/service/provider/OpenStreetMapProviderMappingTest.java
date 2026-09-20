@@ -99,11 +99,14 @@ class OpenStreetMapProviderMappingTest {
     @Test
     void queryUsesStructuredTagsAndNameFallback() {
         var geo = new OpenStreetMapProvider.Geo(-25.43, -49.27, "Curitiba", "Parana", "BR", 0,0,0,0,false);
-        String q = provider.buildOverpassQuery("cilios", geo, 30);
-        assertTrue(q.contains("\"shop\"=\"beauty\""));
-        assertTrue(q.contains("\"beauty\"=\"eyelash\""));
-        assertTrue(q.contains("\"name\"~"));
-        assertTrue(q.contains("out center tags"));
+        String structuredQuery = provider.buildStructuredQuery("cilios", geo, 30);
+        String fallbackQuery = provider.buildNameFallbackQuery("cilios", geo, 30);
+        assertTrue(structuredQuery.contains("\"shop\"=\"beauty\""));
+        assertTrue(structuredQuery.contains("\"beauty\"=\"eyelash\""));
+        assertFalse(structuredQuery.contains("\"name\"~")); // structured query should not have name fallback
+        assertTrue(fallbackQuery != null && fallbackQuery.contains("\"name\"~")); // fallback query should have name fallback
+        assertTrue(structuredQuery.contains("out center tags"));
+        assertTrue(fallbackQuery.contains("out center tags"));
     }
 
     @Test
