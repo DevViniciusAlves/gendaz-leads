@@ -35,7 +35,7 @@ class CampaignServiceTest {
 
     @Test
     void createCallsTransactionServiceThenProcessor() {
-        CreateCampaignRequest request = new CreateCampaignRequest("nicho", "local", 5);
+        CreateCampaignRequest request = new CreateCampaignRequest("nicho", "Sao Paulo", "Brasil", 5);
         Campaign campaign = Campaign.builder().id(1L).build();
         when(createTransactionService.createCampaign(request)).thenReturn(campaign);
 

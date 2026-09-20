@@ -42,7 +42,6 @@ public class LeadAnalysisService {
         this.scoringService = scoringService;
     }
 
-    @Transactional
     public void analyzeAndGenerate(Lead lead, Long campaignId) {
         if (lead.isDoNotContact()) {
             return;
@@ -58,6 +57,11 @@ public class LeadAnalysisService {
                 analysis.manualAttendanceSignals(), analysis.painPoints(), analysis.commercialOpportunity(),
                 score, analysis.reasoningSummary());
 
+        persistAnalysisAndMessage(lead, campaignId, finalAnalysis, score, candidate);
+    }
+
+    @Transactional
+    public void persistAnalysisAndMessage(Lead lead, Long campaignId, AnalysisResult finalAnalysis, int score, LeadCandidate candidate) {
         LeadAnalysis entity = LeadAnalysis.builder()
                 .leadId(lead.getId())
                 .businessType(orUnknown(finalAnalysis.businessType()))
@@ -71,7 +75,7 @@ public class LeadAnalysisService {
                 .commercialOpportunity(orUnknown(finalAnalysis.commercialOpportunity()))
                 .opportunityScore(score)
                 .reasoningSummary(orUnknown(finalAnalysis.reasoningSummary()))
-                .model(modelName())
+                .model(groqService.getModel())
                 .build();
         leadAnalysisRepository.save(entity);
 
@@ -91,7 +95,7 @@ public class LeadAnalysisService {
                 .leadId(lead.getId()).campaignId(campaignId).eventType("lead_analysis_completed").build());
         leadEventRepository.save(LeadEvent.builder()
                 .leadId(lead.getId()).campaignId(campaignId).eventType("message_generated").build());
-        log.info("Lead {} analisado e mensagem gerada (score={})", lead.getId(), score);
+        log.info("Lead {} analisado e mensagem gerada (score={}, model={})", lead.getId(), score, groqService.getModel());
     }
 
     private LeadCandidate toCandidate(Lead lead) {
@@ -110,13 +114,5 @@ public class LeadAnalysisService {
 
     private String orUnknown(String s) {
         return (s == null || s.isBlank()) ? "unknown" : s;
-    }
-
-    private String modelName() {
-        try {
-            return groqService.getClass().getSimpleName();
-        } catch (RuntimeException e) {
-            return "groq";
-        }
     }
 }

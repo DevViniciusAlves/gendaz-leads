@@ -11,8 +11,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Component
-public class InstagramDetector {
+public class WebsiteContactEnricher {
 
+    private static final Pattern PHONE_PATTERN = Pattern.compile(
+            "(?:tel:|\\+?[1-9]\\d{1,2}[\\s.-]?)?\\(?\\d{2,4}\\)?[\\s.-]?\\d{3,4}[\\s.-]?\\d{3,4}", Pattern.CASE_INSENSITIVE);
+    private static final Pattern EMAIL_PATTERN = Pattern.compile(
+            "(?:mailto:)?([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})", Pattern.CASE_INSENSITIVE);
     private static final Pattern IG_LINK = Pattern.compile(
             "(?:https?://)?(?:www\\.)?instagram\\.com/([A-Za-z0-9_.]+)", Pattern.CASE_INSENSITIVE);
 
@@ -29,7 +33,7 @@ public class InstagramDetector {
     private final Normalizer normalizer;
     private final SsrfGuard ssrfGuard;
 
-    public InstagramDetector(RestClient.Builder builder, Normalizer normalizer, SsrfGuard ssrfGuard) {
+    public WebsiteContactEnricher(RestClient.Builder builder, Normalizer normalizer, SsrfGuard ssrfGuard) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(connectTimeoutMs);
         factory.setReadTimeout(readTimeoutMs);
@@ -41,9 +45,11 @@ public class InstagramDetector {
         this.ssrfGuard = ssrfGuard;
     }
 
-    public String detectFromWebsite(String website) {
+    public record WebsiteContactData(String phone, String email, String instagramUsername) {}
+
+    public WebsiteContactData enrich(String website) {
         if (website == null || website.isBlank() || !ssrfGuard.isSafe(website)) {
-            return null;
+            return new WebsiteContactData(null, null, null);
         }
         String target = website.trim();
         if (!target.startsWith("http")) target = "https://" + target;
@@ -52,14 +58,43 @@ public class InstagramDetector {
                     .uri(target)
                     .retrieve()
                     .body(String.class);
-            if (body == null || body.length() > maxBytes) return null;
-            return extractHandle(body);
+            if (body == null || body.length() > maxBytes) return new WebsiteContactData(null, null, null);
+            
+            String phone = extractPhone(body);
+            String email = extractEmail(body);
+            String instagram = extractInstagram(body);
+            
+            return new WebsiteContactData(phone, email, instagram);
         } catch (RuntimeException e) {
-            return null;
+            return new WebsiteContactData(null, null, null);
         }
     }
 
-    private String extractHandle(String html) {
+    private String extractPhone(String html) {
+        Matcher m = PHONE_PATTERN.matcher(html);
+        while (m.find()) {
+            String phone = m.group(0);
+            String normalized = normalizer.normalizePhone(phone);
+            if (normalized != null && normalized.length() >= 8) {
+                return normalized;
+            }
+        }
+        return null;
+    }
+
+    private String extractEmail(String html) {
+        Matcher m = EMAIL_PATTERN.matcher(html);
+        while (m.find()) {
+            String email = m.group(1);
+            String normalized = normalizer.normalizeEmail(email);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        return null;
+    }
+
+    private String extractInstagram(String html) {
         Matcher m = IG_LINK.matcher(html);
         while (m.find()) {
             String handle = m.group(1);

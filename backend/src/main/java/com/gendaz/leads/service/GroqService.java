@@ -27,7 +27,7 @@ public class GroqService {
     @Value("${app.groq.api-key:}")
     private String apiKey;
 
-    @Value("${app.groq.model:llama-3.3-70b-versatile}")
+    @Value("${app.groq.model:openai/gpt-oss-120b}")
     private String model;
 
     @Value("${app.groq.enabled:true}")
@@ -39,15 +39,30 @@ public class GroqService {
     @Value("${app.groq.max-retries:2}")
     private int maxRetries;
 
-    private final RestClient restClient;
+    private RestClient restClient;
     private final ObjectMapper objectMapper;
 
     public GroqService(RestClient.Builder builder, ObjectMapper objectMapper) {
+        this.builder = builder;
+        this.objectMapper = objectMapper;
+        this.restClient = buildClient();
+    }
+
+    private final RestClient.Builder builder;
+
+    private RestClient buildClient() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(10000);
         factory.setReadTimeout(timeoutMs);
-        this.restClient = builder.requestFactory(factory).build();
-        this.objectMapper = objectMapper;
+        return builder.requestFactory(factory).build();
+    }
+
+    public void refreshClient() {
+        this.restClient = buildClient();
+    }
+
+    public String getModel() {
+        return model;
     }
 
     public boolean isEnabled() {

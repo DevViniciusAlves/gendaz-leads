@@ -285,7 +285,7 @@ export function CampaignDetail() {
             {c.name}
           </h1>
           <p className="page-sub">
-            {c.niche} · {c.location} · Solicitados:{' '}
+            {c.niche} · {c.city}, {c.country} · Solicitados:{' '}
             {formatNumber(c.requestedQuantity)}
           </p>
         </div>
@@ -371,7 +371,7 @@ export function CampaignDetail() {
             <tbody>
               {leads.map((l) => {
                 const isEligible = l.eligible === true
-                const local = [l.city, l.state].filter(Boolean).join('/')
+                const local = [l.city, l.country].filter(Boolean).join(', ')
                 return (
                   <tr key={l.leadId} className={isEligible ? 'clickable' : ''} onClick={() => isEligible && toggleLead(l.leadId)}>
                     <td>

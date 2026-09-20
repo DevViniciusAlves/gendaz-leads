@@ -27,9 +27,11 @@ public class DeduplicationService {
         String sourceId = normalizer.normalizeSourceId(candidate.getSource(), candidate.getSourceId());
         String website = normalizer.normalizeWebsite(candidate.getWebsite());
         String phone = normalizer.normalizePhone(candidate.getPhone());
+        String email = normalizer.normalizeEmail(candidate.getEmail());
         String name = normalizer.normalizeName(candidate.getBusinessName());
         String city = candidate.getCity();
         String state = candidate.getState();
+        String country = candidate.getCountry();
 
         if (instagram != null) {
             Optional<Lead> found = leadRepository.findFirstByNormalizedInstagramIgnoreCase(instagram);
@@ -47,9 +49,13 @@ public class DeduplicationService {
             Optional<Lead> found = leadRepository.findFirstByNormalizedPhoneIgnoreCase(phone);
             if (found.isPresent()) return new DuplicateCheck(found, "phone");
         }
-        if (name != null && city != null && state != null) {
-            Optional<Lead> found = leadRepository.findFirstByNormalizedNameAndCityAndStateIgnoreCase(name, city, state);
-            if (found.isPresent()) return new DuplicateCheck(found, "name_location");
+        if (email != null) {
+            Optional<Lead> found = leadRepository.findFirstByNormalizedEmailIgnoreCase(email);
+            if (found.isPresent()) return new DuplicateCheck(found, "email");
+        }
+        if (name != null && city != null && country != null) {
+            Optional<Lead> found = leadRepository.findFirstByNormalizedNameAndCityAndCountryIgnoreCase(name, city, country);
+            if (found.isPresent()) return new DuplicateCheck(found, "name_city_country");
         }
         return new DuplicateCheck(Optional.empty(), null);
     }

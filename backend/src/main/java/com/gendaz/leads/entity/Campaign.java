@@ -27,6 +27,12 @@ public class Campaign {
     private String niche;
 
     @Column(nullable = false)
+    private String city;
+
+    @Column(nullable = false, length = 120)
+    private String country;
+
+    @Column(nullable = false)
     private String location;
 
     @Column(name = "requested_quantity", nullable = false)

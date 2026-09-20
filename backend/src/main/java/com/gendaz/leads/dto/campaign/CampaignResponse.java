@@ -6,6 +6,8 @@ public record CampaignResponse(
         Long id,
         String name,
         String niche,
+        String city,
+        String country,
         String location,
         int requestedQuantity,
         String status,

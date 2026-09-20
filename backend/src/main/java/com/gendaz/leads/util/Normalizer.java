@@ -10,6 +10,7 @@ public class Normalizer {
 
     private static final Pattern NON_ALPHANUMERIC = Pattern.compile("[^a-z0-9]");
     private static final Pattern INSTAGRAM_PATH = Pattern.compile("(?i)instagram\\.com/([A-Za-z0-9_.]+)");
+    private static final Pattern EMAIL_PATTERN = Pattern.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
 
     public String normalizeName(String name) {
         if (name == null) return null;
@@ -57,6 +58,13 @@ public class Normalizer {
         if (value.contains("/")) value = value.split("/")[0];
         if (value.isBlank()) return null;
         return value;
+    }
+
+    public String normalizeEmail(String email) {
+        if (email == null) return null;
+        String e = email.trim().toLowerCase();
+        if (!EMAIL_PATTERN.matcher(e).matches()) return null;
+        return e;
     }
 
     public String normalizeSourceId(String source, String sourceId) {

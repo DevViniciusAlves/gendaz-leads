@@ -21,9 +21,9 @@ public class CampaignLeadPersistenceService {
     private final Normalizer normalizer;
 
     public CampaignLeadPersistenceService(LeadRepository leadRepository,
-                                          CampaignLeadRepository campaignLeadRepository,
-                                          LeadSourceRepository leadSourceRepository,
-                                          Normalizer normalizer) {
+                                           CampaignLeadRepository campaignLeadRepository,
+                                           LeadSourceRepository leadSourceRepository,
+                                           Normalizer normalizer) {
         this.leadRepository = leadRepository;
         this.campaignLeadRepository = campaignLeadRepository;
         this.leadSourceRepository = leadSourceRepository;
@@ -42,6 +42,8 @@ public class CampaignLeadPersistenceService {
                 .country(candidate.getCountry() != null ? candidate.getCountry() : "BR")
                 .phone(candidate.getPhone())
                 .normalizedPhone(normalizer.normalizePhone(candidate.getPhone()))
+                .email(candidate.getEmail())
+                .normalizedEmail(normalizer.normalizeEmail(candidate.getEmail()))
                 .website(candidate.getWebsite())
                 .normalizedWebsite(normalizer.normalizeWebsite(candidate.getWebsite()))
                 .instagramUsername(candidate.getInstagramUsername())

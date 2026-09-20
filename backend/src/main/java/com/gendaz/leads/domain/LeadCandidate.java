@@ -9,12 +9,13 @@ public class LeadCandidate {
     private String state;
     private String country;
     private String phone;
+    private String email;
     private String website;
-    private String source;
-    private String sourceId;
     private String instagramUsername;
     private String instagramUrl;
     private String instagramStatus = "NOT_FOUND";
+    private String source;
+    private String sourceId;
 
     public LeadCandidate() {
     }
@@ -79,6 +80,14 @@ public class LeadCandidate {
 
     public void setPhone(String phone) {
         this.phone = phone;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
     }
 
     public String getWebsite() {

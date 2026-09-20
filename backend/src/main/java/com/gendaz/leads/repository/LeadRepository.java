@@ -25,7 +25,8 @@ public interface LeadRepository extends JpaRepository<Lead, Long>, JpaSpecificat
     Optional<Lead> findFirstByNormalizedWebsiteIgnoreCase(String normalizedWebsite);
     Optional<Lead> findFirstByNormalizedPhoneIgnoreCase(String normalizedPhone);
     Optional<Lead> findFirstByNormalizedSourceIdIgnoreCase(String normalizedSourceId);
-    Optional<Lead> findFirstByNormalizedNameAndCityAndStateIgnoreCase(String normalizedName, String city, String state);
+    Optional<Lead> findFirstByNormalizedNameAndCityAndCountryIgnoreCase(String normalizedName, String city, String country);
+    Optional<Lead> findFirstByNormalizedEmailIgnoreCase(String normalizedEmail);
 
     boolean existsByNormalizedInstagramIgnoreCase(String normalizedInstagram);
     boolean existsByNormalizedWebsiteIgnoreCase(String normalizedWebsite);

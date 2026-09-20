@@ -10,5 +10,5 @@ public interface LeadDiscoveryProvider {
 
     boolean isEnabled();
 
-    List<LeadCandidate> discover(String niche, String location, int limit);
+    LeadDiscoveryResult discover(LeadDiscoveryRequest request);
 }

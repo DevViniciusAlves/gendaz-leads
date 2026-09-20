@@ -39,6 +39,11 @@ public class Lead {
     @Column(name = "normalized_phone")
     private String normalizedPhone;
 
+    private String email;
+
+    @Column(name = "normalized_email")
+    private String normalizedEmail;
+
     private String website;
 
     @Column(name = "normalized_website")

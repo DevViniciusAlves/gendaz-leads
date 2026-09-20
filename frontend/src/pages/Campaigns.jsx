@@ -31,16 +31,18 @@ export function Campaigns() {
   async function createCampaign(e) {
     e.preventDefault()
     const niche = e.target.niche.value.trim()
-    const location = e.target.location.value.trim()
+    const city = e.target.city.value.trim()
+    const country = e.target.country.value.trim()
     const quantity = Number(e.target.quantity.value)
-    if (!niche || !location) {
-      push('Preencha nicho e localizacao.', 'error')
+    if (!niche || !city || !country) {
+      push('Preencha nicho, cidade e pais.', 'error')
       return
     }
     try {
       const res = await api.post('/api/campaigns', {
         niche,
-        location,
+        city,
+        country,
         quantity
       })
       push('Campanha criada.', 'success')
@@ -107,7 +109,7 @@ export function Campaigns() {
                     <td>
                       <strong>{c.name}</strong>
                       <div className="muted" style={{ fontSize: 12 }}>
-                        {c.niche} · {c.location}
+                        {c.niche} · {c.city}, {c.country}
                       </div>
                     </td>
                     <td>
@@ -154,11 +156,15 @@ export function Campaigns() {
           <form id="campaign-form" onSubmit={createCampaign}>
             <div className="field">
               <label htmlFor="niche">Nicho</label>
-              <input id="niche" name="niche" placeholder="Ex: restaurantes" required />
+              <input id="niche" name="niche" placeholder="Ex: barbearias" required />
             </div>
             <div className="field">
-              <label htmlFor="location">Localizacao</label>
-              <input id="location" name="location" placeholder="Ex: Sao Paulo" required />
+              <label htmlFor="city">Cidade</label>
+              <input id="city" name="city" placeholder="Ex: Sao Paulo" required />
+            </div>
+            <div className="field">
+              <label htmlFor="country">Pais</label>
+              <input id="country" name="country" placeholder="Ex: Brasil" required />
             </div>
             <div className="field">
               <label htmlFor="quantity">Quantidade</label>

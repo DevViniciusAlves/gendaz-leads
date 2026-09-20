@@ -8,6 +8,8 @@ import com.gendaz.leads.repository.CampaignRepository;
 import com.gendaz.leads.repository.LeadEventRepository;
 import com.gendaz.leads.repository.LeadRepository;
 import com.gendaz.leads.repository.LeadSourceRepository;
+import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
+import com.gendaz.leads.service.provider.LeadDiscoveryResult;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.CampaignLeadPersistenceService;
 import com.gendaz.leads.util.Normalizer;
@@ -55,7 +57,7 @@ class AsyncCampaignProcessorTest {
 
     private Campaign campaign() {
         Campaign c = Campaign.builder().id(1L).ownerId(9L).niche("cilios")
-                .location("Cuiaba").requestedQuantity(5).status("CREATED").build();
+                .city("Cuiaba").country("Brasil").location("Cuiaba, Brasil").requestedQuantity(5).status("CREATED").build();
         return c;
     }
 
@@ -64,7 +66,7 @@ class AsyncCampaignProcessorTest {
         Campaign c = campaign();
         when(campaignRepository.findById(1L)).thenReturn(Optional.of(c));
         when(openStreetMapProvider.isEnabled()).thenReturn(true);
-        when(openStreetMapProvider.discover(any(), any(), anyInt()))
+        when(openStreetMapProvider.discover(any(LeadDiscoveryRequest.class)))
                 .thenThrow(new ApiException(HttpStatus.BAD_GATEWAY, "OSM_OVERPASS_ERROR", "overpass down"));
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -72,10 +74,8 @@ class AsyncCampaignProcessorTest {
 
         assertEquals("FAILED", c.getStatus());
         assertEquals("overpass down", c.getErrorMessage());
-        // finalizeCampaign normal nunca executou: status nao virou COMPLETED/PARTIAL
         assertNotEquals("COMPLETED", c.getStatus());
         assertNotEquals("PARTIAL", c.getStatus());
-        // analyzeStage nunca executou
         verify(leadAnalysisService, never()).analyzeAndGenerate(any(), any());
     }
 
@@ -84,7 +84,7 @@ class AsyncCampaignProcessorTest {
         Campaign c = campaign();
         when(campaignRepository.findById(1L)).thenReturn(Optional.of(c));
         when(openStreetMapProvider.isEnabled()).thenReturn(true);
-        when(openStreetMapProvider.discover(any(), any(), anyInt()))
+        when(openStreetMapProvider.discover(any(LeadDiscoveryRequest.class)))
                 .thenThrow(new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR", "geocode down"));
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -99,13 +99,13 @@ class AsyncCampaignProcessorTest {
         Campaign c = campaign();
         when(campaignRepository.findById(1L)).thenReturn(Optional.of(c));
         when(openStreetMapProvider.isEnabled()).thenReturn(true);
-        when(openStreetMapProvider.discover(any(), any(), anyInt())).thenReturn(List.of());
+        when(openStreetMapProvider.discover(any(LeadDiscoveryRequest.class)))
+                .thenReturn(LeadDiscoveryResult.empty("EMPTY", "Nenhum lead com dados de contato encontrado na cidade"));
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         processor.processCampaign(1L);
 
-        // Zero real: finalize normal com mensagem canonica.
         assertEquals("FAILED", c.getStatus());
-        assertEquals("Nenhum lead encontrado para os parametros informados.", c.getErrorMessage());
+        assertEquals("Nenhum lead com dados de contato encontrado na cidade", c.getErrorMessage());
     }
 }

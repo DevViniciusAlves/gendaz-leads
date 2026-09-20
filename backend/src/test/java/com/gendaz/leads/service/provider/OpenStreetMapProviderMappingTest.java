@@ -2,19 +2,26 @@ package com.gendaz.leads.service.provider;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.domain.LeadCandidate;
+import com.gendaz.leads.service.InstagramDetector;
+import com.gendaz.leads.service.WebsiteContactEnricher;
 import com.gendaz.leads.util.Normalizer;
+import com.gendaz.leads.util.SsrfGuard;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 class OpenStreetMapProviderMappingTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private final OpenStreetMapProvider provider =
-            new OpenStreetMapProvider(null, mapper, null, new Normalizer());
+    private final Normalizer normalizer = new Normalizer();
+    private final InstagramDetector igDetector = mock(InstagramDetector.class);
+    private final WebsiteContactEnricher enricher = mock(WebsiteContactEnricher.class);
+    private final SsrfGuard ssrfGuard = mock(SsrfGuard.class);
+    private final OpenStreetMapProvider provider = new OpenStreetMapProvider(null, mapper, igDetector, enricher, normalizer, ssrfGuard);
 
     private com.fasterxml.jackson.databind.JsonNode el(String json) throws Exception {
         return mapper.readTree(json);
@@ -60,7 +67,6 @@ class OpenStreetMapProviderMappingTest {
         assertNull(c.getPhone());
         assertNull(c.getWebsite());
         assertEquals("NOT_FOUND", c.getInstagramStatus());
-        // cidade/estado vindos do geocoding, sem virgulas estranhas
         assertEquals("Curitiba", c.getCity());
         assertEquals("Parana", c.getState());
         assertEquals("Curitiba - Parana", c.getAddress());
@@ -98,22 +104,21 @@ class OpenStreetMapProviderMappingTest {
 
     @Test
     void queryUsesStructuredTagsAndNameFallback() {
-        var geo = new OpenStreetMapProvider.Geo(-25.43, -49.27, "Curitiba", "Parana", "BR", 0,0,0,0,false);
-        String structuredQuery = provider.buildStructuredQuery("cilios", geo, 30);
-        String fallbackQuery = provider.buildNameFallbackQuery("cilios", geo, 30);
+        var tile = new OpenStreetMapProvider.Tile(-25.5, -49.5, -25.0, -49.0, 0.0);
+        String structuredQuery = provider.buildStructuredQuery("cilios", tile, 30);
+        String fallbackQuery = provider.buildNameFallbackQuery("cilios", tile, 30);
         assertTrue(structuredQuery.contains("\"shop\"=\"beauty\""));
         assertTrue(structuredQuery.contains("\"beauty\"=\"eyelash\""));
-        assertFalse(structuredQuery.contains("\"name\"~")); // structured query should not have name fallback
-        assertTrue(fallbackQuery != null && fallbackQuery.contains("\"name\"~")); // fallback query should have name fallback
+        assertFalse(structuredQuery.contains("\"name\"~"));
+        assertTrue(fallbackQuery != null && fallbackQuery.contains("\"name\"~"));
         assertTrue(structuredQuery.contains("out center tags"));
         assertTrue(fallbackQuery.contains("out center tags"));
     }
 
     @Test
     void instagramNormalizationVariants() {
-        Normalizer n = new Normalizer();
-        assertEquals("studio", n.normalizeInstagram("@studio"));
-        assertEquals("studio", n.normalizeInstagram("studio"));
-        assertEquals("studio", n.normalizeInstagram("https://instagram.com/studio"));
+        assertEquals("studio", normalizer.normalizeInstagram("@studio"));
+        assertEquals("studio", normalizer.normalizeInstagram("studio"));
+        assertEquals("studio", normalizer.normalizeInstagram("https://instagram.com/studio"));
     }
 }

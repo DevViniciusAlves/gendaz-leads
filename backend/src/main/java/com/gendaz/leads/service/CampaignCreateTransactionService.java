@@ -42,11 +42,18 @@ public class CampaignCreateTransactionService {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "Usuario nao encontrado."));
         
+        String city = request.city().trim();
+        String country = request.country().trim();
+        String location = city + ", " + country;
+        String name = request.niche() + " — " + location;
+        
         Campaign campaign = Campaign.builder()
                 .ownerId(user.getId())
-                .name(String.format("%s — %s", request.niche(), request.location()))
+                .name(name)
                 .niche(request.niche())
-                .location(request.location())
+                .city(city)
+                .country(country)
+                .location(location)
                 .requestedQuantity(request.quantity())
                 .status("CREATED")
                 .build();

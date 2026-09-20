@@ -32,23 +32,43 @@ class DeduplicationServiceTest {
     }
 
     @Test
-    void detectsDuplicateByNameAndLocation() {
+    void detectsDuplicateByEmail() {
         LeadCandidate candidate = new LeadCandidate("Clinica Sorriso", "google", "xyz");
+        candidate.setEmail("contato@clinicasorriso.com");
         candidate.setCity("Cuiaba");
-        candidate.setState("MT");
+        candidate.setCountry("Brasil");
 
         when(leadRepository.findFirstByNormalizedInstagramIgnoreCase(any())).thenReturn(Optional.empty());
         when(leadRepository.findFirstByNormalizedSourceIdIgnoreCase(any())).thenReturn(Optional.empty());
         when(leadRepository.findFirstByNormalizedWebsiteIgnoreCase(any())).thenReturn(Optional.empty());
         when(leadRepository.findFirstByNormalizedPhoneIgnoreCase(any())).thenReturn(Optional.empty());
+        when(leadRepository.findFirstByNormalizedEmailIgnoreCase("contato@clinicasorriso.com"))
+                .thenReturn(Optional.of(Lead.builder().id(30L).build()));
+
+        var result = service.check(candidate);
+        assertTrue(result.existing().isPresent());
+        assertEquals("email", result.reason());
+    }
+
+    @Test
+    void detectsDuplicateByNameAndLocation() {
+        LeadCandidate candidate = new LeadCandidate("Clinica Sorriso", "google", "xyz");
+        candidate.setCity("Cuiaba");
+        candidate.setCountry("Brasil");
+
+        when(leadRepository.findFirstByNormalizedInstagramIgnoreCase(any())).thenReturn(Optional.empty());
+        when(leadRepository.findFirstByNormalizedSourceIdIgnoreCase(any())).thenReturn(Optional.empty());
+        when(leadRepository.findFirstByNormalizedWebsiteIgnoreCase(any())).thenReturn(Optional.empty());
+        when(leadRepository.findFirstByNormalizedPhoneIgnoreCase(any())).thenReturn(Optional.empty());
+        when(leadRepository.findFirstByNormalizedEmailIgnoreCase(any())).thenReturn(Optional.empty());
 
         Lead existing = Lead.builder().id(20L).businessName("Clinica Sorriso").normalizedName("clinica sorriso").build();
-        when(leadRepository.findFirstByNormalizedNameAndCityAndStateIgnoreCase("clinica sorriso", "Cuiaba", "MT"))
+        when(leadRepository.findFirstByNormalizedNameAndCityAndCountryIgnoreCase("clinica sorriso", "Cuiaba", "Brasil"))
                 .thenReturn(Optional.of(existing));
 
         var result = service.check(candidate);
         assertTrue(result.existing().isPresent());
-        assertEquals("name_location", result.reason());
+        assertEquals("name_city_country", result.reason());
     }
 
     @Test
@@ -58,7 +78,8 @@ class DeduplicationServiceTest {
         when(leadRepository.findFirstByNormalizedSourceIdIgnoreCase(any())).thenReturn(Optional.empty());
         when(leadRepository.findFirstByNormalizedWebsiteIgnoreCase(any())).thenReturn(Optional.empty());
         when(leadRepository.findFirstByNormalizedPhoneIgnoreCase(any())).thenReturn(Optional.empty());
-        when(leadRepository.findFirstByNormalizedNameAndCityAndStateIgnoreCase(any(), any(), any())).thenReturn(Optional.empty());
+        when(leadRepository.findFirstByNormalizedEmailIgnoreCase(any())).thenReturn(Optional.empty());
+        when(leadRepository.findFirstByNormalizedNameAndCityAndCountryIgnoreCase(any(), any(), any())).thenReturn(Optional.empty());
 
         var result = service.check(candidate);
         assertTrue(result.existing().isEmpty());

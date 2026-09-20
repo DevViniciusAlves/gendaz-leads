@@ -4,6 +4,8 @@ import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.entity.*;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.repository.*;
+import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
+import com.gendaz.leads.service.provider.LeadDiscoveryResult;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.util.Normalizer;
 import org.slf4j.Logger;
@@ -23,9 +25,6 @@ import java.util.Set;
 public class AsyncCampaignProcessor {
 
     private static final Logger log = LoggerFactory.getLogger(AsyncCampaignProcessor.class);
-
-    @Value("${app.limits.discovery-multiplier:3}")
-    private int discoveryMultiplier;
 
     private final CampaignRepository campaignRepository;
     private final LeadRepository leadRepository;
@@ -58,7 +57,7 @@ public class AsyncCampaignProcessor {
     public void processCampaign(Long campaignId) {
         Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
         if (campaign == null) return;
-        
+
         try {
             discoverStage(campaign);
             analyzeStage(campaign);
@@ -80,25 +79,17 @@ public class AsyncCampaignProcessor {
     public void processPartialCampaign(Long campaignId, int remaining) {
         Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
         if (campaign == null) return;
-        
+
         if (remaining <= 0) {
-            // Remaining <= 0: recount and finalize without new discovery
             recomputeAndFinalize(campaign);
             return;
         }
 
         try {
-            // 1. Discover additional leads (preserve existing)
             int discovered = discoverAdditionalLeads(campaign, remaining);
-            
-            // 2. Analyze only new leads + ERROR leads
             analyzeOnlyPendingOrError(campaign);
-            
-            // 3. Recount and finalize
             recomputeAndFinalize(campaign);
-            
         } catch (ApiException e) {
-            // Discovery failure: keep old leads, mark FAILED with safe error
             log.error("Discovery falhou na campanha parcial {}: {} ({})", campaignId, e.getMessage(), e.getCode());
             campaign.setStatus("FAILED");
             campaign.setErrorMessage(truncate(e.getMessage()));
@@ -122,23 +113,26 @@ public class AsyncCampaignProcessor {
 
     private int discoverAdditionalLeads(Campaign campaign, int needed) {
         campaign.setStatus("DISCOVERING");
-        campaign.setProgressStage("Complementando resultados (filtros estruturados)");
+        campaign.setProgressStage("Complementando resultados");
         campaign.setProgressTotal(needed);
         campaign.setProgressCurrent(0);
         campaignRepository.save(campaign);
 
-        int multiplier = discoveryMultiplier <= 0 ? 3 : discoveryMultiplier;
-        int totalBudget = needed * multiplier;
-        totalBudget = Math.max(totalBudget, needed + 10);
-        totalBudget = Math.min(totalBudget, 200);
+        LeadDiscoveryRequest request = new LeadDiscoveryRequest(
+                campaign.getId(),
+                campaign.getNiche(),
+                campaign.getCity(),
+                campaign.getCountry(),
+                needed
+        );
 
-        List<LeadCandidate> candidates = new ArrayList<>();
-
+        LeadDiscoveryResult result;
         try {
             if (openStreetMapProvider.isEnabled()) {
-                candidates.addAll(openStreetMapProvider.discover(campaign.getNiche(), campaign.getLocation(), totalBudget));
+                result = openStreetMapProvider.discover(request);
             } else {
-                log.warn("OpenStreetMapProvider nao esta habilitado para campanha {}", campaign.getId());
+                log.warn("OpenStreetMapProvider não está habilitado para campanha {}", campaign.getId());
+                result = LeadDiscoveryResult.empty("OSM_DISABLED", "Provider desabilitado");
             }
         } catch (ApiException e) {
             log.warn("Provider {} falhou: {} ({})", openStreetMapProvider.getName(), e.getMessage(), e.getCode());
@@ -151,19 +145,25 @@ public class AsyncCampaignProcessor {
                     e.getMessage() != null ? e.getMessage() : "Falha ao consultar OpenStreetMap/Overpass.");
         }
 
-        Set<String> batchSeen = new LinkedHashSet<>();
-        int discovered = 0;
-        
-        // Carga de leads existentes para deduplicacao
-        List<Lead> existingLeads = leadRepository.findByCampaign(campaign.getId());
-        for (Lead lead : existingLeads) {
-             String key = batchKeyFromLead(lead);
-             if (key != null) batchSeen.add(key);
+        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.INFRA_UNAVAILABLE) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
+        }
+        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.DEADLINE_EXCEEDED) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
         }
 
-        for (LeadCandidate candidate : candidates) {
+        Set<String> batchSeen = new LinkedHashSet<>();
+        int discovered = 0;
+
+        List<Lead> existingLeads = leadRepository.findByCampaign(campaign.getId());
+        for (Lead lead : existingLeads) {
+            String key = batchKeyFromLead(lead);
+            if (key != null) batchSeen.add(key);
+        }
+
+        for (LeadCandidate candidate : result.candidates()) {
             if (discovered >= needed) break;
-            
+
             String key = batchKey(candidate);
             if (key != null && !batchSeen.add(key)) continue;
 
@@ -186,21 +186,21 @@ public class AsyncCampaignProcessor {
                 campaign.setProgressCurrent(discovered);
                 campaignRepository.save(campaign);
             } catch (DataIntegrityViolationException e) {
-                log.warn("Conflito de unicidade ao inserir lead (possivel duplicata): {}", candidate.getBusinessName());
+                log.warn("Conflito de unicidade ao inserir lead (possível duplicata): {}", candidate.getBusinessName());
             }
         }
-        // Note: discoveredCount will be recounted from DB in recomputeAndFinalize
         return discovered;
     }
 
     private String batchKeyFromLead(Lead lead) {
-         if (lead.getNormalizedSourceId() != null) return "src:" + lead.getNormalizedSourceId();
-         if (lead.getNormalizedInstagram() != null) return "ig:" + lead.getNormalizedInstagram();
-         if (lead.getNormalizedWebsite() != null) return "web:" + lead.getNormalizedWebsite();
-         if (lead.getNormalizedPhone() != null) return "ph:" + lead.getNormalizedPhone();
-         if (lead.getNormalizedName() != null && lead.getCity() != null && lead.getState() != null) 
-             return "nm:" + lead.getNormalizedName() + "|" + lead.getCity() + "|" + lead.getState();
-         return null;
+        if (lead.getNormalizedSourceId() != null) return "src:" + lead.getNormalizedSourceId();
+        if (lead.getNormalizedInstagram() != null) return "ig:" + lead.getNormalizedInstagram();
+        if (lead.getNormalizedWebsite() != null) return "web:" + lead.getNormalizedWebsite();
+        if (lead.getNormalizedPhone() != null) return "ph:" + lead.getNormalizedPhone();
+        if (lead.getNormalizedEmail() != null) return "em:" + lead.getNormalizedEmail();
+        if (lead.getNormalizedName() != null && lead.getCity() != null && lead.getCountry() != null)
+            return "nm:" + lead.getNormalizedName() + "|" + lead.getCity() + "|" + lead.getCountry();
+        return null;
     }
 
     public void retryFailedLeads(Long campaignId) {
@@ -223,30 +223,33 @@ public class AsyncCampaignProcessor {
         }
         recompute(campaign);
         campaignRepository.save(campaign);
-        log.info("Reprocessamento de campanha {} concluido: {} leads recuperados", campaignId, done);
+        log.info("Reprocessamento de campanha {} concluído: {} leads recuperados", campaignId, done);
     }
 
     private void discoverStage(Campaign campaign) {
         campaign.setStatus("DISCOVERING");
-        campaign.setProgressStage("Localizando região");
+        campaign.setProgressStage("Localizando cidade");
         campaign.setProgressTotal(campaign.getRequestedQuantity());
         campaign.setProgressCurrent(0);
         campaignRepository.save(campaign);
 
-        int multiplier = discoveryMultiplier <= 0 ? 3 : discoveryMultiplier;
-        int totalBudget = campaign.getRequestedQuantity() * multiplier;
-        totalBudget = Math.max(totalBudget, campaign.getRequestedQuantity() + 10);
-        totalBudget = Math.min(totalBudget, 200);
+        LeadDiscoveryRequest request = new LeadDiscoveryRequest(
+                campaign.getId(),
+                campaign.getNiche(),
+                campaign.getCity(),
+                campaign.getCountry(),
+                campaign.getRequestedQuantity()
+        );
 
-        List<LeadCandidate> candidates = new ArrayList<>();
-
+        LeadDiscoveryResult result;
         try {
             if (openStreetMapProvider.isEnabled()) {
-                campaign.setProgressStage("Buscando leads (filtros estruturados)");
+                campaign.setProgressStage("Buscando leads");
                 campaignRepository.save(campaign);
-                candidates.addAll(openStreetMapProvider.discover(campaign.getNiche(), campaign.getLocation(), totalBudget));
+                result = openStreetMapProvider.discover(request);
             } else {
-                log.warn("OpenStreetMapProvider nao esta habilitado para campanha {}", campaign.getId());
+                log.warn("OpenStreetMapProvider não está habilitado para campanha {}", campaign.getId());
+                result = LeadDiscoveryResult.empty("OSM_DISABLED", "Provider desabilitado");
             }
         } catch (ApiException e) {
             log.warn("Provider {} falhou: {} ({})", openStreetMapProvider.getName(), e.getMessage(), e.getCode());
@@ -259,10 +262,19 @@ public class AsyncCampaignProcessor {
                     e.getMessage() != null ? e.getMessage() : "Falha ao consultar OpenStreetMap/Overpass.");
         }
 
+        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.INFRA_UNAVAILABLE) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
+        }
+        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.DEADLINE_EXCEEDED) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
+        }
+
         Set<String> batchSeen = new LinkedHashSet<>();
         int discovered = 0;
-        for (LeadCandidate candidate : candidates) {
+
+        for (LeadCandidate candidate : result.candidates()) {
             if (discovered >= campaign.getRequestedQuantity()) break;
+
             String key = batchKey(candidate);
             if (key != null && !batchSeen.add(key)) continue;
 
@@ -286,17 +298,21 @@ public class AsyncCampaignProcessor {
                 campaign.setProgressCurrent(discovered);
                 campaignRepository.save(campaign);
             } catch (DataIntegrityViolationException e) {
-                log.warn("Conflito de unicidade ao inserir lead (possivel duplicata): {}", candidate.getBusinessName());
+                log.warn("Conflito de unicidade ao inserir lead (possível duplicata): {}", candidate.getBusinessName());
             }
         }
         campaign.setDiscoveredCount(discovered);
         campaignRepository.save(campaign);
+
+        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.EMPTY) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "EMPTY", "Nenhum lead com dados de contato encontrado na cidade");
+        }
     }
 
     private void analyzeStage(Campaign campaign) {
         if (campaign.getDiscoveredCount() == 0) return;
         campaign.setStatus("ANALYZING");
-        campaign.setProgressStage("Analisando");
+        campaign.setProgressStage("Analisando leads");
         campaign.setProgressTotal(campaign.getDiscoveredCount());
         campaign.setProgressCurrent(0);
         campaignRepository.save(campaign);
@@ -331,10 +347,6 @@ public class AsyncCampaignProcessor {
         }
     }
 
-    /**
-     * Analisa apenas leads com status NEW ou ERROR (novos ou que falharam anteriormente).
-     * Preserva leads já analisados (MESSAGE_READY, APPROVED, SENT, etc).
-     */
     private void analyzeOnlyPendingOrError(Campaign campaign) {
         List<Lead> leads = leadRepository.findByCampaign(campaign.getId());
         if (leads.isEmpty()) return;
@@ -355,7 +367,6 @@ public class AsyncCampaignProcessor {
                 continue;
             }
             String status = lead.getStatus();
-            // Analisar apenas NEW (novos descobertos) ou ERROR (falharam antes)
             if (!"NEW".equals(status) && !"ERROR".equals(status)) {
                 current++;
                 campaign.setProgressCurrent(current);
@@ -382,37 +393,40 @@ public class AsyncCampaignProcessor {
     }
 
     private void finalizeCampaign(Campaign campaign) {
-        if (campaign.getDiscoveredCount() == 0) {
+        long discovered = campaignLeadRepository.countByCampaignId(campaign.getId());
+        long analyzed = leadRepository.countByCampaignIdWithAnalysis(campaign.getId());
+        long messages = leadRepository.countByCampaignIdAndStatusIn(campaign.getId(),
+                List.of("MESSAGE_READY", "APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED"));
+        long errors = leadRepository.countByCampaignIdAndStatusIn(campaign.getId(), List.of("ERROR"));
+
+        if (discovered == 0) {
             campaign.setStatus("FAILED");
-            campaign.setErrorMessage("Nenhum lead encontrado para os parametros informados.");
-        } else if (campaign.getDiscoveredCount() < campaign.getRequestedQuantity()) {
+            campaign.setErrorMessage("Nenhum lead encontrado para os parâmetros informados.");
+        } else if (discovered < campaign.getRequestedQuantity()) {
             campaign.setStatus("PARTIAL");
-        } else {
+        } else if (errors > 0) {
+            campaign.setStatus("PARTIAL");
+        } else if (analyzed >= campaign.getRequestedQuantity() && messages >= campaign.getRequestedQuantity()) {
             campaign.setStatus("COMPLETED");
+        } else {
+            campaign.setStatus("PARTIAL");
         }
         campaign.setProgressStage(null);
-        campaign.setProgressCurrent(campaign.getDiscoveredCount());
-        campaign.setProgressTotal(campaign.getDiscoveredCount());
+        campaign.setProgressCurrent((int) discovered);
+        campaign.setProgressTotal((int) discovered);
         campaignRepository.save(campaign);
-        log.info("Campanha {} finalizada com status {}", campaign.getId(), campaign.getStatus());
+        log.info("Campanha {} finalizada com status {} (discovered={}, analyzed={}, messages={}, errors={})",
+                campaign.getId(), campaign.getStatus(), discovered, analyzed, messages, errors);
     }
 
     public void recompute(Campaign campaign) {
         long discoveredCount = campaignLeadRepository.countByCampaignId(campaign.getId());
         campaign.setDiscoveredCount((int) discoveredCount);
-        List<Lead> leads = leadRepository.findByCampaign(campaign.getId());
-        int analyzed = 0, messages = 0;
-        for (Lead l : leads) {
-            if ("MESSAGE_READY".equals(l.getStatus()) || "APPROVED".equals(l.getStatus())
-                    || "SENT".equals(l.getStatus()) || "REPLIED".equals(l.getStatus())
-                    || "INTERESTED".equals(l.getStatus()) || "SCHEDULED".equals(l.getStatus())
-                    || "CONVERTED".equals(l.getStatus())) {
-                analyzed++;
-                messages++;
-            }
-        }
-        campaign.setAnalyzedCount(analyzed);
-        campaign.setMessageCount(messages);
+        long analyzed = leadRepository.countByCampaignIdWithAnalysis(campaign.getId());
+        campaign.setAnalyzedCount((int) analyzed);
+        long messages = leadRepository.countByCampaignIdAndStatusIn(campaign.getId(),
+                List.of("MESSAGE_READY", "APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED"));
+        campaign.setMessageCount((int) messages);
     }
 
     private String batchKey(LeadCandidate c) {
@@ -424,8 +438,10 @@ public class AsyncCampaignProcessor {
         if (w != null) return "web:" + w;
         String p = normalizer.normalizePhone(c.getPhone());
         if (p != null) return "ph:" + p;
+        String e = normalizer.normalizeEmail(c.getEmail());
+        if (e != null) return "em:" + e;
         String n = normalizer.normalizeName(c.getBusinessName());
-        if (n != null && c.getCity() != null && c.getState() != null) return "nm:" + n + "|" + c.getCity() + "|" + c.getState();
+        if (n != null && c.getCity() != null && c.getCountry() != null) return "nm:" + n + "|" + c.getCity() + "|" + c.getCountry();
         return null;
     }
 

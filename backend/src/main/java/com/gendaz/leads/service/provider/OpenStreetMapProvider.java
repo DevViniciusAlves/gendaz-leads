@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.service.InstagramDetector;
+import com.gendaz.leads.service.WebsiteContactEnricher;
 import com.gendaz.leads.util.Normalizer;
+import com.gendaz.leads.util.SsrfGuard;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,11 +23,17 @@ import org.springframework.web.client.RestClientException;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Component
 public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenStreetMapProvider.class);
+
     record FailureDetails(String rootCauseType, String safeMessage) {}
 
     private static FailureDetails getFailureDetails(Throwable t) {
@@ -33,20 +41,13 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         while (root.getCause() != null) {
             root = root.getCause();
         }
-        
         String type = root.getClass().getSimpleName();
         String message = root.getMessage() != null ? root.getMessage() : "";
-        
-        // Sanitizar (simples, melhora conforme necessidade)
         message = message.replaceAll("(?i)(password|token|secret|url|database_url|key)=[^\\s&]+", "$1=***");
-        if (message.length() > 300) {
-            message = message.substring(0, 300);
-        }
-        
+        if (message.length() > 300) message = message.substring(0, 300);
         return new FailureDetails(type, message);
     }
 
-    private static final double BBOX_DELTA = 0.18;
     private static final int MAX_OUT = 200;
 
     @Value("${app.discovery.osm.enabled:true}")
@@ -55,13 +56,19 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.timeout-ms:20000}")
     private int timeoutMs;
 
+    @Value("${app.discovery.osm.nominatim-timeout-ms:8000}")
+    private int nominatimTimeoutMs;
+
+    @Value("${app.discovery.osm.nominatim-max-attempts:2}")
+    private int nominatimMaxAttempts;
+
     @Value("${app.discovery.osm.discovery-deadline-ms:60000}")
     private long discoveryDeadlineMs;
 
-    @Value("${app.discovery.osm.overpass-endpoints:}")
+    @Value("${app.discovery.osm.overpass-endpoints:https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter}")
     private String overpassEndpoints;
 
-    @Value("${app.discovery.osm.overpass-url:https://overpass-api.de/api/interpreter}")
+    @Value("${app.discovery.osm.overpass-url:}")
     private String overpassUrl;
 
     @Value("${app.discovery.osm.fallback-url:}")
@@ -73,19 +80,28 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.circuit-open-seconds:180}")
     private long circuitOpenSeconds;
 
+    @Value("${app.discovery.osm.tile-target-km:8}")
+    private double tileTargetKm;
+
     private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
     private final InstagramDetector instagramDetector;
+    private final WebsiteContactEnricher websiteContactEnricher;
     private final Normalizer normalizer;
+    private final SsrfGuard ssrfGuard;
     private OverpassCircuitBreaker circuitBreaker;
-    private static final java.util.concurrent.Semaphore overpassSemaphore = new java.util.concurrent.Semaphore(1, true);
+    private final Semaphore overpassSemaphore = new Semaphore(1, true);
+    private final Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache = new ConcurrentHashMap<>();
 
     public OpenStreetMapProvider(RestClient.Builder builder, ObjectMapper objectMapper,
-                                 InstagramDetector instagramDetector, Normalizer normalizer) {
+                                 InstagramDetector instagramDetector, WebsiteContactEnricher websiteContactEnricher,
+                                 Normalizer normalizer, SsrfGuard ssrfGuard) {
         this.builder = builder;
         this.objectMapper = objectMapper;
         this.instagramDetector = instagramDetector;
+        this.websiteContactEnricher = websiteContactEnricher;
         this.normalizer = normalizer;
+        this.ssrfGuard = ssrfGuard;
         this.circuitBreaker = new OverpassCircuitBreaker(180);
     }
 
@@ -93,8 +109,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     void logOsmConfig() {
         List<String> endpoints = buildEndpointList();
         this.circuitBreaker = new OverpassCircuitBreaker(circuitOpenSeconds);
-        log.info("[osm] config enabled={} timeoutMs={} deadlineMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={}",
-                enabled, timeoutMs, discoveryDeadlineMs, endpoints.size(), maxConcurrency, circuitOpenSeconds);
+        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} deadlineMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} tileTargetKm={}",
+                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, discoveryDeadlineMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, tileTargetKm);
     }
 
     private RestClient client(int effectiveTimeoutMs) {
@@ -114,18 +130,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             String[] parts = overpassEndpoints.split(",");
             for (String part : parts) {
                 String trimmed = part.trim();
-                if (!trimmed.isBlank()) {
-                    endpoints.add(trimmed);
-                }
+                if (!trimmed.isBlank()) endpoints.add(trimmed);
             }
         }
         if (endpoints.isEmpty()) {
-            if (overpassUrl != null && !overpassUrl.isBlank()) {
-                endpoints.add(overpassUrl.trim());
-            }
-            if (fallbackUrl != null && !fallbackUrl.isBlank()) {
-                endpoints.add(fallbackUrl.trim());
-            }
+            if (overpassUrl != null && !overpassUrl.isBlank()) endpoints.add(overpassUrl.trim());
+            if (fallbackUrl != null && !fallbackUrl.isBlank()) endpoints.add(fallbackUrl.trim());
         }
         if (endpoints.isEmpty()) {
             endpoints.add("https://overpass-api.de/api/interpreter");
@@ -144,180 +154,204 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     }
 
     @Override
-    public List<LeadCandidate> discover(String niche, String location, int limit) {
-        if (!isEnabled()) return List.of();
+    public LeadDiscoveryResult discover(LeadDiscoveryRequest request) {
+        if (!isEnabled()) return LeadDiscoveryResult.empty("OSM_DISABLED", "OpenStreetMap provider desabilitado");
 
-        long deadlineNanos = System.nanoTime() + discoveryDeadlineMs * 1_000_000L;
-        String campaignId = "unknown"; // Could be passed via context if needed
-        log.info("[osm] discovery_started campaignId={} niche={} location={} requested={} deadlineMs={} maxConcurrency={}",
-                campaignId, niche, location, limit, discoveryDeadlineMs, maxConcurrency);
+        DiscoveryDeadline deadline = new DiscoveryDeadline(discoveryDeadlineMs);
+        Long campaignId = request.campaignId();
 
-        Geo geo = geocodeOrThrow(location);
-        log.info("[osm] geocode_success campaignId={} bbox_source={} south={} west={} north={} east={}",
-                campaignId, geo.bboxValid ? "nominatim" : "fallback", geo.south, geo.west, geo.north, geo.east);
+        log.info("[osm] discovery_started campaignId={} niche={} city={} country={} requestedUseful={} deadlineMs={}",
+                campaignId, request.niche(), request.city(), request.country(), request.targetQuantity(), discoveryDeadlineMs);
+
+        Geo geo;
+        try {
+            geo = geocodeCityCountry(request.city(), request.country(), deadline, campaignId);
+        } catch (ApiException e) {
+            return LeadDiscoveryResult.empty(e.getCode(), e.getMessage());
+        }
+
+        List<Tile> tiles = buildCityTiles(geo);
+        if (tiles.isEmpty()) {
+            return LeadDiscoveryResult.empty("OSM_CITY_TILES_EMPTY", "Nenhum tile gerado para a cidade");
+        }
 
         List<String> endpoints = buildEndpointList();
         Map<String, Optional<String>> instagramCache = new HashMap<>();
         Map<String, LeadCandidate> allCandidates = new LinkedHashMap<>();
+        Map<String, LeadCandidate> dedupeBySourceId = new HashMap<>();
 
+        AtomicInteger usefulFound = new AtomicInteger(0);
+        boolean allEndpointsFailed = true;
         Exception lastFailure = null;
+        boolean deadlineExceeded = false;
 
-        for (int i = 0; i < endpoints.size(); i++) {
-            String url = endpoints.get(i);
-            String host;
-            try { host = java.net.URI.create(url).getHost(); } catch (Exception ignored) { host = "unknown"; }
+        for (int tileIdx = 0; tileIdx < tiles.size(); tileIdx++) {
+            Tile tile = tiles.get(tileIdx);
 
-            if (circuitBreaker.isOpen(host)) {
-                log.info("[osm] endpoint_skipped campaignId={} endpointHost={} reason=circuit_open", campaignId, host);
-                continue;
+            if (deadline.isExpired()) {
+                deadlineExceeded = true;
+                log.warn("[osm] deadline_exceeded campaignId={} tileIdx={}/{}", campaignId, tileIdx, tiles.size());
+                break;
             }
 
-            long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
-            if (remainingMs <= 0) {
-                log.warn("[osm] deadline_exceeded campaignId={} elapsedMs={}", campaignId, discoveryDeadlineMs);
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT",
-                        "A busca de leads excedeu o tempo máximo permitido.");
+            long remainingUseful = request.targetQuantity() - usefulFound.get();
+            if (remainingUseful <= 0) {
+                log.info("[osm] quantity_reached campaignId={} usefulFound={}", campaignId, usefulFound.get());
+                break;
             }
 
-            int effectiveTimeout = (int) Math.min(timeoutMs, remainingMs);
-            log.info("[osm] overpass_request campaignId={} phase=structured endpointHost={} timeoutMs={} remainingBudgetMs={}",
-                    campaignId, host, effectiveTimeout, remainingMs);
+            log.info("[osm] tile_start campaignId={} tileIdx={}/{} remainingUseful={} bbox={}",
+                    campaignId, tileIdx, tiles.size(), remainingUseful, tile.bbox());
 
-            String structuredQuery = buildStructuredQuery(niche, geo, limit);
-            try {
-                List<LeadCandidate> candidates = executeOverpassQuery(url, structuredQuery, geo, instagramCache, limit, allCandidates, campaignId, host, deadlineNanos);
-                for (LeadCandidate c : candidates) {
-                    String key = "osm:" + c.getSourceId();
-                    allCandidates.putIfAbsent(key, c);
+            for (int phase = 0; phase < 2; phase++) {
+                if (deadline.isExpired()) {
+                    deadlineExceeded = true;
+                    break;
                 }
 
-                if (allCandidates.size() >= limit) {
-                    log.info("[osm] discovery_finished campaignId={} phase=structured candidates={} elapsedMs={}",
-                            campaignId, allCandidates.size(), (discoveryDeadlineMs - remainingMs));
-                    return new ArrayList<>(allCandidates.values()).subList(0, Math.min(limit, allCandidates.size()));
+                if (usefulFound.get() >= request.targetQuantity()) break;
+
+                int remainingUsefulInt = (int) Math.min(remainingUseful, Integer.MAX_VALUE);
+                String query = (phase == 0) ? buildStructuredQuery(request.niche(), tile, remainingUsefulInt)
+                                            : buildNameFallbackQuery(request.niche(), tile, remainingUsefulInt);
+                if (query == null) {
+                    if (phase == 1) log.info("[osm] name_fallback_skipped campaignId={} tileIdx={} reason=no_fallback", campaignId, tileIdx);
+                    continue;
                 }
 
-                circuitBreaker.recordSuccess(host);
-                lastFailure = null;
+                for (int endpointIdx = 0; endpointIdx < endpoints.size(); endpointIdx++) {
+                    if (deadline.isExpired()) {
+                        deadlineExceeded = true;
+                        break;
+                    }
+                    if (usefulFound.get() >= request.targetQuantity()) break;
 
-            } catch (Exception e) {
-                lastFailure = e;
-                boolean retryable = isRetryable(e);
-                FailureDetails fd = getFailureDetails(e);
-                log.warn("[osm] overpass_failed campaignId={} phase=structured endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} retryable={} elapsedMs={}",
-                        campaignId, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable, (discoveryDeadlineMs - remainingMs));
+                    String url = endpoints.get(endpointIdx);
+                    String host;
+                    try { host = java.net.URI.create(url).getHost(); } catch (Exception ignored) { host = "unknown"; }
 
-                if (retryable) {
-                    circuitBreaker.recordFailure(host);
+                    if (circuitBreaker.isOpen(host)) {
+                        log.info("[osm] endpoint_skipped campaignId={} tileIdx={} phase={} endpointHost={} reason=circuit_open", campaignId, tileIdx, phase, host);
+                        continue;
+                    }
+
+                    long remainingMs = deadline.remainingMs();
+                    if (remainingMs <= 0) {
+                        deadlineExceeded = true;
+                        break;
+                    }
+
+                    int effectiveTimeout = (int) Math.min(timeoutMs, remainingMs);
+                    int queryLimit = Math.min(remainingUsefulInt + 5, MAX_OUT);
+
+                    log.info("[osm] overpass_request campaignId={} tileIdx={} phase={} endpointHost={} timeoutMs={} remainingBudgetMs={} queryLimit={}",
+                            campaignId, tileIdx, phase, host, effectiveTimeout, remainingMs, queryLimit);
+
+                    try {
+                        List<LeadCandidate> candidates = executeOverpassQuery(url, query, tile, geo, instagramCache, queryLimit, dedupeBySourceId, campaignId, host, deadline);
+                        allEndpointsFailed = false;
+
+                        for (LeadCandidate c : candidates) {
+                            String key = "osm:" + c.getSourceId();
+                            if (dedupeBySourceId.putIfAbsent(key, c) == null) {
+                                allCandidates.put(key, c);
+                                if (hasContactData(c)) {
+                                    usefulFound.incrementAndGet();
+                                }
+                            }
+                        }
+
+                        log.info("[osm] overpass_response campaignId={} tileIdx={} phase={} endpointHost={} elements={} mapped={} usefulNow={} elapsedMs={}",
+                                campaignId, tileIdx, phase, host, candidates.size(), allCandidates.size(), usefulFound.get(),
+                                (deadline.getTotalMs() - deadline.remainingMs()));
+
+                        circuitBreaker.recordSuccess(host);
+                        lastFailure = null;
+
+                        if (usefulFound.get() >= request.targetQuantity()) break;
+
+                        break;
+
+                    } catch (Exception e) {
+                        lastFailure = e;
+                        boolean retryable = isRetryable(e);
+                        FailureDetails fd = getFailureDetails(e);
+                        log.warn("[osm] overpass_failed campaignId={} tileIdx={} phase={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} retryable={} elapsedMs={}",
+                                campaignId, tileIdx, phase, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable,
+                                (deadline.getTotalMs() - deadline.remainingMs()));
+
+                        if (retryable) {
+                            circuitBreaker.recordFailure(host);
+                        }
+                        if (!retryable) {
+                            return LeadDiscoveryResult.infraUnavailable("OSM_OVERPASS_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage());
+                        }
+                    }
                 }
-                if (!retryable) {
-                    throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_OVERPASS_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage());
-                }
-                continue;
-            }
-        }
 
-        if (allCandidates.size() >= limit) {
-            return new ArrayList<>(allCandidates.values()).subList(0, limit);
-        }
-
-        for (int i = 0; i < endpoints.size(); i++) {
-            String url = endpoints.get(i);
-            String host;
-            try { host = java.net.URI.create(url).getHost(); } catch (Exception ignored) { host = "unknown"; }
-
-            if (circuitBreaker.isOpen(host)) {
-                log.info("[osm] endpoint_skipped campaignId={} endpointHost={} reason=circuit_open", campaignId, host);
-                continue;
-            }
-
-            long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
-            if (remainingMs <= 0) {
-                log.warn("[osm] deadline_exceeded campaignId={} elapsedMs={}", campaignId, discoveryDeadlineMs);
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT",
-                        "A busca de leads excedeu o tempo máximo permitido.");
-            }
-
-            int effectiveTimeout = (int) Math.min(timeoutMs, remainingMs);
-            log.info("[osm] overpass_request campaignId={} phase=name_fallback endpointHost={} timeoutMs={} remainingBudgetMs={}",
-                    campaignId, host, effectiveTimeout, remainingMs);
-
-            String nameFallbackQuery = buildNameFallbackQuery(niche, geo, limit);
-            if (nameFallbackQuery == null) {
-                log.info("[osm] name_fallback_skipped campaignId={} reason=no_fallback_regex", campaignId);
-                continue;
-            }
-
-            try {
-                List<LeadCandidate> candidates = executeOverpassQuery(url, nameFallbackQuery, geo, instagramCache, limit, allCandidates, campaignId, host, deadlineNanos);
-                for (LeadCandidate c : candidates) {
-                    String key = "osm:" + c.getSourceId();
-                    allCandidates.putIfAbsent(key, c);
-                }
-
-                if (allCandidates.size() >= limit) {
-                    log.info("[osm] discovery_finished campaignId={} phase=name_fallback candidates={} elapsedMs={}",
-                            campaignId, allCandidates.size(), (discoveryDeadlineMs - remainingMs));
-                    return new ArrayList<>(allCandidates.values()).subList(0, Math.min(limit, allCandidates.size()));
-                }
-
-                circuitBreaker.recordSuccess(host);
-                lastFailure = null;
-
-            } catch (Exception e) {
-                lastFailure = e;
-                boolean retryable = isRetryable(e);
-                FailureDetails fd = getFailureDetails(e);
-                log.warn("[osm] overpass_failed campaignId={} phase=name_fallback endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} retryable={} elapsedMs={}",
-                        campaignId, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable, (discoveryDeadlineMs - remainingMs));
-
-                if (retryable) {
-                    circuitBreaker.recordFailure(host);
-                }
-                if (!retryable) {
-                    throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_OVERPASS_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage());
-                }
-                continue;
+                if (deadlineExceeded || usefulFound.get() >= request.targetQuantity()) break;
             }
         }
 
-        int finalCount = allCandidates.size();
-        long elapsedMs = (discoveryDeadlineMs - ((deadlineNanos - System.nanoTime()) / 1_000_000L));
-        log.info("[osm] discovery_finished campaignId={} totalCandidates={} elapsedMs={} result={}",
-                campaignId, finalCount, elapsedMs, finalCount > 0 ? "partial" : "empty");
+        int finalUseful = usefulFound.get();
+        int totalCandidates = allCandidates.size();
+        long elapsedMs = deadline.getTotalMs() - deadline.remainingMs();
+        boolean regionExhausted = tileIdxReachedEnd(tiles, deadline, deadlineExceeded);
 
-        if (finalCount == 0) {
-            if (lastFailure != null) {
-                String msg = "Falha ao consultar Overpass: " + lastFailure.getMessage();
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_OVERPASS_ERROR", msg);
-            }
-            return List.of();
+        log.info("[osm] discovery_finished campaignId={} totalCandidates={} usefulFound={} tilesVisited={} outcome={} elapsedMs={}",
+                campaignId, totalCandidates, finalUseful, tiles.size(), determineOutcome(finalUseful, request.targetQuantity(), allEndpointsFailed, deadlineExceeded, regionExhausted), elapsedMs);
+
+        if (allEndpointsFailed && totalCandidates == 0) {
+            return LeadDiscoveryResult.infraUnavailable("OSM_OVERPASS_UNAVAILABLE", "Todos os endpoints Overpass indisponíveis");
         }
-
-        return new ArrayList<>(allCandidates.values()).subList(0, Math.min(limit, finalCount));
+        if (deadlineExceeded) {
+            return LeadDiscoveryResult.deadlineExceeded(new ArrayList<>(allCandidates.values()));
+        }
+        if (finalUseful == 0) {
+            return LeadDiscoveryResult.empty("EMPTY", "Nenhum lead com dados de contato encontrado na cidade");
+        }
+        if (finalUseful >= request.targetQuantity()) {
+            return LeadDiscoveryResult.complete(new ArrayList<>(allCandidates.values()));
+        }
+        return LeadDiscoveryResult.partial(new ArrayList<>(allCandidates.values()), regionExhausted);
     }
 
-    private List<LeadCandidate> executeOverpassQuery(String url, String query, Geo geo,
-                                                     Map<String, Optional<String>> instagramCache,
-                                                     int limit,
-                                                     Map<String, LeadCandidate> existingCandidates,
-                                                     String campaignId,
-                                                     String host,
-                                                     long deadlineNanos) throws RestClientException, java.io.IOException {
-        long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+    private boolean tileIdxReachedEnd(List<Tile> tiles, DiscoveryDeadline deadline, boolean deadlineExceeded) {
+        return deadlineExceeded || tiles.isEmpty();
+    }
+
+    private LeadDiscoveryResult.DiscoveryOutcome determineOutcome(int usefulFound, int targetQuantity, boolean allEndpointsFailed, boolean deadlineExceeded, boolean regionExhausted) {
+        if (allEndpointsFailed) return LeadDiscoveryResult.DiscoveryOutcome.INFRA_UNAVAILABLE;
+        if (deadlineExceeded) return LeadDiscoveryResult.DiscoveryOutcome.DEADLINE_EXCEEDED;
+        if (usefulFound == 0) return LeadDiscoveryResult.DiscoveryOutcome.EMPTY;
+        if (usefulFound >= targetQuantity) return LeadDiscoveryResult.DiscoveryOutcome.COMPLETE;
+        return LeadDiscoveryResult.DiscoveryOutcome.PARTIAL;
+    }
+
+    private List<LeadCandidate> executeOverpassQuery(String url, String query, Tile tile, Geo geo,
+                                                      Map<String, Optional<String>> instagramCache,
+                                                      int queryLimit,
+                                                      Map<String, LeadCandidate> existingCandidates,
+                                                      Long campaignId,
+                                                      String host,
+                                                      DiscoveryDeadline deadline) throws RestClientException, java.io.IOException {
+        long remainingMs = deadline.remainingMs();
         if (remainingMs <= 0) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT",
-                    "A busca de leads excedeu o tempo máximo permitido.");
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "A busca de leads excedeu o tempo máximo permitido.");
         }
 
         int effectiveTimeout = (int) Math.min(timeoutMs, remainingMs);
 
         boolean acquired = false;
         try {
-            acquired = overpassSemaphore.tryAcquire(remainingMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            acquired = overpassSemaphore.tryAcquire(remainingMs, TimeUnit.MILLISECONDS);
             if (!acquired) {
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT",
-                        "Timeout aguardando acesso ao Overpass.");
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Timeout aguardando acesso ao Overpass.");
+            }
+
+            long remainingAfterAcquire = deadline.remainingMs();
+            if (remainingAfterAcquire <= 0) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido após adquirir semáforo.");
             }
 
             long startNs = System.nanoTime();
@@ -341,7 +375,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
             List<LeadCandidate> candidates = new ArrayList<>();
             for (JsonNode el : elements) {
-                if (candidates.size() + existingCandidates.size() >= limit) break;
+                if (candidates.size() >= queryLimit) break;
                 LeadCandidate candidate = mapElement(el, geo, instagramCache);
                 if (candidate != null) {
                     String key = "osm:" + candidate.getSourceId();
@@ -353,12 +387,9 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             return candidates;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT",
-                    "Interrompido aguardando acesso ao Overpass.");
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Interrompido aguardando acesso ao Overpass.");
         } finally {
-            if (acquired) {
-                overpassSemaphore.release();
-            }
+            if (acquired) overpassSemaphore.release();
         }
     }
 
@@ -371,94 +402,177 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         Throwable root = e;
         while (root != null) {
             if (root instanceof ConnectException || root instanceof SocketTimeoutException
-                || root instanceof java.net.NoRouteToHostException
-                || root instanceof java.net.UnknownHostException
-                || (root.getMessage() != null && root.getMessage().toLowerCase().contains("connection reset"))) {
+                    || root instanceof java.net.NoRouteToHostException
+                    || root instanceof java.net.UnknownHostException
+                    || (root.getMessage() != null && root.getMessage().toLowerCase().contains("connection reset"))) {
                 return true;
             }
             if (root instanceof javax.net.ssl.SSLHandshakeException) return false;
             root = root.getCause();
         }
-        
-        // Mantemos comportamento padrão para ResourceAccessException genérico se não identificar causa específica
-        // mas o prompt pede para não tratar "todo ResourceAccessException" como retryable.
-        // Já identifiquei os casos retryable específicos.
         return false;
     }
 
-    private void sleepBackoff(int attempt) {
-        try { Thread.sleep(1000L * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-    }
-
-    private Geo geocodeOrThrow(String location) {
+    private Geo geocodeCityCountry(String city, String country, DiscoveryDeadline deadline, Long campaignId) {
+        String query = city + ", " + country;
         Exception lastFailure = null;
-        for (int attempt = 1; attempt <= 3; attempt++) {
+
+        for (int attempt = 1; attempt <= nominatimMaxAttempts; attempt++) {
+            if (deadline.isExpired()) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante geocodificação");
+            }
+
+            long remainingMs = deadline.remainingMs();
+            if (remainingMs <= 0) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante geocodificação");
+            }
+
+            int effectiveTimeout = (int) Math.min(nominatimTimeoutMs, remainingMs);
+
             try {
-                String response = client(timeoutMs).get()
+                String response = client(effectiveTimeout).get()
                         .uri(uriBuilder -> uriBuilder
                                 .scheme("https").host("nominatim.openstreetmap.org").path("/search")
-                                .queryParam("q", location)
+                                .queryParam("q", query)
                                 .queryParam("format", "json")
-                                .queryParam("limit", "1")
+                                .queryParam("limit", "5")
                                 .queryParam("addressdetails", "1")
                                 .build())
                         .retrieve()
                         .body(String.class);
+
                 JsonNode arr = objectMapper.readTree(response);
-                // Nominatim 200 + []: LOCATION_NOT_FOUND.
                 if (!arr.isArray() || arr.isEmpty()) {
-                    throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND",
-                            "Local não encontrado: " + location);
+                    throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND", "Cidade não encontrada: " + query);
                 }
 
-                JsonNode hit = arr.get(0);
-                double lat = hit.path("lat").asDouble(Double.NaN);
-                double lon = hit.path("lon").asDouble(Double.NaN);
-                if (Double.isNaN(lat) || Double.isNaN(lon)) {
-                    throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND",
-                            "Local não encontrado: " + location);
-                }
+                for (JsonNode hit : arr) {
+                    JsonNode address = hit.path("address");
+                    String hitCity = firstPresent(address, "city", "town", "village", "municipality");
+                    String hitCountry = address.path("country").asText(null);
+                    if (hitCountry == null || hitCountry.isBlank()) continue;
 
-                JsonNode address = hit.path("address");
-                String city = firstPresent(address, "city", "town", "village", "municipality");
-                String state = address.path("state").asText(null);
-                String country = address.path("country").asText(null);
-                if (country == null || country.isBlank()) country = "BR";
+                    if (cityMatches(hitCity, city) && countryMatches(hitCountry, country)) {
+                        double lat = hit.path("lat").asDouble(Double.NaN);
+                        double lon = hit.path("lon").asDouble(Double.NaN);
+                        if (Double.isNaN(lat) || Double.isNaN(lon)) continue;
 
-                double south = 0, north = 0, west = 0, east = 0;
-                boolean bboxValid = false;
-                JsonNode bboxNode = hit.path("boundingbox");
-                if (bboxNode.isArray() && bboxNode.size() == 4) {
-                    // Nominatim retorna south, north, west, east.
-                    south = bboxNode.get(0).asDouble();
-                    north = bboxNode.get(1).asDouble();
-                    west = bboxNode.get(2).asDouble();
-                    east = bboxNode.get(3).asDouble();
+                        String state = address.path("state").asText(null);
 
-                    if (south < north && west < east && (north - south) < 2.0 && (east - west) < 2.0) {
-                        bboxValid = true;
+                        double south = 0, north = 0, west = 0, east = 0;
+                        boolean bboxValid = false;
+                        JsonNode bboxNode = hit.path("boundingbox");
+                        if (bboxNode.isArray() && bboxNode.size() == 4) {
+                            south = bboxNode.get(0).asDouble();
+                            north = bboxNode.get(1).asDouble();
+                            west = bboxNode.get(2).asDouble();
+                            east = bboxNode.get(3).asDouble();
+                            if (south < north && west < east) {
+                                bboxValid = true;
+                            }
+                        }
+
+                        log.info("[osm] geocode_success campaignId={} city={} country={} lat={} lon={} bboxValid={}",
+                                campaignId, hitCity, hitCountry, lat, lon, bboxValid);
+                        return new Geo(lat, lon, hitCity, state, hitCountry, south, north, west, east, bboxValid);
                     }
                 }
 
-                return new Geo(lat, lon, blankToNull(city), blankToNull(state), country, south, north, west, east, bboxValid);
+                throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_COUNTRY_MISMATCH",
+                        "Cidade encontrada mas em país diferente: " + query);
+
             } catch (ApiException e) {
                 throw e;
             } catch (RestClientException | java.io.IOException e) {
                 lastFailure = e;
                 boolean retryable = isRetryable(e);
                 FailureDetails fd = getFailureDetails(e);
-                log.warn("[osm] geocode_failed attempt={} errorType={} rootCauseType={} rootCauseMessage={} retryable={}", 
-                        attempt, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
+                log.warn("[osm] geocode_failed campaignId={} attempt={}/{} errorType={} rootCauseType={} rootCauseMessage={} retryable={}",
+                        campaignId, attempt, nominatimMaxAttempts, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
                 if (!retryable) throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR", "Falha não recuperável: " + fd.safeMessage());
             }
         }
-        // Falha Nominatim apos retries: OSM_GEOCODE_ERROR.
+
         throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR",
-                "Falha ao geocodificar local após retentativas: " + location);
+                "Falha ao geocodificar cidade após retentativas: " + query);
     }
 
-    String buildStructuredQuery(String niche, Geo geo, int limit) {
-        String bbox = buildBbox(geo);
+    private boolean cityMatches(String hitCity, String requestedCity) {
+        if (hitCity == null || requestedCity == null) return false;
+        return normalizeForCompare(hitCity).equals(normalizeForCompare(requestedCity));
+    }
+
+    private boolean countryMatches(String hitCountry, String requestedCountry) {
+        if (hitCountry == null || requestedCountry == null) return false;
+        return normalizeForCompare(hitCountry).equals(normalizeForCompare(requestedCountry));
+    }
+
+    private String normalizeForCompare(String s) {
+        return java.text.Normalizer.normalize(s.trim().toLowerCase(), java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "")
+                .replaceAll("\\s+", " ");
+    }
+
+    private List<Tile> buildCityTiles(Geo geo) {
+        List<Tile> tiles = new ArrayList<>();
+        if (!geo.bboxValid()) {
+            double lat = geo.lat();
+            double lon = geo.lon();
+            double delta = 0.18;
+            tiles.add(new Tile(lat - delta, lon - delta, lat + delta, lon + delta, 0));
+            return tiles;
+        }
+
+        double south = geo.south();
+        double north = geo.north();
+        double west = geo.west();
+        double east = geo.east();
+
+        double latKmPerDeg = 111.32;
+        double lonKmPerDeg = 111.32 * Math.cos(Math.toRadians((south + north) / 2.0));
+
+        double tileLatDeg = tileTargetKm / latKmPerDeg;
+        double tileLonDeg = tileTargetKm / lonKmPerDeg;
+
+        double centerLat = (south + north) / 2.0;
+        double centerLon = (west + east) / 2.0;
+
+        int latTiles = (int) Math.ceil((north - south) / tileLatDeg);
+        int lonTiles = (int) Math.ceil((east - west) / tileLonDeg);
+        latTiles = Math.max(1, Math.min(latTiles, 20));
+        lonTiles = Math.max(1, Math.min(lonTiles, 20));
+
+        for (int i = 0; i < latTiles; i++) {
+            for (int j = 0; j < lonTiles; j++) {
+                double tileSouth = south + i * tileLatDeg;
+                double tileNorth = Math.min(tileSouth + tileLatDeg, north);
+                double tileWest = west + j * tileLonDeg;
+                double tileEast = Math.min(tileWest + tileLonDeg, east);
+                if (tileSouth >= tileNorth || tileWest >= tileEast) continue;
+
+                double tileCenterLat = (tileSouth + tileNorth) / 2.0;
+                double tileCenterLon = (tileWest + tileEast) / 2.0;
+                double dist = haversineDistance(centerLat, centerLon, tileCenterLat, tileCenterLon);
+                tiles.add(new Tile(tileSouth, tileWest, tileNorth, tileEast, dist));
+            }
+        }
+
+        tiles.sort(Comparator.comparingDouble(Tile::distanceFromCenter));
+        return tiles;
+    }
+
+    private double haversineDistance(double lat1, double lon1, double lat2, double lon2) {
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return 6371 * c;
+    }
+
+    String buildStructuredQuery(String niche, Tile tile, int limit) {
+        String bbox = String.format(Locale.US, "%f,%f,%f,%f", tile.south(), tile.west(), tile.north(), tile.east());
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
         StringBuilder sb = new StringBuilder();
         sb.append("[out:json][timeout:25];(");
@@ -474,45 +588,25 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 sb.append(String.format("nwr%s(%s);", filterBuilder, bbox));
             }
         }
-        sb.append(");out center tags ").append(Math.min(limit + 5, MAX_OUT)).append(";");
+        if (sb.length() <= "[out:json][timeout:25];(".length()) {
+            return null;
+        }
+        sb.append(");out center tags ").append(Math.min(limit, MAX_OUT)).append(";");
         return sb.toString();
     }
 
-    String buildNameFallbackQuery(String niche, Geo geo, int limit) {
+    String buildNameFallbackQuery(String niche, Tile tile, int limit) {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
         String fallbackRegex = strategy.fallbackNameRegex();
         if (fallbackRegex == null || fallbackRegex.isBlank() || fallbackRegex.equals("''")) {
             return null;
         }
-        String bbox = buildBbox(geo);
+        String bbox = String.format(Locale.US, "%f,%f,%f,%f", tile.south(), tile.west(), tile.north(), tile.east());
         StringBuilder sb = new StringBuilder();
         sb.append("[out:json][timeout:25];(");
         sb.append(String.format("nwr[\"name\"~\"%s\",i](%s);", fallbackRegex, bbox));
-        sb.append(");out center tags ").append(Math.min(limit + 5, MAX_OUT)).append(";");
+        sb.append(");out center tags ").append(Math.min(limit, MAX_OUT)).append(";");
         return sb.toString();
-    }
-
-    private String buildBbox(Geo geo) {
-        if (geo.bboxValid) {
-            double spanLat = geo.north - geo.south;
-            double spanLon = geo.east - geo.west;
-            double maxSpan = 2.0;
-            if (spanLat > maxSpan || spanLon > maxSpan) {
-                double centerLat = (geo.south + geo.north) / 2.0;
-                double centerLon = (geo.west + geo.east) / 2.0;
-                double halfLat = maxSpan / 2.0;
-                double halfLon = maxSpan / 2.0;
-                double south = centerLat - halfLat;
-                double north = centerLat + halfLat;
-                double west = centerLon - halfLon;
-                double east = centerLon + halfLon;
-                return String.format(Locale.US, "%f,%f,%f,%f", south, west, north, east);
-            }
-            return String.format(Locale.US, "%f,%f,%f,%f", geo.south, geo.west, geo.north, geo.east);
-        } else {
-            return String.format(Locale.US, "%f,%f,%f,%f",
-                    geo.lat - BBOX_DELTA, geo.lon - BBOX_DELTA, geo.lat + BBOX_DELTA, geo.lon + BBOX_DELTA);
-        }
     }
 
     LeadCandidate mapElement(JsonNode el, Geo geo, Map<String, Optional<String>> instagramCache) {
@@ -529,9 +623,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         candidate.setCategory(buildCategory(tags));
         candidate.setWebsite(firstPresent(tags, "contact:website", "website", "url"));
         candidate.setPhone(firstPresent(tags, "contact:phone", "phone", "contact:mobile", "mobile"));
-        candidate.setCity(firstPresent(tags, "addr:city", "addr:town") != null ? firstPresent(tags, "addr:city", "addr:town") : geo.city);
-        candidate.setState(asTextOrNull(tags, "addr:state") != null ? asTextOrNull(tags, "addr:state") : geo.state);
-        candidate.setCountry(asTextOrNull(tags, "addr:country") != null ? asTextOrNull(tags, "addr:country") : geo.country);
+        candidate.setEmail(firstPresent(tags, "contact:email", "email"));
+
+        candidate.setCity(firstPresent(tags, "addr:city", "addr:town", "addr:village", "addr:municipality") != null
+                ? firstPresent(tags, "addr:city", "addr:town", "addr:village", "addr:municipality") : geo.city());
+        candidate.setState(asTextOrNull(tags, "addr:state") != null ? asTextOrNull(tags, "addr:state") : geo.state());
+        candidate.setCountry(asTextOrNull(tags, "addr:country") != null ? asTextOrNull(tags, "addr:country") : geo.country());
         candidate.setAddress(buildAddress(tags, geo));
 
         String rawIg = firstPresent(tags, "contact:instagram", "instagram");
@@ -543,24 +640,47 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             candidate.setInstagramStatus("FOUND");
         } else {
             String website = candidate.getWebsite();
-            if (website != null && !website.isBlank() && instagramDetector != null) {
+            if (website != null && !website.isBlank() && ssrfGuard.isSafe(website)) {
                 String normalizedWebsite = website.trim().toLowerCase();
                 
-                Optional<String> detected = instagramCache.computeIfAbsent(normalizedWebsite, 
+                Optional<String> detected = instagramCache.computeIfAbsent(normalizedWebsite,
                         key -> Optional.ofNullable(instagramDetector.detectFromWebsite(key)));
                 
+                WebsiteContactEnricher.WebsiteContactData enriched = enrichmentCache.computeIfAbsent(normalizedWebsite,
+                        key -> websiteContactEnricher.enrich(key));
+
                 if (detected.isPresent()) {
                     candidate.setInstagramUsername(detected.get());
                     candidate.setInstagramUrl("https://instagram.com/" + detected.get());
                     candidate.setInstagramStatus("FOUND");
+                } else if (enriched != null && enriched.instagramUsername() != null) {
+                    candidate.setInstagramUsername(enriched.instagramUsername());
+                    candidate.setInstagramUrl("https://instagram.com/" + enriched.instagramUsername());
+                    candidate.setInstagramStatus("FOUND");
                 } else {
                     candidate.setInstagramStatus("NOT_FOUND");
+                }
+
+                if (enriched != null) {
+                    if (enriched.phone() != null && (candidate.getPhone() == null || candidate.getPhone().isBlank())) {
+                        candidate.setPhone(enriched.phone());
+                    }
+                    if (enriched.email() != null && (candidate.getEmail() == null || candidate.getEmail().isBlank())) {
+                        candidate.setEmail(enriched.email());
+                    }
                 }
             } else {
                 candidate.setInstagramStatus("NOT_FOUND");
             }
         }
         return candidate;
+    }
+
+    private boolean hasContactData(LeadCandidate c) {
+        return (c.getPhone() != null && !c.getPhone().isBlank())
+                || (c.getEmail() != null && !c.getEmail().isBlank())
+                || (c.getInstagramUsername() != null && !c.getInstagramUsername().isBlank())
+                || (c.getWebsite() != null && !c.getWebsite().isBlank());
     }
 
     static String buildCategory(JsonNode tags) {
@@ -576,8 +696,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         String suburb = asTextOrNull(tags, "addr:suburb", "addr:neighbourhood", "addr:district");
         String city = asTextOrNull(tags, "addr:city", "addr:town", "addr:village", "addr:municipality");
         String state = asTextOrNull(tags, "addr:state");
-        if (city == null) city = geo.city;
-        if (state == null) state = geo.state;
+        if (city == null) city = geo.city();
+        if (state == null) state = geo.state();
 
         List<String> head = new ArrayList<>();
         StringBuilder streetPart = new StringBuilder();
@@ -620,15 +740,39 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return null;
     }
 
-    private static String blankToNull(String s) {
-        return (s == null || s.isBlank()) ? null : s.trim();
-    }
-
     private static String escapeTag(String s) {
         return s.replace("\\", "").replace("\"", "");
     }
 
     record Geo(double lat, double lon, String city, String state, String country, double south, double north, double west, double east, boolean bboxValid) {}
+
+    record Tile(double south, double west, double north, double east, double distanceFromCenter) {
+        String bbox() {
+            return String.format(Locale.US, "%f,%f,%f,%f", south, west, north, east);
+        }
+    }
+
+    static class DiscoveryDeadline {
+        private final long deadlineNanos;
+        private final long totalMs;
+
+        DiscoveryDeadline(long totalMs) {
+            this.totalMs = totalMs;
+            this.deadlineNanos = System.nanoTime() + totalMs * 1_000_000L;
+        }
+
+        long remainingMs() {
+            return Math.max(0, (deadlineNanos - System.nanoTime()) / 1_000_000L);
+        }
+
+        boolean isExpired() {
+            return System.nanoTime() >= deadlineNanos;
+        }
+
+        long getTotalMs() {
+            return totalMs;
+        }
+    }
 
     static class OverpassCircuitBreaker {
         private static final class EndpointState {
@@ -636,11 +780,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             volatile long openSince = 0;
             volatile int failureCount = 0;
             volatile int halfOpenSuccesses = 0;
+            volatile AtomicReference<Thread> halfOpenThread = new AtomicReference<>();
 
             enum State { CLOSED, OPEN, HALF_OPEN }
         }
 
-        private final java.util.Map<String, EndpointState> states = new java.util.concurrent.ConcurrentHashMap<>();
+        private final Map<String, EndpointState> states = new ConcurrentHashMap<>();
         private final long openSeconds;
 
         OverpassCircuitBreaker() {
@@ -653,41 +798,65 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
         boolean isOpen(String host) {
             EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
-            if (es.state == EndpointState.State.OPEN) {
-                if (System.currentTimeMillis() - es.openSince >= openSeconds * 1000L) {
-                    es.state = EndpointState.State.HALF_OPEN;
-                    es.halfOpenSuccesses = 0;
-                    return false;
+            synchronized (es) {
+                if (es.state == EndpointState.State.OPEN) {
+                    if (System.currentTimeMillis() - es.openSince >= openSeconds * 1000L) {
+                        es.state = EndpointState.State.HALF_OPEN;
+                        es.halfOpenSuccesses = 0;
+                        es.halfOpenThread.set(null);
+                        return false;
+                    }
+                    return true;
                 }
-                return true;
+                return false;
             }
-            return false;
+        }
+
+        boolean tryEnterHalfOpen(String host) {
+            EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
+            synchronized (es) {
+                if (es.state == EndpointState.State.HALF_OPEN && es.halfOpenThread.get() == null) {
+                    es.halfOpenThread.set(Thread.currentThread());
+                    return true;
+                }
+                return false;
+            }
         }
 
         void recordSuccess(String host) {
             EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
-            if (es.state == EndpointState.State.HALF_OPEN) {
-                es.halfOpenSuccesses++;
-                if (es.halfOpenSuccesses >= 1) {
-                    es.state = EndpointState.State.CLOSED;
+            synchronized (es) {
+                if (es.state == EndpointState.State.HALF_OPEN) {
+                    if (es.halfOpenThread.get() == Thread.currentThread()) {
+                        es.halfOpenSuccesses++;
+                        if (es.halfOpenSuccesses >= 1) {
+                            es.state = EndpointState.State.CLOSED;
+                            es.failureCount = 0;
+                            es.halfOpenThread.set(null);
+                        }
+                    }
+                } else if (es.state == EndpointState.State.CLOSED) {
                     es.failureCount = 0;
                 }
-            } else if (es.state == EndpointState.State.CLOSED) {
-                es.failureCount = 0;
             }
         }
 
         void recordFailure(String host) {
             EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
-            if (es.state == EndpointState.State.HALF_OPEN) {
-                es.state = EndpointState.State.OPEN;
-                es.openSince = System.currentTimeMillis();
-                es.failureCount = 0;
-            } else if (es.state == EndpointState.State.CLOSED) {
-                es.failureCount++;
-                if (es.failureCount >= 1) {
-                    es.state = EndpointState.State.OPEN;
-                    es.openSince = System.currentTimeMillis();
+            synchronized (es) {
+                if (es.state == EndpointState.State.HALF_OPEN) {
+                    if (es.halfOpenThread.get() == Thread.currentThread()) {
+                        es.state = EndpointState.State.OPEN;
+                        es.openSince = System.currentTimeMillis();
+                        es.failureCount = 0;
+                        es.halfOpenThread.set(null);
+                    }
+                } else if (es.state == EndpointState.State.CLOSED) {
+                    es.failureCount++;
+                    if (es.failureCount >= 1) {
+                        es.state = EndpointState.State.OPEN;
+                        es.openSince = System.currentTimeMillis();
+                    }
                 }
             }
         }

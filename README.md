@@ -1,9 +1,7 @@
 # Gendaz Leads
 
 Plataforma privada de prospecção comercial com IA para uso próprio do **Gendaz**.
-Informe nicho + localização + quantidade, e o sistema descobre empresas reais (Google Places e
-OpenStreetMap), deduplica globalmente, analisa cada lead com Groq, gera uma mensagem personalizada e
-controla campanhas de prospecção de ponta a ponta.
+Informe **nicho + cidade + país + quantidade**, e o sistema descobre empresas reais (OpenStreetMap/Nominatim/Overpass), deduplica globalmente, enriquece contatos públicos, analisa cada lead com **GPT-OSS**, gera uma mensagem personalizada e controla campanhas de prospecção de ponta a ponta.
 
 Este é um projeto de **produção**: todas as integrações são reais e nenhum dado é simulado.
 
@@ -16,9 +14,11 @@ Este é um projeto de **produção**: todas as integrações são reais e nenhum
 | Frontend    | React 18 + Vite (JavaScript)                                     |
 | Backend     | Java 17 + Spring Boot 3.3 (API REST, camadas, segurança)         |
 | Banco       | PostgreSQL (Neon) via Flyway migrations                          |
-| IA          | Groq API (análise + geração de mensagem)                         |
-| Descoberta  | Google Places API (v1) + OpenStreetMap / Overpass API            |
+| IA          | Groq API (análise + geração de mensagem) — modelo **openai/gpt-oss-120b** |
+| Descoberta  | OpenStreetMap / Nominatim / Overpass API (sem Google Places)     |
 | Hospedagem  | Backend: Render · Frontend: Vercel · Banco: Neon PostgreSQL     |
+
+---
 
 ---
 
@@ -52,7 +52,7 @@ gendaz-leads/
 
 - Java 17, Maven 3.9+
 - Node 18+ (usado Node 24)
-- Contas/credenciais: **Neon PostgreSQL**, **Groq API key**, **Google Maps API key** (opcional se usar só OSM)
+- Contas/credenciais: **Neon PostgreSQL**, **Groq API key** (Google Maps API key **não é necessário**)
 
 ---
 
@@ -106,14 +106,19 @@ Veja `backend/.env.example`. Resumo (sem valores reais):
 - `DATABASE_URL`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` — Neon Postgres
 - `JWT_SECRET` (≥32 chars), `JWT_EXPIRATION_MS`
 - `CORS_ALLOWED_ORIGINS` — origem da Vercel
-- `MIN_LEADS_PER_REQUEST` (3), `MAX_LEADS_PER_REQUEST` (30), `DISCOVERY_MULTIPLIER`
-- `GOOGLE_MAPS_API_KEY`, `GOOGLE_ENABLED`, `GOOGLE_TIMEOUT_MS`
-- `OSM_ENABLED`, `OSM_TIMEOUT_MS`, `OSM_OVERPASS_URL`
-- `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_ENABLED`, `GROQ_TIMEOUT_MS`, `GROQ_MAX_RETRIES`
-- `MESSAGING_PROVIDER` (atual: `log`), `SEND_INTERVAL_SECONDS`, `MAX_CONCURRENT_SENDS`
-- `WHATSAPP_SERVICE_URL`, `WHATSAPP_INTERNAL_TOKEN`, `WHATSAPP_SESSION_ID`, `WHATSAPP_TIMEOUT_MS`
-- `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW`
-- `APP_ENV`, `PORT`
+- `MIN_LEADS_PER_REQUEST` (3), `MAX_LEADS_PER_REQUEST` (30)
+- **Descoberta OSM** (sem Google Places):
+  - `OSM_ENABLED`, `OSM_TIMEOUT_MS`, `OSM_NOMINATIM_TIMEOUT_MS`, `OSM_NOMINATIM_MAX_ATTEMPTS`
+  - `OSM_DISCOVERY_DEADLINE_MS`, `OSM_TILE_TARGET_KM`
+  - `OSM_OVERPASS_ENDPOINTS`, `OSM_OVERPASS_MAX_CONCURRENCY`, `OSM_CIRCUIT_OPEN_SECONDS`
+- **Enriquecimento de contatos**:
+  - `LEAD_ENRICHMENT_CONNECT_TIMEOUT_MS`, `LEAD_ENRICHMENT_READ_TIMEOUT_MS`, `LEAD_ENRICHMENT_MAX_BYTES`
+- **Groq** (análise e geração de mensagens):
+  - `GROQ_API_KEY`, `GROQ_MODEL` (padrão: `openai/gpt-oss-120b`), `GROQ_ENABLED`, `GROQ_TIMEOUT_MS`, `GROQ_MAX_RETRIES`
+- Fila de envio: `MESSAGING_PROVIDER`, `SEND_INTERVAL_SECONDS`, `MAX_CONCURRENT_SENDS`
+- WhatsApp: `WHATSAPP_SERVICE_URL`, `WHATSAPP_INTERNAL_TOKEN`, `WHATSAPP_SESSION_ID`, `WHATSAPP_TIMEOUT_MS`
+- Rate limit: `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW`
+- App: `APP_ENV`, `PORT`
 
 ### WhatsApp (infra técnica)
 
@@ -160,19 +165,20 @@ npm start              # porta 3001; GET /health -> {"status":"UP"}
 
 ## Fluxo completo
 
-1. Usuário informa **nicho + localização + quantidade** (3–30) e cria uma campanha.
+1. Usuário informa **nicho + cidade + país + quantidade** (3–30) e cria uma campanha.
 2. Backend dispara processamento **assíncrono** (`@Async`):
-   - **Descoberta**: Google Places (v1) e OpenStreetMap/Overpass buscam empresas reais; soma de ambas compensa duplicados/inválidos.
-   - **Normalização**: cada resultado vira `LeadCandidate` com campos normalizados (nome, telefone, site, Instagram, sourceId).
-   - **Deduplicação global**: verifica Instagram, sourceId, site, telefone e nome+local; se já existir, registra evento `lead_duplicate` e não recria.
-   - **Criação**: novos leads entram como `NEW` (constraints únicos no banco impedem concorrência).
-   - **Análise (Groq)**: para cada lead, Groq retorna tipo, serviços, presença digital, sistema de agendamento detectado, pontos de dor, oportunidade e **score 0–100** (combinado com regras determinísticas em `ScoringService`).
-   - **Mensagem (Groq)**: mensagem curta e personalizada (usa o nome real; adapta se já existe sistema concorrente).
+   - **Descoberta**: Nominatim geocodifica cidade+país → tiles center-out cobrindo toda a cidade → Overpass consultado sequencialmente (concurrency=1) com failover por endpoint → structured queries primeiro, name fallback só se faltar → deadline global (~60s) garante timeout.
+   - **Normalização + Enriquecimento**: `LeadCandidate` com nome, categoria, endereço, cidade, país, telefone, **email**, website, Instagram, sourceId. Enriquecimento de website (tel:, mailto:, Instagram) com SSRF guard, cache, deadline-aware.
+   - **Deduplicação global**: sourceId → Instagram → website → telefone → email → nome+cidade+país; dedupe em memória antes de enriquecimento; constraints únicos no banco.
+   - **Lead útil**: só conta para a quantidade se tiver telefone **OU** Instagram **OU** email **OU** website. Sem contato → continua buscando.
+   - **Criação**: novos leads entram como `NEW`.
+   - **Análise (Groq GPT-OSS)**: fora de transação longa → tipo, serviços, presença digital, sistema de agendamento, dores, oportunidade, score 0–100.
+   - **Mensagem (Groq GPT-OSS)**: curta, personalizada, nome real.
    - Lead passa a `MESSAGE_READY`.
-3. Frontend acompanha o progresso real (palavra `Buscando leads` / `Analisando` + `X/Y`).
+3. Frontend acompanha progresso real: `Localizando cidade` → `Buscando leads` → `Complementando resultados` → `Enriquecendo contatos` → `Analisando leads` → `Gerando mensagens`.
 4. Usuário **revisa, edita, copia, abre Instagram, aprova** ou marca **Não prospectar**.
-5. Ao aprovar, o lead entra na **fila de envio** (`message_sends`). O `SendQueueProcessor` (agendado) respeita intervalo e concorrência e chama o `MessagingProvider`.
-6. Acompanhamento de status: `SENT → REPLIED → INTERESTED → CONVERTED`, além de `NOT_INTERESTED` e `DO_NOT_CONTACT`. Tudo auditado em `lead_events`.
+5. Ao aprovar, o lead entra na **fila de envio** (`message_sends`). `SendQueueProcessor` respeita intervalo/concorrência e chama `MessagingProvider`.
+6. Status: `SENT → REPLIED → INTERESTED → CONVERTED`, além de `NOT_INTERESTED` e `DO_NOT_CONTACT`. Tudo auditado em `lead_events`.
 
 ---
 
@@ -183,7 +189,7 @@ POST   /api/auth/register        {fullName, email, password}
 POST   /api/auth/login           {email, password}
 GET    /api/auth/me
 
-POST   /api/campaigns            {niche, location, quantity}
+POST   /api/campaigns            {niche, city, country, quantity}
 GET    /api/campaigns?page=&size=
 GET    /api/campaigns/{id}
 POST   /api/campaigns/{id}/retry
@@ -209,10 +215,10 @@ Todos os endpoints (exceto auth) exigem `Authorization: Bearer <token>`.
 ## Banco de dados (tabelas)
 
 - **users** — contas de acesso (BCrypt).
-- **campaigns** — campanha + contadores derivados (discovered/analyzed/message/approved/sent/replied/interested/converted/blocked) + progresso.
-- **leads** — lead normalizado; constraints únicos para deduplicação (instagram, website, phone, sourceId, nome+local); `do_not_contact`.
-- **lead_sources** — proveniência (Google/OSM) de cada lead.
-- **lead_analysis** — resultado da IA (score, sistema detectado, dores, oportunidade).
+- **campaigns** — campanha + contadores derivados (discovered/analyzed/message/approved/sent/replied/interested/converted/blocked) + progresso + **city, country** (location mantido para compat).
+- **leads** — lead normalizado; constraints únicos para deduplicação (instagram, website, phone, sourceId, email, nome+cidade+país); **email, normalized_email**; `do_not_contact`.
+- **lead_sources** — proveniência (OSM) de cada lead.
+- **lead_analysis** — resultado da IA (score, sistema detectado, dores, oportunidade, **model**).
 - **lead_messages** — mensagem gerada/editada/aprovada.
 - **campaign_leads** — relação campanha↔lead (unique).
 - **lead_events** — auditoria (lead_found, lead_duplicate, lead_analysis_completed, message_generated, message_approved, lead_status_changed, …).
@@ -228,8 +234,8 @@ Todos os endpoints (exceto auth) exigem `Authorization: Bearer <token>`.
 - Validação de entrada (Bean Validation) e tratamento global de exceções — **nenhum stack trace** exposto; respostas `{timestamp, status, code, message}`.
 - Consultas parametrizadas (JPA/Specification) → sem SQL injection.
 - React escapa por padrão → sem XSS; sem dados sensíveis no frontend.
-- **SSRF guard** nas buscas de Instagram a partir do site da empresa (bloqueia localhost/ IPs privados/metadata).
-- Timeouts e retry (com backoff) em todas as APIs externas; fallback OSM quando Google falha; falha de um lead não derruba a campanha.
+- **SSRF guard** nas buscas de Instagram/contatos a partir do site da empresa (bloqueia localhost/ IPs privados/metadata).
+- Timeouts e retry (com backoff) em todas as APIs externas (Nominatim, Overpass, website enrichment); falha de um lead não derruba a campanha.
 - Logs sem secrets; `actuator/health` sem detalhes internos.
 - Deduplicação reforçada por constraints únicos no banco (seguro sob concorrência).
 
@@ -238,9 +244,9 @@ Todos os endpoints (exceto auth) exigem `Authorization: Bearer <token>`.
 ## Decisões honestas / pendências
 
 - **Envio de mensagens**: o `MessagingProvider` atual (`log`) **registra a mensagem em log e não envia de fato** por nenhum canal, para não violar termos de plataforma nem depender de credenciais não fornecidas. A fila, o agendamento, as tentativas/retry e a transição de status (`SENT`) estão implementados. Para envio real, implemente um `MessagingProvider` (ex.: Instagram/WhatsApp compatível) e troque `MESSAGING_PROVIDER`. Isso exige credenciais e aprovação do canal.
-- **Descoberta de Instagram**: best-effort — extrai o perfil do site da empresa (quando público e acessível). Se não confirmado, `instagramStatus = NOT_FOUND`. Nunca inventa usuários.
+- **Descoberta de Instagram/contatos**: best-effort — extrai o perfil do site da empresa (quando público e acessível). Se não confirmado, `instagramStatus = NOT_FOUND`. Nunca inventa usuários.
 - **Detecção de sistema de agendamento**: baseada em heurística real sobre o domínio do site (lista de provedores conhecidos). Quando não detectado, estado `UNKNOWN`/`NOT_IDENTIFIED` — nunca assumido.
-- **Groq/Google**: sem as chaves, a análise e a descoberta via Google falham (a campanha fica `FAILED`/`PARTIAL`); a descoberta via OpenStreetMap continua funcionando sem chave.
+- **Groq**: sem a chave, a análise falha (a campanha fica `FAILED`/`PARTIAL`); a descoberta via OpenStreetMap continua funcionando sem chave.
 - **Fonte tipográfica "Faktum Medium Fina"**: adicione `frontend/public/fonts/Faktum-MediumFina.woff2` (licenciada). Há fallback tipográfico enquanto o arquivo não estiver presente.
 
 ---

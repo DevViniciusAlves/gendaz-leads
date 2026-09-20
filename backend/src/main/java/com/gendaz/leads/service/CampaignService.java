@@ -106,7 +106,7 @@ public class CampaignService {
     }
 
     public CampaignResponse toResponse(Campaign c) {
-        return new CampaignResponse(c.getId(), c.getName(), c.getNiche(), c.getLocation(),
+        return new CampaignResponse(c.getId(), c.getName(), c.getNiche(), c.getCity(), c.getCountry(), c.getLocation(),
                 c.getRequestedQuantity(), c.getStatus(), c.getDiscoveredCount(), c.getAnalyzedCount(),
                 c.getMessageCount(), c.getApprovedCount(), c.getSentCount(), c.getRepliedCount(),
                 c.getInterestedCount(), c.getConvertedCount(), c.getBlockedCount(),

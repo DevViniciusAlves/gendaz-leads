@@ -135,11 +135,11 @@ export function LeadDetail() {
         <dl className="dl">
           <dt>Endereco</dt>
           <dd>{lead.address || '—'}</dd>
-          <dt>Cidade/Estado</dt>
-          <dd>
-            {[lead.city, lead.state, lead.country].filter(Boolean).join(', ') ||
-              '—'}
-          </dd>
+<dt>Cidade/Pais</dt>
+            <dd>
+              {[lead.city, lead.country].filter(Boolean).join(', ') ||
+                '—'}
+            </dd>
           <dt>Telefone</dt>
           <dd>{lead.phone || '—'}</dd>
           <dt>Website</dt>
