@@ -33,7 +33,7 @@ class OpenStreetMapProviderMappingTest {
                 {"type":"node","id":123,"tags":{
                   "name":"Studio Bella","contact:instagram":"@studio.bella",
                   "addr:city":"Curitiba"}}""");
-        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
+        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", "br", 0,0,0,0,false);
         var cache = new java.util.HashMap<String, java.util.Optional<String>>();
         LeadCandidate c = provider.mapElement(node, geo, cache);
         assertNotNull(c);
@@ -49,7 +49,7 @@ class OpenStreetMapProviderMappingTest {
                 {"type":"way","id":456,"tags":{
                   "name":"Lash Lab","instagram":"https://instagram.com/lashlab/",
                   "addr:city":"Curitiba"}}""");
-        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
+        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", "br", 0,0,0,0,false);
         var cache = new java.util.HashMap<String, java.util.Optional<String>>();
         LeadCandidate c = provider.mapElement(node, geo, cache);
         assertEquals("lashlab", c.getInstagramUsername());
@@ -60,7 +60,7 @@ class OpenStreetMapProviderMappingTest {
     void missingPhoneWebsiteAddressDoesNotBreak() throws Exception {
         var node = el("""
                 {"type":"node","id":7,"tags":{"name":"Studio X"}}""");
-        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
+        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", "br", 0,0,0,0,false);
         var cache = new java.util.HashMap<String, java.util.Optional<String>>();
         LeadCandidate c = provider.mapElement(node, geo, cache);
         assertNotNull(c);
@@ -78,7 +78,7 @@ class OpenStreetMapProviderMappingTest {
                 {"type":"node","id":9,"tags":{"name":"Salao Y",
                   "contact:phone":"+55 41 99999-0000","phone":"111",
                   "contact:website":"https://salao.com","website":"https://outro.com"}}""");
-        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, null, null, "BR", 0,0,0,0,false);
+        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, null, null, "BR", "br", 0,0,0,0,false);
         var cache = new java.util.HashMap<String, java.util.Optional<String>>();
         LeadCandidate c = provider.mapElement(node, geo, cache);
         assertEquals("+55 41 99999-0000", c.getPhone());

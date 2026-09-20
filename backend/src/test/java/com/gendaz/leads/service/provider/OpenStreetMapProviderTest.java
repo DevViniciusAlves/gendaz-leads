@@ -209,24 +209,41 @@ class OpenStreetMapProviderTest {
 
     private static final String GEO_JSON = """
             [{"lat":"-15.6","lon":"-56.1",
-              "address":{"city":"Cuiaba","state":"Mato Grosso","country":"Brasil"},
+              "address":{"city":"Cuiaba","state":"Mato Grosso","country":"Brasil","country_code":"br"},
               "boundingbox":["-16.0","-15.0","-56.5","-55.5"]}]""";
+
+    private static final String COUNTRY_BRASIL_JSON = """
+            [{"lat":"-10.0","lon":"-55.0",
+              "address":{"country":"Brasil","country_code":"br"},
+              "boundingbox":["-33.0","5.0","-73.0","-34.0"]}]""";
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private RestClient stubHttp(RestClient.Builder builder, String nominatimBody,
+                                Object overpassBehavior) {
+        return stubHttp(builder, nominatimBody, COUNTRY_BRASIL_JSON, overpassBehavior);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private RestClient stubHttp(RestClient.Builder builder, String cityNominatimBody, String countryNominatimBody,
                                 Object overpassBehavior) {
         RestClient restClient = mock(RestClient.class);
         when(builder.requestFactory(any(ClientHttpRequestFactory.class))).thenReturn(builder);
         when(builder.defaultHeader(anyString(), any(String[].class))).thenReturn(builder);
         when(builder.build()).thenReturn(restClient);
 
+        // We need to handle two GET calls: first for country resolution, then for city geocoding
         RestClient.RequestHeadersUriSpec getSpec = mock(RestClient.RequestHeadersUriSpec.class);
         RestClient.RequestHeadersSpec headersSpec = mock(RestClient.RequestHeadersSpec.class);
-        RestClient.ResponseSpec getResponse = mock(RestClient.ResponseSpec.class);
+        RestClient.ResponseSpec getResponse1 = mock(RestClient.ResponseSpec.class);
+        RestClient.ResponseSpec getResponse2 = mock(RestClient.ResponseSpec.class);
         when(restClient.get()).thenReturn(getSpec);
-        when(getSpec.uri(any(Function.class))).thenReturn(headersSpec);
-        when(headersSpec.retrieve()).thenReturn(getResponse);
-        when(getResponse.body(eq(String.class))).thenReturn(nominatimBody);
+        when(getSpec.uri(any(Function.class))).thenReturn(headersSpec)
+                .thenReturn(headersSpec);
+        when(headersSpec.retrieve())
+                .thenReturn(getResponse1)
+                .thenReturn(getResponse2);
+        when(getResponse1.body(eq(String.class))).thenReturn(countryNominatimBody);
+        when(getResponse2.body(eq(String.class))).thenReturn(cityNominatimBody);
 
         RestClient.RequestBodyUriSpec postSpec = mock(RestClient.RequestBodyUriSpec.class);
         RestClient.RequestBodySpec bodySpec = mock(RestClient.RequestBodySpec.class);
@@ -262,9 +279,10 @@ class OpenStreetMapProviderTest {
         stubHttp(builder, "[]", "{\"elements\":[]}");
 
         LeadDiscoveryRequest request = new LeadDiscoveryRequest(1L, "cilios", "Lugar Inexistente Xyz", "Brasil", 10);
-        LeadDiscoveryResult result = providerWith(builder).discover(request);
-        assertEquals(LeadDiscoveryResult.DiscoveryOutcome.EMPTY, result.outcome());
-        assertEquals("LOCATION_NOT_FOUND", result.errorCode());
+        ApiException ex = assertThrows(ApiException.class,
+                () -> providerWith(builder).discover(request));
+        assertEquals("LOCATION_NOT_FOUND", ex.getCode());
+        assertEquals(HttpStatus.NOT_FOUND, ex.getStatus());
     }
 
     @Test
@@ -364,7 +382,7 @@ class OpenStreetMapProviderTest {
     // ---------- Deadline test ----------
 
     @Test
-    void deadlineExceededReturnsEmptyWhenFast() {
+    void deadlineExceededReturnsDeadlineExceeded() {
         RestClient.Builder builder = mock(RestClient.Builder.class);
         RestClient restClient = stubHttp(builder, GEO_JSON, "{\"elements\":[]}");
         OpenStreetMapProvider p = providerWith(builder);
@@ -375,8 +393,9 @@ class OpenStreetMapProviderTest {
         // Sleep briefly to ensure deadline expires
         try { Thread.sleep(10); } catch (InterruptedException ignored) {}
         LeadDiscoveryResult result = p.discover(request);
-        // With fast mock, deadline expires but discovery completes -> EMPTY
-        assertEquals(LeadDiscoveryResult.DiscoveryOutcome.EMPTY, result.outcome());
+        // With fast mock, deadline expires during country resolution -> DEADLINE_EXCEEDED
+        assertEquals(LeadDiscoveryResult.DiscoveryOutcome.DEADLINE_EXCEEDED, result.outcome());
+        assertEquals("OSM_DISCOVERY_TIMEOUT", result.errorCode());
     }
 
     // ---------- Large city + few leads test ----------

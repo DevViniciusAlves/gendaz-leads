@@ -167,7 +167,10 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         try {
             geo = geocodeCityCountry(request.city(), request.country(), deadline, campaignId);
         } catch (ApiException e) {
-            return LeadDiscoveryResult.empty(e.getCode(), e.getMessage());
+            if ("OSM_DISCOVERY_TIMEOUT".equals(e.getCode())) {
+                return LeadDiscoveryResult.deadlineExceeded(List.of());
+            }
+            throw e;
         }
 
         List<Tile> tiles = buildCityTiles(geo);
@@ -414,6 +417,9 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     }
 
     private Geo geocodeCityCountry(String city, String country, DiscoveryDeadline deadline, Long campaignId) {
+        ResolvedCountry resolved = resolveRequestedCountryCode(country, deadline, campaignId);
+        String requestedCountryCode = resolved.countryCode();
+
         String query = city + ", " + country;
         Exception lastFailure = null;
 
@@ -449,15 +455,16 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 for (JsonNode hit : arr) {
                     JsonNode address = hit.path("address");
                     String hitCity = firstPresent(address, "city", "town", "village", "municipality");
-                    String hitCountry = address.path("country").asText(null);
-                    if (hitCountry == null || hitCountry.isBlank()) continue;
+                    String hitCountryCode = address.path("country_code").asText(null);
+                    if (hitCountryCode == null || hitCountryCode.isBlank()) continue;
 
-                    if (cityMatches(hitCity, city) && countryMatches(hitCountry, country)) {
+                    if (cityMatches(hitCity, city) && requestedCountryCode.equalsIgnoreCase(hitCountryCode)) {
                         double lat = hit.path("lat").asDouble(Double.NaN);
                         double lon = hit.path("lon").asDouble(Double.NaN);
                         if (Double.isNaN(lat) || Double.isNaN(lon)) continue;
 
                         String state = address.path("state").asText(null);
+                        String hitCountry = address.path("country").asText(null);
 
                         double south = 0, north = 0, west = 0, east = 0;
                         boolean bboxValid = false;
@@ -472,12 +479,16 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                             }
                         }
 
-                        log.info("[osm] geocode_success campaignId={} city={} country={} lat={} lon={} bboxValid={}",
-                                campaignId, hitCity, hitCountry, lat, lon, bboxValid);
-                        return new Geo(lat, lon, hitCity, state, hitCountry, south, north, west, east, bboxValid);
+                        log.info("[osm] geocode_success campaignId={} requestedCity={} requestedCountry={} resolvedCity={} resolvedCountry={} countryCode={} lat={} lon={} bboxValid={}",
+                                campaignId, city, country, hitCity, hitCountry, hitCountryCode, lat, lon, bboxValid);
+                        return new Geo(lat, lon, hitCity, state, hitCountry, hitCountryCode, south, north, west, east, bboxValid);
                     }
                 }
 
+                String hitCountry = firstPresent(arr.get(0).path("address"), "country");
+                String hitCountryCode = arr.get(0).path("address").path("country_code").asText(null);
+                log.warn("[osm] geocode_country_mismatch campaignId={} requestedCity={} requestedCountry={} requestedCountryCode={} hitCountry={} hitCountryCode={}",
+                        campaignId, city, country, requestedCountryCode, hitCountry, hitCountryCode);
                 throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_COUNTRY_MISMATCH",
                         "Cidade encontrada mas em país diferente: " + query);
 
@@ -502,15 +513,73 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return normalizeForCompare(hitCity).equals(normalizeForCompare(requestedCity));
     }
 
-    private boolean countryMatches(String hitCountry, String requestedCountry) {
-        if (hitCountry == null || requestedCountry == null) return false;
-        return normalizeForCompare(hitCountry).equals(normalizeForCompare(requestedCountry));
-    }
-
     private String normalizeForCompare(String s) {
         return java.text.Normalizer.normalize(s.trim().toLowerCase(), java.text.Normalizer.Form.NFD)
                 .replaceAll("\\p{M}", "")
                 .replaceAll("\\s+", " ");
+    }
+
+    private ResolvedCountry resolveRequestedCountryCode(String requestedCountry, DiscoveryDeadline deadline, Long campaignId) {
+        Exception lastFailure = null;
+        for (int attempt = 1; attempt <= nominatimMaxAttempts; attempt++) {
+            if (deadline.isExpired()) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante resolução de país");
+            }
+
+            long remainingMs = deadline.remainingMs();
+            if (remainingMs <= 0) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante resolução de país");
+            }
+
+            int effectiveTimeout = (int) Math.min(nominatimTimeoutMs, remainingMs);
+
+            try {
+                String response = client(effectiveTimeout).get()
+                        .uri(uriBuilder -> uriBuilder
+                                .scheme("https").host("nominatim.openstreetmap.org").path("/search")
+                                .queryParam("q", requestedCountry)
+                                .queryParam("format", "json")
+                                .queryParam("limit", "5")
+                                .queryParam("addressdetails", "1")
+                                .queryParam("featuretype", "country")
+                                .build())
+                        .retrieve()
+                        .body(String.class);
+
+                JsonNode arr = objectMapper.readTree(response);
+                if (!arr.isArray() || arr.isEmpty()) {
+                    throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND", "País não encontrado: " + requestedCountry);
+                }
+
+                for (JsonNode hit : arr) {
+                    JsonNode address = hit.path("address");
+                    String countryCode = address.path("country_code").asText(null);
+                    String countryName = address.path("country").asText(null);
+                    if (countryCode != null && !countryCode.isBlank()) {
+                        String normalizedCode = countryCode.trim().toLowerCase();
+                        String normalizedName = countryName != null ? countryName.trim() : requestedCountry;
+                        log.info("[osm] country_resolved campaignId={} requestedCountry={} resolvedCountryCode={} resolvedCountryName={}",
+                                campaignId, requestedCountry, normalizedCode, normalizedName);
+                        return new ResolvedCountry(normalizedCode, normalizedName);
+                    }
+                }
+
+                throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND", "País não encontrado: " + requestedCountry);
+
+            } catch (ApiException e) {
+                throw e;
+            } catch (RestClientException | java.io.IOException e) {
+                lastFailure = e;
+                boolean retryable = isRetryable(e);
+                FailureDetails fd = getFailureDetails(e);
+                log.warn("[osm] country_resolve_failed campaignId={} attempt={}/{} errorType={} rootCauseType={} rootCauseMessage={} retryable={}",
+                        campaignId, attempt, nominatimMaxAttempts, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
+                if (!retryable) throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR", "Falha não recuperável ao resolver país: " + fd.safeMessage());
+            }
+        }
+
+        throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR",
+                "Falha ao resolver país após retentativas: " + requestedCountry);
     }
 
     private List<Tile> buildCityTiles(Geo geo) {
@@ -744,7 +813,9 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return s.replace("\\", "").replace("\"", "");
     }
 
-    record Geo(double lat, double lon, String city, String state, String country, double south, double north, double west, double east, boolean bboxValid) {}
+    record Geo(double lat, double lon, String city, String state, String country, String countryCode, double south, double north, double west, double east, boolean bboxValid) {}
+
+    record ResolvedCountry(String countryCode, String countryName) {}
 
     record Tile(double south, double west, double north, double east, double distanceFromCenter) {
         String bbox() {

@@ -32,7 +32,7 @@ class OpenStreetMapProviderInstagramEnrichmentTest {
                   "name":"Studio Bella",
                   "website":"https://studiobella.com",
                   "addr:city":"Curitiba"}}""");
-        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
+        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", "br", 0,0,0,0,false);
         
         when(ssrfGuard.isSafe("https://studiobella.com")).thenReturn(true);
         when(instagramDetector.detectFromWebsite("https://studiobella.com")).thenReturn("studio.bella");
@@ -54,7 +54,7 @@ class OpenStreetMapProviderInstagramEnrichmentTest {
                   "name":"Studio Bella",
                   "website":"https://studiobella.com",
                   "addr:city":"Curitiba"}}""");
-        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
+        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", "br", 0,0,0,0,false);
         
         when(ssrfGuard.isSafe("https://studiobella.com")).thenReturn(true);
         when(instagramDetector.detectFromWebsite("https://studiobella.com")).thenReturn("studio.bella");
@@ -75,7 +75,7 @@ class OpenStreetMapProviderInstagramEnrichmentTest {
                   "name":"Studio Bella",
                   "website":"https://studiobella.com",
                   "addr:city":"Curitiba"}}""");
-        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", 0,0,0,0,false);
+        var geo = new OpenStreetMapProvider.Geo(-25.4, -49.2, "Curitiba", "Parana", "BR", "br", 0,0,0,0,false);
         
         when(ssrfGuard.isSafe("https://studiobella.com")).thenReturn(true);
         when(instagramDetector.detectFromWebsite("https://studiobella.com")).thenReturn(null);
