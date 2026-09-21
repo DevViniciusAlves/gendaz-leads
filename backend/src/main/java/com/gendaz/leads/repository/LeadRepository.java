@@ -45,7 +45,7 @@ public interface LeadRepository extends JpaRepository<Lead, Long>, JpaSpecificat
     @Query("SELECT COUNT(l) FROM Lead l JOIN LeadAnalysis la ON la.leadId = l.id WHERE l.currentCampaignId = :campaignId")
     long countByCurrentCampaignIdWithAnalysis(@Param("campaignId") Long campaignId);
 
-    @Query("SELECT COUNT(l) FROM Lead l JOIN CampaignLead cl ON cl.leadId = l.id WHERE cl.campaignId = :campaignId AND l.status IN ('ANALYZED', 'MESSAGE_READY', 'APPROVED', 'SENT', 'REPLIED', 'INTERESTED', 'SCHEDULED', 'CONVERTED')")
+    @Query("SELECT COUNT(l) FROM Lead l JOIN LeadAnalysis la ON la.leadId = l.id JOIN CampaignLead cl ON cl.leadId = l.id WHERE cl.campaignId = :campaignId")
     long countByCampaignIdWithAnalysis(@Param("campaignId") Long campaignId);
 
     @Query("SELECT COUNT(l) FROM Lead l JOIN CampaignLead cl ON cl.leadId = l.id WHERE cl.campaignId = :campaignId AND l.status IN :statuses")

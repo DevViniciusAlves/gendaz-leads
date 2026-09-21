@@ -22,6 +22,8 @@ Este é um projeto de **produção**: todas as integrações são reais e nenhum
 
 ---
 
+---
+
 ## Estrutura do projeto
 
 ```
@@ -35,12 +37,12 @@ gendaz-leads/
 │   │   ├── repository/     # Spring Data JPA
 │   │   ├── security/       # JWT, filtro, UserDetails, rate limit, CORS
 │   │   ├── service/        # orquestração de domínio
-│   │   │   ├── provider/   # LeadDiscoveryProvider: GooglePlacesProvider, OpenStreetMapProvider
+│   │   │   ├── provider/   # LeadDiscoveryProvider: OpenStreetMapProvider
 │   │   │   └── messaging/  # MessagingProvider: LogMessagingProvider + SendQueueProcessor
 │   │   ├── whatsapp/       # WhatsAppService + BaileysWhatsAppProvider (HTTP interno ao whatsapp-service)
 │   │   ├── util/           # Normalizer (normalização/deduplicação), SsrfGuard
 │   │   └── exception/      # ApiException + GlobalExceptionHandler
-│   └── src/main/resources/db/migration/V1__init.sql, V2__whatsapp_auth.sql  # schema Flyway
+│   └── src/main/resources/db/migration/V1__init.sql, V2__whatsapp_auth.sql, V3..V6  # schema Flyway
 ├── whatsapp-service/       # Node 20+ isolado (Baileys): sessao unica, QR, envio unitario
 └── frontend/               # React + Vite
     └── src/                # api.js, pages (Dashboard, Campanhas, Leads, WhatsApp, Login), components
@@ -70,7 +72,6 @@ export DATABASE_USERNAME=postgres
 export DATABASE_PASSWORD=postgres
 export JWT_SECRET="um-segredo-longo-aleatorio-de-pelo-menos-32-caracteres"
 export GROQ_API_KEY="seu-groq-key"
-export GOOGLE_MAPS_API_KEY="sua-google-key"
 ./mvnw spring-boot:run        # ou: mvn spring-boot:run
 ```
 Health check: `GET /actuator/health` → `{"status":"UP"}`.
@@ -109,7 +110,10 @@ Veja `backend/.env.example`. Resumo (sem valores reais):
 - `MIN_LEADS_PER_REQUEST` (3), `MAX_LEADS_PER_REQUEST` (30)
 - **Descoberta OSM** (sem Google Places):
   - `OSM_ENABLED`, `OSM_TIMEOUT_MS`, `OSM_NOMINATIM_TIMEOUT_MS`, `OSM_NOMINATIM_MAX_ATTEMPTS`
-  - `OSM_DISCOVERY_DEADLINE_MS`, `OSM_TILE_TARGET_KM`
+  - `OSM_NOMINATIM_CACHE_SECONDS`, `OSM_NOMINATIM_MIN_INTERVAL_MS`
+  - `OSM_DISCOVERY_BASE_BUDGET_MS`, `OSM_DISCOVERY_PER_LEAD_BUDGET_MS`, `OSM_DISCOVERY_MAX_BUDGET_MS`
+  - `OSM_QUERY_MIN_RAW_LIMIT`, `OSM_QUERY_RAW_PER_LEAD`
+  - `OSM_ADAPTIVE_MAX_DEPTH`, `OSM_ADAPTIVE_MIN_EDGE_KM`
   - `OSM_OVERPASS_ENDPOINTS`, `OSM_OVERPASS_MAX_CONCURRENCY`, `OSM_CIRCUIT_OPEN_SECONDS`
 - **Enriquecimento de contatos**:
   - `LEAD_ENRICHMENT_CONNECT_TIMEOUT_MS`, `LEAD_ENRICHMENT_READ_TIMEOUT_MS`, `LEAD_ENRICHMENT_MAX_BYTES`
@@ -167,15 +171,15 @@ npm start              # porta 3001; GET /health -> {"status":"UP"}
 
 1. Usuário informa **nicho + cidade + país + quantidade** (3–30) e cria uma campanha.
 2. Backend dispara processamento **assíncrono** (`@Async`):
-   - **Descoberta**: Nominatim geocodifica cidade+país → tiles center-out cobrindo toda a cidade → Overpass consultado sequencialmente (concurrency=1) com failover por endpoint → structured queries primeiro, name fallback só se faltar → deadline global (~60s) garante timeout.
-   - **Normalização + Enriquecimento**: `LeadCandidate` com nome, categoria, endereço, cidade, país, telefone, **email**, website, Instagram, sourceId. Enriquecimento de website (tel:, mailto:, Instagram) com SSRF guard, cache, deadline-aware.
-   - **Deduplicação global**: sourceId → Instagram → website → telefone → email → nome+cidade+país; dedupe em memória antes de enriquecimento; constraints únicos no banco.
-   - **Lead útil**: só conta para a quantidade se tiver telefone **OU** Instagram **OU** email **OU** website. Sem contato → continua buscando.
+   - **Descoberta**: Nominatim geocodifica cidade+país → `country_code` ISO + bbox da cidade inteira → **root bbox first** (uma query ampla); se **saturar** (`elements >= rawLimit`) ou **timeout/504** e a região puder ser dividida → **adaptive split** recursivo (máx depth configurável, aresta mínima em km); failover por endpoint; sticky healthy endpoint; circuit breaker por host; **NÃO** grid fixo de tiles; deadline adaptativo (`base + perLead * qty`, cap).
+   - **Normalização + Enriquecimento**: `LeadCandidate` com nome, categoria, endereço, cidade, país, telefone, **email**, website, Instagram, sourceId. Enriquecimento de website (tel:, mailto:, Instagram) **após** dedupe global; SSRF guard (CIDR corretos), redirect validation (máx 3, revalida SSRF a cada hop), cache por execução.
+   - **Deduplicação global**: sourceId → Instagram → website → telefone → nome+cidade+país; **email NÃO é chave global** (franquias podem compartilhar). Dedupe em memória (sourceId) antes de enriquecimento; constraints únicos no banco.
+   - **Lead útil**: só conta para a quantidade se tiver telefone **OU** Instagram **OU** email **OU** website. Sem contato → continua buscando (não consome vaga).
    - **Criação**: novos leads entram como `NEW`.
    - **Análise (Groq GPT-OSS)**: fora de transação longa → tipo, serviços, presença digital, sistema de agendamento, dores, oportunidade, score 0–100.
    - **Mensagem (Groq GPT-OSS)**: curta, personalizada, nome real.
    - Lead passa a `MESSAGE_READY`.
-3. Frontend acompanha progresso real: `Localizando cidade` → `Buscando leads` → `Complementando resultados` → `Enriquecendo contatos` → `Analisando leads` → `Gerando mensagens`.
+3. Frontend acompanha progresso real: `Localizando cidade` → `Buscando leads (X/Y)` → `Complementando resultados` → `Analisando leads` → `Gerando mensagens`.
 4. Usuário **revisa, edita, copia, abre Instagram, aprova** ou marca **Não prospectar**.
 5. Ao aprovar, o lead entra na **fila de envio** (`message_sends`). `SendQueueProcessor` respeita intervalo/concorrência e chama `MessagingProvider`.
 6. Status: `SENT → REPLIED → INTERESTED → CONVERTED`, além de `NOT_INTERESTED` e `DO_NOT_CONTACT`. Tudo auditado em `lead_events`.
@@ -216,7 +220,7 @@ Todos os endpoints (exceto auth) exigem `Authorization: Bearer <token>`.
 
 - **users** — contas de acesso (BCrypt).
 - **campaigns** — campanha + contadores derivados (discovered/analyzed/message/approved/sent/replied/interested/converted/blocked) + progresso + **city, country** (location mantido para compat).
-- **leads** — lead normalizado; constraints únicos para deduplicação (instagram, website, phone, sourceId, email, nome+cidade+país); **email, normalized_email**; `do_not_contact`.
+- **leads** — lead normalizado; constraints únicos para deduplicação (sourceId, instagram, website, phone, nome+cidade+país); **email NÃO tem constraint único** (franquias podem compartilhar); **country sem default BR**; `do_not_contact`.
 - **lead_sources** — proveniência (OSM) de cada lead.
 - **lead_analysis** — resultado da IA (score, sistema detectado, dores, oportunidade, **model**).
 - **lead_messages** — mensagem gerada/editada/aprovada.
@@ -237,7 +241,7 @@ Todos os endpoints (exceto auth) exigem `Authorization: Bearer <token>`.
 - **SSRF guard** nas buscas de Instagram/contatos a partir do site da empresa (bloqueia localhost/ IPs privados/metadata).
 - Timeouts e retry (com backoff) em todas as APIs externas (Nominatim, Overpass, website enrichment); falha de um lead não derruba a campanha.
 - Logs sem secrets; `actuator/health` sem detalhes internos.
-- Deduplicação reforçada por constraints únicos no banco (seguro sob concorrência).
+- Deduplicação reforçada por constraints únicos no banco (seguro sob concorrência); ordem: sourceId → Instagram → website → telefone → nome+cidade+país; email **não** é chave global.
 
 ---
 

@@ -66,6 +66,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.circuit-open-seconds:30}")
     private long circuitOpenSeconds;
 
+    @Value("${app.discovery.osm.adaptive-max-depth:6}")
+    private int adaptiveMaxDepth;
+
+    @Value("${app.discovery.osm.adaptive-min-edge-km:2.0}")
+    private double adaptiveMinEdgeKm;
+
     private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
     private final Normalizer normalizer;
@@ -174,12 +180,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return enabled;
     }
 
-    @Override
-    @Deprecated
-    public LeadDiscoveryResult discover(LeadDiscoveryRequest request) {
-        throw new UnsupportedOperationException("Use CampaignLeadDiscoveryService instead");
-    }
-
     public GeoScope resolveScope(
             LeadDiscoveryRequest request,
             DiscoveryBudget budget
@@ -193,8 +193,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             log.info("[osm] geocode_cache_hit campaignId={} city={} country={}", request.campaignId(), request.city(), request.country());
             return cached.value();
         }
-
-        awaitNominatimSlot(budget);
 
         ResolvedCountry resolved = resolveRequestedCountryCode(request.country(), budget, request.campaignId());
         String requestedCountryCode = resolved.countryCode();
@@ -211,6 +209,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             if (remainingMs <= 0) {
                 throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante geocodificação");
             }
+
+            awaitNominatimSlot(budget);
 
             int effectiveTimeout = (int) Math.min(nominatimTimeoutMs, remainingMs);
 
@@ -303,17 +303,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             DiscoveryBudget budget,
             Long campaignId
     ) {
-        String query;
-        if (phase == AreaQueryPhase.STRUCTURED) {
-            query = buildStructuredQuery(niche, region, rawLimit, timeoutMs / 1000);
-        } else {
-            query = buildNameFallbackQuery(niche, region, rawLimit, timeoutMs / 1000);
-        }
-
-        if (query == null) {
-            return AreaQueryResult.success(List.of(), false, null, 0L);
-        }
-
         List<String> endpoints = orderedEndpoints(preferredEndpointHost);
         long startNs = System.nanoTime();
         boolean hadTimeoutOr504 = false;
@@ -346,6 +335,20 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 if (effectiveTimeoutMs <= 0) {
                     circuitBreaker.recordFailure(host);
                     return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente para timeout efetivo", (System.nanoTime() - startNs) / 1_000_000L);
+                }
+
+                int overpassTimeoutSeconds = Math.max(1, (int) Math.ceil(effectiveTimeoutMs / 1000.0));
+
+                String query;
+                if (phase == AreaQueryPhase.STRUCTURED) {
+                    query = buildStructuredQuery(niche, region, rawLimit, overpassTimeoutSeconds);
+                } else {
+                    query = buildNameFallbackQuery(niche, region, rawLimit, overpassTimeoutSeconds);
+                }
+
+                if (query == null) {
+                    circuitBreaker.recordSuccess(host);
+                    return AreaQueryResult.success(List.of(), false, host, (System.nanoTime() - startNs) / 1_000_000L);
                 }
 
                 log.info("[osm] area_query_start campaignId={} depth={} phase={} bbox={} rawLimit={} preferredEndpointHost={} remainingBudgetMs={}",
@@ -423,7 +426,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
         long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
 
-        if (hadTimeoutOr504 && region.canSplit(6, 2.0)) {
+        if (hadTimeoutOr504 && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
             return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Timeout/504 em todos os endpoints, subdividindo região", elapsedMs);
         }
 
@@ -468,8 +471,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             return cached.value();
         }
 
-        awaitNominatimSlot(budget);
-
         Exception lastFailure = null;
         for (int attempt = 1; attempt <= nominatimMaxAttempts; attempt++) {
             if (budget.expired()) {
@@ -480,6 +481,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             if (remainingMs <= 0) {
                 throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante resolução de país");
             }
+
+            awaitNominatimSlot(budget);
 
             int effectiveTimeout = (int) Math.min(nominatimTimeoutMs, remainingMs);
 
@@ -598,6 +601,36 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         candidate.setCountry(asTextOrNull(tags, "addr:country") != null ? asTextOrNull(tags, "addr:country") : scope.country());
         candidate.setAddress(buildAddress(tags, scope));
         candidate.setInstagramStatus("NOT_FOUND");
+
+        String instagramRaw =
+                firstPresent(
+                        tags,
+                        "contact:instagram",
+                        "instagram"
+                );
+
+        if (instagramRaw != null && !instagramRaw.isBlank()) {
+
+            String normalizedInstagram =
+                    normalizer.normalizeInstagram(
+                            instagramRaw
+                    );
+
+            if (normalizedInstagram != null
+                    && !normalizedInstagram.isBlank()) {
+
+                candidate.setInstagramUsername(
+                        normalizedInstagram
+                );
+
+                candidate.setInstagramUrl(
+                        "https://instagram.com/"
+                                + normalizedInstagram
+                );
+
+                candidate.setInstagramStatus("FOUND");
+            }
+        }
 
         return candidate;
     }

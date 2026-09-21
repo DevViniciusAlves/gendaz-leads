@@ -1,14 +1,11 @@
 package com.gendaz.leads.service;
 
-import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.entity.*;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.repository.*;
-import com.gendaz.leads.util.Normalizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -24,26 +21,18 @@ public class AsyncCampaignProcessor {
     private final LeadRepository leadRepository;
     private final LeadEventRepository leadEventRepository;
     private final LeadAnalysisService leadAnalysisService;
-    private final DeduplicationService deduplicationService;
-    private final Normalizer normalizer;
     private final CampaignLeadDiscoveryService campaignLeadDiscoveryService;
-    private final CampaignLeadPersistenceService persistenceService;
     private final CampaignLeadRepository campaignLeadRepository;
 
     public AsyncCampaignProcessor(CampaignRepository campaignRepository, LeadRepository leadRepository,
                                   LeadEventRepository leadEventRepository, LeadAnalysisService leadAnalysisService,
-                                  DeduplicationService deduplicationService, Normalizer normalizer,
                                   CampaignLeadDiscoveryService campaignLeadDiscoveryService,
-                                  CampaignLeadPersistenceService persistenceService,
                                   CampaignLeadRepository campaignLeadRepository) {
         this.campaignRepository = campaignRepository;
         this.leadRepository = leadRepository;
         this.leadEventRepository = leadEventRepository;
         this.leadAnalysisService = leadAnalysisService;
-        this.deduplicationService = deduplicationService;
-        this.normalizer = normalizer;
         this.campaignLeadDiscoveryService = campaignLeadDiscoveryService;
-        this.persistenceService = persistenceService;
         this.campaignLeadRepository = campaignLeadRepository;
     }
 
@@ -85,15 +74,22 @@ public class AsyncCampaignProcessor {
             recomputeAndFinalize(campaign);
         } catch (ApiException e) {
             log.error("Discovery falhou na campanha parcial {}: {} ({})", campaignId, e.getMessage(), e.getCode());
-            campaign.setStatus("FAILED");
-            campaign.setErrorMessage(truncate(e.getMessage()));
-            campaignRepository.save(campaign);
+            applyDiscoveryFailureStatus(campaign, e.getMessage());
         } catch (Exception e) {
             log.error("Erro no processamento parcial da campanha {}: {}", campaignId, e.getMessage(), e);
-            campaign.setStatus("FAILED");
-            campaign.setErrorMessage(truncate(e.getMessage()));
-            campaignRepository.save(campaign);
+            applyDiscoveryFailureStatus(campaign, e.getMessage());
         }
+    }
+
+    private void applyDiscoveryFailureStatus(Campaign campaign, String errorMessage) {
+        long discovered = campaignLeadRepository.countByCampaignId(campaign.getId());
+        if (discovered > 0) {
+            campaign.setStatus("PARTIAL");
+        } else {
+            campaign.setStatus("FAILED");
+        }
+        campaign.setErrorMessage(truncate(errorMessage));
+        campaignRepository.save(campaign);
     }
 
     private void recomputeAndFinalize(Campaign campaign) {
@@ -161,17 +157,6 @@ public class AsyncCampaignProcessor {
         );
     }
 
-    private String batchKeyFromLead(Lead lead) {
-        if (lead.getNormalizedSourceId() != null) return "src:" + lead.getNormalizedSourceId();
-        if (lead.getNormalizedInstagram() != null) return "ig:" + lead.getNormalizedInstagram();
-        if (lead.getNormalizedWebsite() != null) return "web:" + lead.getNormalizedWebsite();
-        if (lead.getNormalizedPhone() != null) return "ph:" + lead.getNormalizedPhone();
-        if (lead.getNormalizedEmail() != null) return "em:" + lead.getNormalizedEmail();
-        if (lead.getNormalizedName() != null && lead.getCity() != null && lead.getCountry() != null)
-            return "nm:" + lead.getNormalizedName() + "|" + lead.getCity() + "|" + lead.getCountry();
-        return null;
-    }
-
     public void retryFailedLeads(Long campaignId) {
         Campaign campaign = campaignRepository.findById(campaignId).orElse(null);
         if (campaign == null) return;
@@ -191,7 +176,7 @@ public class AsyncCampaignProcessor {
             }
         }
         recompute(campaign);
-        campaignRepository.save(campaign);
+        finalizeCampaign(campaign);
         log.info("Reprocessamento de campanha {} concluído: {} leads recuperados", campaignId, done);
     }
 
@@ -390,22 +375,6 @@ public class AsyncCampaignProcessor {
         long messages = leadRepository.countByCampaignIdAndStatusIn(campaign.getId(),
                 List.of("MESSAGE_READY", "APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED"));
         campaign.setMessageCount((int) messages);
-    }
-
-    private String batchKey(LeadCandidate c) {
-        String s = normalizer.normalizeSourceId(c.getSource(), c.getSourceId());
-        if (s != null) return "src:" + s;
-        String ig = normalizer.normalizeInstagram(c.getInstagramUsername() != null ? c.getInstagramUsername() : c.getInstagramUrl());
-        if (ig != null) return "ig:" + ig;
-        String w = normalizer.normalizeWebsite(c.getWebsite());
-        if (w != null) return "web:" + w;
-        String p = normalizer.normalizePhone(c.getPhone());
-        if (p != null) return "ph:" + p;
-        String e = normalizer.normalizeEmail(c.getEmail());
-        if (e != null) return "em:" + e;
-        String n = normalizer.normalizeName(c.getBusinessName());
-        if (n != null && c.getCity() != null && c.getCountry() != null) return "nm:" + n + "|" + c.getCity() + "|" + c.getCountry();
-        return null;
     }
 
     private String truncate(String s) {

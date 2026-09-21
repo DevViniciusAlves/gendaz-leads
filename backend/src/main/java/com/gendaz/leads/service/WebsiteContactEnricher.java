@@ -4,9 +4,14 @@ import com.gendaz.leads.util.Normalizer;
 import com.gendaz.leads.util.SsrfGuard;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.web.client.RestClient;
 
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpClient.Redirect;
+import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -20,15 +25,14 @@ public class WebsiteContactEnricher {
     private static final Pattern IG_LINK = Pattern.compile(
             "(?:https?://)?(?:www\\.)?instagram\\.com/([A-Za-z0-9_.]+)", Pattern.CASE_INSENSITIVE);
 
-    private final RestClient restClient;
     private final Normalizer normalizer;
     private final SsrfGuard ssrfGuard;
     private final int connectTimeoutMs;
     private final int readTimeoutMs;
     private final int maxBytes;
+    private final HttpClient httpClient;
 
     public WebsiteContactEnricher(
-            RestClient.Builder builder,
             Normalizer normalizer,
             SsrfGuard ssrfGuard,
             @Value("${app.enrichment.connect-timeout-ms:2000}") int connectTimeoutMs,
@@ -41,12 +45,9 @@ public class WebsiteContactEnricher {
         this.readTimeoutMs = readTimeoutMs;
         this.maxBytes = maxBytes;
 
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(connectTimeoutMs);
-        factory.setReadTimeout(readTimeoutMs);
-        this.restClient = builder
-                .requestFactory(factory)
-                .defaultHeader("User-Agent", "GendazLeads/1.0 (+https://gendaz.com)")
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(connectTimeoutMs))
+                .followRedirects(Redirect.NEVER)
                 .build();
     }
 
@@ -58,20 +59,61 @@ public class WebsiteContactEnricher {
         }
         String target = website.trim();
         if (!target.startsWith("http")) target = "https://" + target;
+
         try {
-            String body = restClient.get()
-                    .uri(target)
-                    .retrieve()
-                    .body(String.class);
+            String body = fetchWithRedirectValidation(target, 0);
             if (body == null || body.length() > maxBytes) return new WebsiteContactData(null, null, null);
-            
+
             String phone = extractPhone(body);
             String email = extractEmail(body);
             String instagram = extractInstagram(body);
-            
+
             return new WebsiteContactData(phone, email, instagram);
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | IOException | InterruptedException e) {
             return new WebsiteContactData(null, null, null);
+        }
+    }
+
+    private String fetchWithRedirectValidation(String url, int redirectCount) throws IOException, InterruptedException {
+        if (redirectCount > 3) {
+            return null;
+        }
+
+        if (!ssrfGuard.isSafe(url)) {
+            return null;
+        }
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofMillis(readTimeoutMs))
+                .header("User-Agent", "GendazLeads/1.0 (+https://gendaz.com)")
+                .GET()
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        int status = response.statusCode();
+        if (status >= 300 && status < 400) {
+            String location = response.headers().firstValue("Location").orElse(null);
+            if (location != null) {
+                String nextUrl = resolveUrl(url, location);
+                return fetchWithRedirectValidation(nextUrl, redirectCount + 1);
+            }
+        }
+
+        return response.body();
+    }
+
+    private String resolveUrl(String base, String location) {
+        try {
+            URI baseUri = URI.create(base);
+            URI locationUri = URI.create(location);
+            if (locationUri.isAbsolute()) {
+                return locationUri.toString();
+            }
+            return baseUri.resolve(locationUri).toString();
+        } catch (Exception e) {
+            return location;
         }
     }
 

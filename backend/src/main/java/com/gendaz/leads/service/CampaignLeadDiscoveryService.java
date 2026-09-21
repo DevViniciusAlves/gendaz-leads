@@ -139,6 +139,12 @@ public class CampaignLeadDiscoveryService {
                         budget
                 );
 
+        int initialCampaignLeadCount =
+                (int) campaignLeadRepository
+                        .countByCampaignId(
+                                campaign.getId()
+                        );
+
         PriorityQueue<SearchRegion> queue =
                 new PriorityQueue<>(
                         Comparator
@@ -227,8 +233,8 @@ public class CampaignLeadDiscoveryService {
 
                     updateProgress(
                             campaign,
-                            accepted,
-                            targetToAdd
+                            initialCampaignLeadCount,
+                            accepted
                     );
 
                     if (accepted >= targetToAdd) {
@@ -350,8 +356,8 @@ public class CampaignLeadDiscoveryService {
 
                     updateProgress(
                             campaign,
-                            accepted,
-                            targetToAdd
+                            initialCampaignLeadCount,
+                            accepted
                     );
 
                     if (accepted >= targetToAdd) {
@@ -755,26 +761,25 @@ public class CampaignLeadDiscoveryService {
             Campaign campaign,
             LeadCandidate candidate
     ) {
-        leadEventRepository.save(
-                LeadEvent.builder()
-                        .leadId(null)
-                        .campaignId(campaign.getId())
-                        .eventType("lead_skipped")
-                        .eventMetadata("reason=no_contact source=" + candidate.getSource() + " sourceId=" + candidate.getSourceId())
-                        .build()
+        log.info(
+                "[osm] candidate_skipped campaignId={} reason=no_contact source={} sourceId={} businessName={}",
+                campaign.getId(),
+                candidate.getSource(),
+                candidate.getSourceId(),
+                candidate.getBusinessName()
         );
     }
 
     private void updateProgress(
             Campaign campaign,
-            int accepted,
-            int targetToAdd
+            int initialCampaignLeadCount,
+            int acceptedThisRun
     ) {
-        int existing = (int) campaignLeadRepository.countByCampaignId(campaign.getId());
-        int total = existing + accepted;
-        campaign.setProgressCurrent(total);
-        campaign.setProgressTotal(targetToAdd + existing);
-        campaign.setProgressStage("Buscando leads (" + total + "/" + (targetToAdd + existing) + ")");
+        int current = initialCampaignLeadCount + acceptedThisRun;
+        int total = campaign.getRequestedQuantity();
+        campaign.setProgressCurrent(Math.min(current, total));
+        campaign.setProgressTotal(total);
+        campaign.setProgressStage("Buscando leads (" + Math.min(current, total) + "/" + total + ")");
         campaignRepository.save(campaign);
     }
 }

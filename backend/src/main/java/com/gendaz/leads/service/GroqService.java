@@ -24,41 +24,34 @@ public class GroqService {
     private static final Logger log = LoggerFactory.getLogger(GroqService.class);
     private static final String ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 
-    @Value("${app.groq.api-key:}")
-    private String apiKey;
-
-    @Value("${app.groq.model:openai/gpt-oss-120b}")
-    private String model;
-
-    @Value("${app.groq.enabled:true}")
-    private boolean enabled;
-
-    @Value("${app.groq.timeout-ms:30000}")
-    private int timeoutMs;
-
-    @Value("${app.groq.max-retries:2}")
-    private int maxRetries;
-
-    private RestClient restClient;
+    private final String apiKey;
+    private final String model;
+    private final boolean enabled;
+    private final int timeoutMs;
+    private final int maxRetries;
+    private final RestClient restClient;
     private final ObjectMapper objectMapper;
 
-    public GroqService(RestClient.Builder builder, ObjectMapper objectMapper) {
-        this.builder = builder;
+    public GroqService(
+            RestClient.Builder builder,
+            ObjectMapper objectMapper,
+            @Value("${app.groq.api-key:}") String apiKey,
+            @Value("${app.groq.model:openai/gpt-oss-120b}") String model,
+            @Value("${app.groq.enabled:true}") boolean enabled,
+            @Value("${app.groq.timeout-ms:30000}") int timeoutMs,
+            @Value("${app.groq.max-retries:2}") int maxRetries
+    ) {
         this.objectMapper = objectMapper;
-        this.restClient = buildClient();
-    }
+        this.apiKey = apiKey;
+        this.model = model;
+        this.enabled = enabled;
+        this.timeoutMs = timeoutMs;
+        this.maxRetries = maxRetries;
 
-    private final RestClient.Builder builder;
-
-    private RestClient buildClient() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(10000);
         factory.setReadTimeout(timeoutMs);
-        return builder.requestFactory(factory).build();
-    }
-
-    public void refreshClient() {
-        this.restClient = buildClient();
+        this.restClient = builder.requestFactory(factory).build();
     }
 
     public String getModel() {
@@ -159,10 +152,16 @@ public class GroqService {
                 }
                 throw new ApiException(HttpStatus.BAD_GATEWAY, "GROQ_EMPTY", "Groq retornou resposta vazia.");
             } catch (ApiException e) {
+                if (e.getStatus() == HttpStatus.BAD_REQUEST
+                        || e.getStatus() == HttpStatus.UNAUTHORIZED
+                        || e.getStatus() == HttpStatus.FORBIDDEN
+                        || e.getStatus() == HttpStatus.NOT_FOUND) {
+                    throw e;
+                }
                 throw e;
             } catch (RuntimeException | java.io.IOException e) {
                 attempt++;
-                if (attempt > maxRetries) {
+                if (attempt > maxRetries || !isRetryableGroq(e)) {
                     log.warn("Groq falhou apos {} tentativas ({}): {}", attempt, purpose, e.getMessage());
                     throw new ApiException(HttpStatus.BAD_GATEWAY, "GROQ_ERROR",
                             "Falha ao comunicar com Groq para " + purpose + ".");
@@ -175,6 +174,28 @@ public class GroqService {
                 }
             }
         }
+    }
+
+    private boolean isRetryableGroq(Throwable e) {
+        if (e instanceof org.springframework.web.client.HttpStatusCodeException http) {
+            int code = http.getStatusCode().value();
+            return code == 429
+                    || code == 502
+                    || code == 503
+                    || code == 504;
+        }
+
+        Throwable root = rootCause(e);
+        return root instanceof java.net.SocketTimeoutException
+                || root instanceof java.net.ConnectException;
+    }
+
+    private Throwable rootCause(Throwable t) {
+        Throwable root = t;
+        while (root.getCause() != null) {
+            root = root.getCause();
+        }
+        return root;
     }
 
     private AnalysisResult parseAnalysis(String content) {
