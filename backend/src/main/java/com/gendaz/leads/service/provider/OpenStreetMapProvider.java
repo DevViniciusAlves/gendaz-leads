@@ -72,6 +72,9 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.adaptive-min-edge-km:2.0}")
     private double adaptiveMinEdgeKm;
 
+    @Value("${app.discovery.osm.initial-split-max-edge-km:60.0}")
+    private double initialSplitMaxEdgeKm;
+
     private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
     private final Normalizer normalizer;
@@ -109,8 +112,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         this.overpassSemaphore = new Semaphore(Math.max(1, maxConcurrency), true);
         this.circuitBreaker = new OverpassCircuitBreaker(circuitOpenSeconds);
         List<String> endpoints = buildEndpointList();
-        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={}",
-                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, endpoints.size(), maxConcurrency, circuitOpenSeconds);
+        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} initialSplitMaxEdgeKm={}",
+                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, initialSplitMaxEdgeKm);
     }
 
     private RestClient client(int effectiveTimeoutMs) {
@@ -317,6 +320,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
             long waitBudgetMs = budget.remainingMs();
             if (waitBudgetMs <= 0) {
+                circuitBreaker.releaseProbe(host);
                 return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente antes de adquirir semaphore", elapsedMs(startNs));
             }
 
@@ -324,11 +328,13 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             try {
                 acquired = overpassSemaphore.tryAcquire(waitBudgetMs, TimeUnit.MILLISECONDS);
                 if (!acquired) {
+                    circuitBreaker.releaseProbe(host);
                     return AreaQueryResult.infraUnavailable("OSM_SEMAPHORE_TIMEOUT", "Budget esgotado aguardando acesso ao Overpass", elapsedMs(startNs));
                 }
 
                 int effectiveTimeoutMs = budget.clampTimeout(timeoutMs);
                 if (effectiveTimeoutMs <= 0) {
+                    circuitBreaker.releaseProbe(host);
                     return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente após adquirir semaphore", elapsedMs(startNs));
                 }
 
@@ -392,26 +398,27 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 log.warn("[osm] overpass_failed campaignId={} depth={} phase={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} retryable={} elapsedMs={}",
                         campaignId, region.depth(), phase, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable, elapsedMs);
 
-                if (retryable) {
-                    if (e instanceof HttpStatusCodeException http) {
-                        int v = http.getStatusCode().value();
-                        if (v == 504 || e instanceof SocketTimeoutException || e instanceof ResourceAccessException) {
-                            hadTimeoutOr504 = true;
-                        }
-                    } else {
-                        Throwable root = e;
-                        while (root != null) {
-                            if (root instanceof SocketTimeoutException) {
-                                hadTimeoutOr504 = true;
-                                break;
-                            }
-                            root = root.getCause();
-                        }
-                    }
-                    circuitBreaker.recordFailure(host);
-                } else {
-                    return AreaQueryResult.queryError("OSM_OVERPASS_QUERY_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage(), elapsedMs);
+                boolean queryTooHeavy = isQueryTooHeavyFailure(e)
+                        && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm);
+
+                if (queryTooHeavy) {
+                    hadTimeoutOr504 = true;
+
+                    circuitBreaker.releaseProbe(host);
+
+                    log.info("[osm] endpoint_not_penalized campaignId={} depth={} phase={} endpointHost={} reason=query_too_heavy regionCanSplit=true",
+                            campaignId, region.depth(), phase, host);
+
+                    continue;
                 }
+
+                if (retryable) {
+                    circuitBreaker.recordFailure(host);
+                    continue;
+                }
+
+                return AreaQueryResult.queryError("OSM_OVERPASS_QUERY_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage(), elapsedMs);
+
             } finally {
                 if (acquired) {
                     overpassSemaphore.release();
@@ -422,7 +429,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         long elapsedMs = elapsedMs(startNs);
 
         if (hadTimeoutOr504 && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
-            return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Timeout/504 em todos os endpoints, subdividindo região", elapsedMs);
+            return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Região pesada para consulta Overpass; subdividindo sem penalizar endpoints", elapsedMs);
         }
 
         return AreaQueryResult.infraUnavailable("OSM_ALL_ENDPOINTS_FAILED", "Todos os endpoints Overpass indisponíveis", elapsedMs);
@@ -736,6 +743,32 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return (System.nanoTime() - startNs) / 1_000_000L;
     }
 
+    private boolean isQueryTooHeavyFailure(Throwable throwable) {
+        if (throwable instanceof HttpStatusCodeException http) {
+            if (http.getStatusCode().value() == 504) {
+                return true;
+            }
+        }
+
+        Throwable root = rootCause(throwable);
+
+        if (root instanceof SocketTimeoutException) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private Throwable rootCause(Throwable throwable) {
+        Throwable current = throwable;
+
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+
+        return current;
+    }
+
     static class OverpassCircuitBreaker {
         private static final class EndpointState {
             volatile State state = State.CLOSED;
@@ -805,6 +838,24 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 es.state = EndpointState.State.OPEN;
                 es.openSince = System.currentTimeMillis();
                 es.halfOpenInFlight = false;
+            }
+        }
+
+        void releaseProbe(String host) {
+            EndpointState es = states.get(host);
+
+            if (es == null) {
+                return;
+            }
+
+            synchronized (es) {
+
+                if (
+                        es.state == EndpointState.State.HALF_OPEN
+                        && es.halfOpenInFlight
+                ) {
+                    es.halfOpenInFlight = false;
+                }
             }
         }
     }

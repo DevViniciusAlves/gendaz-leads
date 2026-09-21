@@ -67,6 +67,13 @@ public record SearchRegion(
         return northSouthKm() > minEdgeKm || eastWestKm() > minEdgeKm;
     }
 
+    public double maxEdgeKm() {
+        return Math.max(
+                northSouthKm(),
+                eastWestKm()
+        );
+    }
+
     public List<SearchRegion> split(
             double cityLat,
             double cityLon

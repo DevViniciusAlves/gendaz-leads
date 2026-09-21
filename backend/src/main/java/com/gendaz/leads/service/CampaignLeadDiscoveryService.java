@@ -70,6 +70,9 @@ public class CampaignLeadDiscoveryService {
     @Value("${app.discovery.osm.adaptive-min-edge-km:2.0}")
     private double adaptiveMinEdgeKm;
 
+    @Value("${app.discovery.osm.initial-split-max-edge-km:60.0}")
+    private double initialSplitMaxEdgeKm;
+
     public CampaignLeadDiscoveryService(
             CampaignRepository campaignRepository,
             CampaignLeadRepository campaignLeadRepository,
@@ -156,7 +159,40 @@ public class CampaignLeadDiscoveryService {
                                 .thenComparingDouble(SearchRegion::west)
                 );
 
-        queue.add(scope.rootRegion());
+        SearchRegion rootRegion = scope.rootRegion();
+
+        if (
+                rootRegion.maxEdgeKm() > initialSplitMaxEdgeKm
+                && rootRegion.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)
+        ) {
+
+            List<SearchRegion> initialRegions = rootRegion.split(scope.lat(), scope.lon());
+
+            queue.addAll(initialRegions);
+
+            log.info(
+                    "[osm] initial_plan campaignId={} strategy=PRE_SPLIT rootMaxEdgeKm={} thresholdKm={} initialRegions={} cityLat={} cityLon={}",
+                    campaign.getId(),
+                    rootRegion.maxEdgeKm(),
+                    initialSplitMaxEdgeKm,
+                    initialRegions.size(),
+                    scope.lat(),
+                    scope.lon()
+            );
+
+        } else {
+
+            queue.add(rootRegion);
+
+            log.info(
+                    "[osm] initial_plan campaignId={} strategy=ROOT_DIRECT rootMaxEdgeKm={} thresholdKm={} initialRegions=1 cityLat={} cityLon={}",
+                    campaign.getId(),
+                    rootRegion.maxEdgeKm(),
+                    initialSplitMaxEdgeKm,
+                    scope.lat(),
+                    scope.lon()
+            );
+        }
 
         Set<String> seenSourceIds =
                 new HashSet<>();
