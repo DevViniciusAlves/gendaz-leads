@@ -34,14 +34,16 @@ app:
       max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:180000}
       query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:40}
       query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:8}
-      adaptive-max-depth: ${OSM_ADAPTIVE_MAX_DEPTH:6}
-      adaptive-min-edge-km: ${OSM_ADAPTIVE_MIN_EDGE_KM:2.0}
-      initial-split-max-edge-km: ${OSM_INITIAL_SPLIT_MAX_EDGE_KM:60.0}
+      query-max-edge-km: ${OSM_QUERY_MAX_EDGE_KM:12.0}
+      failure-split-threshold-km: ${OSM_FAILURE_SPLIT_THRESHOLD_KM:6.0}
+      adaptive-max-depth: ${OSM_ADAPTIVE_MAX_DEPTH:12}
+      adaptive-min-edge-km: ${OSM_ADAPTIVE_MIN_EDGE_KM:1.0}
       overpass-endpoints: ${OSM_OVERPASS_ENDPOINTS:https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter}
       overpass-url: ${OSM_OVERPASS_URL:https://overpass-api.de/api/interpreter}
       fallback-url: ${OSM_OVERPASS_FALLBACK_URL:}
       max-concurrency: ${OSM_OVERPASS_MAX_CONCURRENCY:1}
       circuit-open-seconds: ${OSM_CIRCUIT_OPEN_SECONDS:30}
+      rate-limit-cooldown-seconds: ${OSM_429_COOLDOWN_SECONDS:60}
   groq:
     api-key: ${GROQ_API_KEY}
     model: ${GROQ_MODEL:openai/gpt-oss-120b}

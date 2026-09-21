@@ -113,8 +113,8 @@ Veja `backend/.env.example`. Resumo (sem valores reais):
   - `OSM_NOMINATIM_CACHE_SECONDS`, `OSM_NOMINATIM_MIN_INTERVAL_MS`
   - `OSM_DISCOVERY_BASE_BUDGET_MS`, `OSM_DISCOVERY_PER_LEAD_BUDGET_MS`, `OSM_DISCOVERY_MAX_BUDGET_MS`
   - `OSM_QUERY_MIN_RAW_LIMIT`, `OSM_QUERY_RAW_PER_LEAD`
-  - `OSM_ADAPTIVE_MAX_DEPTH`, `OSM_ADAPTIVE_MIN_EDGE_KM`
-  - `OSM_OVERPASS_ENDPOINTS`, `OSM_OVERPASS_MAX_CONCURRENCY`, `OSM_CIRCUIT_OPEN_SECONDS`
+  - `OSM_QUERY_MAX_EDGE_KM`, `OSM_FAILURE_SPLIT_THRESHOLD_KM`, `OSM_ADAPTIVE_MAX_DEPTH`, `OSM_ADAPTIVE_MIN_EDGE_KM`
+  - `OSM_OVERPASS_ENDPOINTS`, `OSM_OVERPASS_MAX_CONCURRENCY`, `OSM_CIRCUIT_OPEN_SECONDS`, `OSM_429_COOLDOWN_SECONDS`
 - **Enriquecimento de contatos**:
   - `LEAD_ENRICHMENT_CONNECT_TIMEOUT_MS`, `LEAD_ENRICHMENT_READ_TIMEOUT_MS`, `LEAD_ENRICHMENT_MAX_BYTES`
 - **Groq** (análise e geração de mensagens):
@@ -171,7 +171,7 @@ npm start              # porta 3001; GET /health -> {"status":"UP"}
 
 1. Usuário informa **nicho + cidade + país + quantidade** (3–30) e cria uma campanha.
 2. Backend dispara processamento **assíncrono** (`@Async`):
-   - **Descoberta**: Nominatim geocodifica cidade+país → `country_code` ISO + bbox da cidade inteira → **root bbox first** (uma query ampla); se **saturar** (`elements >= rawLimit`) ou **timeout/504** e a região puder ser dividida → **adaptive split** recursivo (máx depth configurável, aresta mínima em km); failover por endpoint; sticky healthy endpoint; circuit breaker por host; **NÃO** grid fixo de tiles; deadline adaptativo (`base + perLead * qty`, cap).
+   - **Descoberta**: Nominatim geocodifica cidade+país → `country_code` ISO + bbox da cidade inteira + `osm_type` + `osm_id` (relation) → **ADMIN_AREA** se relation disponível (usa `map_to_area` para área administrativa real do município) ou **BBOX_FALLBACK** → **lazy planner** subdivide sob demanda (center-first, nenhuma query > ~12 km por padrão, árvore criada apenas quando necessário) → **CONTACT-FIRST** queries (phone/email/website/Instagram) → Overpass dentro da interseção (área admin + célula do planner) → endpoint round-robin saudável; 429 → cooldown com Retry-After; timeout/504 em região > 6 km → split imediato; timeout/504 em região ≤ 6 km → failover; target atingido → stop early.
    - **Normalização + Enriquecimento**: `LeadCandidate` com nome, categoria, endereço, cidade, país, telefone, **email**, website, Instagram, sourceId. Enriquecimento de website (tel:, mailto:, Instagram) **após** dedupe global; SSRF guard (CIDR corretos), redirect validation (máx 3, revalida SSRF a cada hop), cache por execução.
    - **Deduplicação global**: sourceId → Instagram → website → telefone → nome+cidade+país; **email NÃO é chave global** (franquias podem compartilhar). Dedupe em memória (sourceId) antes de enriquecimento; constraints únicos no banco.
    - **Lead útil**: só conta para a quantidade se tiver telefone **OU** Instagram **OU** email **OU** website. Sem contato → continua buscando (não consome vaga).

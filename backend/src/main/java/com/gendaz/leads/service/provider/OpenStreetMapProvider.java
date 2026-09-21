@@ -66,14 +66,20 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.circuit-open-seconds:30}")
     private long circuitOpenSeconds;
 
-    @Value("${app.discovery.osm.adaptive-max-depth:6}")
+    @Value("${app.discovery.osm.adaptive-max-depth:12}")
     private int adaptiveMaxDepth;
 
-    @Value("${app.discovery.osm.adaptive-min-edge-km:2.0}")
+    @Value("${app.discovery.osm.adaptive-min-edge-km:1.0}")
     private double adaptiveMinEdgeKm;
 
-    @Value("${app.discovery.osm.initial-split-max-edge-km:60.0}")
-    private double initialSplitMaxEdgeKm;
+    @Value("${app.discovery.osm.query-max-edge-km:12.0}")
+    private double queryMaxEdgeKm;
+
+    @Value("${app.discovery.osm.failure-split-threshold-km:6.0}")
+    private double failureSplitThresholdKm;
+
+    @Value("${app.discovery.osm.rate-limit-cooldown-seconds:60}")
+    private long rateLimitCooldownSeconds;
 
     private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
@@ -87,6 +93,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     private final Object nominatimRateLock = new Object();
     private long lastNominatimRequestAtMs = 0L;
+
+    private final AtomicInteger overpassRoundRobinCursor = new AtomicInteger(0);
 
     record TimedValue<T>(T value, long expiresAtMs) {
         boolean valid() {
@@ -112,8 +120,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         this.overpassSemaphore = new Semaphore(Math.max(1, maxConcurrency), true);
         this.circuitBreaker = new OverpassCircuitBreaker(circuitOpenSeconds);
         List<String> endpoints = buildEndpointList();
-        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} initialSplitMaxEdgeKm={}",
-                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, initialSplitMaxEdgeKm);
+        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} queryMaxEdgeKm={} failureSplitThresholdKm={} adaptiveMaxDepth={} adaptiveMinEdgeKm={} rateLimitCooldownSeconds={}",
+                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, queryMaxEdgeKm, failureSplitThresholdKm, adaptiveMaxDepth, adaptiveMinEdgeKm, rateLimitCooldownSeconds);
     }
 
     private RestClient client(int effectiveTimeoutMs) {
@@ -146,23 +154,23 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return endpoints;
     }
 
-    private List<String> orderedEndpoints(String preferredHost) {
+    private List<String> orderedEndpointsRoundRobin() {
+
         List<String> endpoints = buildEndpointList();
 
-        if (preferredHost == null || preferredHost.isBlank()) {
+        if (endpoints.size() <= 1) {
             return endpoints;
         }
 
-        endpoints.sort((a, b) -> {
-            String ha = hostOf(a);
-            String hb = hostOf(b);
+        int start = Math.floorMod(overpassRoundRobinCursor.getAndIncrement(), endpoints.size());
 
-            if (preferredHost.equalsIgnoreCase(ha)) return -1;
-            if (preferredHost.equalsIgnoreCase(hb)) return 1;
-            return 0;
-        });
+        List<String> ordered = new ArrayList<>(endpoints.size());
 
-        return endpoints;
+        for (int i = 0; i < endpoints.size(); i++) {
+            ordered.add(endpoints.get((start + i) % endpoints.size()));
+        }
+
+        return ordered;
     }
 
     private String hostOf(String url) {
@@ -171,6 +179,66 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         } catch (Exception ignored) {
             return "unknown";
         }
+    }
+
+    private String buildAdminAreaPreamble(GeoScope scope) {
+        if (!scope.hasAdminAreaCandidate()) {
+            return "";
+        }
+
+        return "rel(id:"
+                + scope.osmId()
+                + ")->.adminBoundary;"
+                + ".adminBoundary map_to_area->.searchArea;"
+                + ".searchArea out ids;";
+    }
+
+    private String buildLocationFilter(GeographicStrategy strategy, SearchRegion region) {
+        if (strategy == GeographicStrategy.ADMIN_AREA) {
+            return "(area.searchArea)("
+                    + region.bbox()
+                    + ")";
+        }
+
+        return "("
+                + region.bbox()
+                + ")";
+    }
+
+    private static final List<String> CONTACT_KEYS = List.of(
+            "phone",
+            "contact:phone",
+            "mobile",
+            "contact:mobile",
+            "website",
+            "contact:website",
+            "url",
+            "email",
+            "contact:email",
+            "instagram",
+            "contact:instagram"
+    );
+
+    private String buildStructuredTagFilter(String rawFilter) {
+        StringBuilder filterBuilder = new StringBuilder();
+
+        for (String part : rawFilter.split(",")) {
+            String[] kv = part.split("=", 2);
+
+            if (kv.length != 2 || kv[0].isBlank() || kv[1].isBlank()) {
+                continue;
+            }
+
+            filterBuilder.append(
+                    String.format(
+                            "[\"%s\"=\"%s\"]",
+                            escapeTag(kv[0].trim()),
+                            escapeTag(kv[1].trim())
+                    )
+            );
+        }
+
+        return filterBuilder.isEmpty() ? null : filterBuilder.toString();
     }
 
     @Override
@@ -262,10 +330,13 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                             }
                         }
 
-                        log.info("[osm] geocode_success campaignId={} requestedCity={} requestedCountry={} resolvedCity={} resolvedCountry={} countryCode={} lat={} lon={} bboxValid={}",
-                                request.campaignId(), request.city(), request.country(), hitCity, hitCountry, hitCountryCode, lat, lon, bboxValid);
+                        String osmType = hit.path("osm_type").asText(null);
+                        long osmId = hit.path("osm_id").asLong(-1L);
 
-                        GeoScope scope = new GeoScope(lat, lon, hitCity, state, hitCountry, hitCountryCode, south, west, north, east, bboxValid);
+                        log.info("[osm] geocode_success campaignId={} requestedCity={} requestedCountry={} resolvedCity={} resolvedCountry={} countryCode={} osmType={} osmId={} lat={} lon={} bboxValid={}",
+                                request.campaignId(), request.city(), request.country(), hitCity, hitCountry, hitCountryCode, osmType, osmId, lat, lon, bboxValid);
+
+                        GeoScope scope = new GeoScope(lat, lon, hitCity, state, hitCountry, hitCountryCode, south, west, north, east, bboxValid, osmType, osmId);
                         geoCache.put(cacheKey, new TimedValue<>(scope, System.currentTimeMillis() + nominatimCacheSeconds * 1000L));
                         return scope;
                     }
@@ -296,18 +367,16 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     public AreaQueryResult queryRegion(
             GeoScope scope,
+            GeographicStrategy geographicStrategy,
             String niche,
             SearchRegion region,
             AreaQueryPhase phase,
             int rawLimit,
-            String preferredEndpointHost,
             DiscoveryBudget budget,
             Long campaignId
     ) {
-        List<String> endpoints = orderedEndpoints(preferredEndpointHost);
+        List<String> endpoints = orderedEndpointsRoundRobin();
         long startNs = System.nanoTime();
-        boolean hadTimeoutOr504 = false;
-        Exception lastFailure = null;
 
         for (int endpointIdx = 0; endpointIdx < endpoints.size(); endpointIdx++) {
             String url = endpoints.get(endpointIdx);
@@ -325,6 +394,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             }
 
             boolean acquired = false;
+            boolean requestSent = false;
             try {
                 acquired = overpassSemaphore.tryAcquire(waitBudgetMs, TimeUnit.MILLISECONDS);
                 if (!acquired) {
@@ -342,19 +412,20 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
                 String query;
                 if (phase == AreaQueryPhase.STRUCTURED) {
-                    query = buildStructuredQuery(niche, region, rawLimit, overpassTimeoutSeconds);
+                    query = buildStructuredQuery(niche, scope, geographicStrategy, region, rawLimit, overpassTimeoutSeconds);
                 } else {
-                    query = buildNameFallbackQuery(niche, region, rawLimit, overpassTimeoutSeconds);
+                    query = buildNameFallbackQuery(niche, scope, geographicStrategy, region, rawLimit, overpassTimeoutSeconds);
                 }
 
                 if (query == null) {
-                    circuitBreaker.recordSuccess(host);
-                    return AreaQueryResult.success(List.of(), false, host, elapsedMs(startNs));
+                    circuitBreaker.releaseProbe(host);
+                    return AreaQueryResult.success(List.of(), false, null, elapsedMs(startNs));
                 }
 
-                log.info("[osm] area_query_start campaignId={} depth={} phase={} bbox={} rawLimit={} preferredEndpointHost={} remainingBudgetMs={}",
-                        campaignId, region.depth(), phase, region.bbox(), rawLimit, preferredEndpointHost, budget.remainingMs());
+                log.info("[osm] area_query_start campaignId={} depth={} phase={} geographicStrategy={} maxEdgeKm={} bbox={} rawLimit={} endpointHost={} remainingBudgetMs={} contactFirst=true",
+                        campaignId, region.depth(), phase, geographicStrategy, region.maxEdgeKm(), region.bbox(), rawLimit, host, budget.remainingMs());
 
+                requestSent = true;
                 String response = client(effectiveTimeoutMs).post()
                         .uri(url)
                         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -366,59 +437,111 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
                 JsonNode root = objectMapper.readTree(response);
                 JsonNode elements = root.path("elements");
-                if (elements.isMissingNode() || !elements.isArray() || elements.isEmpty()) {
-                    log.info("[osm] area_query_success campaignId={} depth={} phase={} endpointHost={} elements=0 mapped=0 saturated=false elapsedMs={}",
-                            campaignId, region.depth(), phase, host, elapsedMs);
+                if (elements.isMissingNode() || !elements.isArray()) {
                     circuitBreaker.recordSuccess(host);
                     return AreaQueryResult.success(List.of(), false, host, elapsedMs);
                 }
 
+                boolean adminAreaResolved = geographicStrategy != GeographicStrategy.ADMIN_AREA;
+                List<JsonNode> leadElements = new ArrayList<>();
+
+                for (JsonNode element : elements) {
+                    String elementType = element.path("type").asText("");
+
+                    if (geographicStrategy == GeographicStrategy.ADMIN_AREA && "area".equalsIgnoreCase(elementType)) {
+                        adminAreaResolved = true;
+                        continue;
+                    }
+
+                    leadElements.add(element);
+                }
+
+                if (geographicStrategy == GeographicStrategy.ADMIN_AREA && !adminAreaResolved) {
+                    circuitBreaker.recordSuccess(host);
+
+                    log.warn("[osm] admin_area_unavailable campaignId={} osmType={} osmId={} endpointHost={} fallback=BBOX",
+                            campaignId, scope.osmType(), scope.osmId(), host);
+
+                    return AreaQueryResult.adminAreaUnavailable(host, elapsedMs);
+                }
+
+                if (leadElements.isEmpty()) {
+                    circuitBreaker.recordSuccess(host);
+                    return AreaQueryResult.success(List.of(), false, host, elapsedMs);
+                }
+
+                int rawLeadElements = leadElements.size();
+                boolean saturated = rawLeadElements >= rawLimit;
+
                 List<LeadCandidate> candidates = new ArrayList<>();
-                for (JsonNode el : elements) {
+                for (JsonNode el : leadElements) {
                     if (candidates.size() >= rawLimit) break;
-                    LeadCandidate candidate = mapElement(el, scope);
+                    LeadCandidate candidate = mapElement(el, scope, geographicStrategy == GeographicStrategy.ADMIN_AREA);
                     if (candidate != null) {
                         candidates.add(candidate);
                     }
                 }
 
-                boolean saturated = elements.size() >= rawLimit;
-
-                log.info("[osm] area_query_success campaignId={} depth={} phase={} endpointHost={} elements={} mapped={} saturated={} elapsedMs={}",
-                        campaignId, region.depth(), phase, host, elements.size(), candidates.size(), saturated, elapsedMs);
+                log.info("[osm] area_query_success campaignId={} depth={} phase={} geographicStrategy={} endpointHost={} rawElements={} mapped={} saturated={} elapsedMs={}",
+                        campaignId, region.depth(), phase, geographicStrategy, host, rawLeadElements, candidates.size(), saturated, elapsedMs);
 
                 circuitBreaker.recordSuccess(host);
                 return AreaQueryResult.success(candidates, saturated, host, elapsedMs);
 
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                circuitBreaker.releaseProbe(host);
+
+                log.warn("[osm] overpass_interrupted campaignId={} depth={} phase={} endpointHost={} requestSent={}",
+                        campaignId, region.depth(), phase, host, requestSent);
+
+                return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida antes da conclusão da chamada Overpass.", elapsedMs(startNs));
+
             } catch (Exception e) {
-                lastFailure = e;
-                boolean retryable = isRetryable(e);
                 FailureDetails fd = getFailureDetails(e);
                 long elapsedMs = elapsedMs(startNs);
-                log.warn("[osm] overpass_failed campaignId={} depth={} phase={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} retryable={} elapsedMs={}",
-                        campaignId, region.depth(), phase, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable, elapsedMs);
+                log.warn("[osm] overpass_failed campaignId={} depth={} phase={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} elapsedMs={}",
+                        campaignId, region.depth(), phase, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), elapsedMs);
 
-                boolean queryTooHeavy = isQueryTooHeavyFailure(e)
-                        && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm);
+                if (isRateLimited(e)) {
+                    long cooldownSeconds = resolveRetryAfterSeconds(e);
+                    circuitBreaker.recordRateLimited(host, cooldownSeconds);
 
-                if (queryTooHeavy) {
-                    hadTimeoutOr504 = true;
-
-                    circuitBreaker.releaseProbe(host);
-
-                    log.info("[osm] endpoint_not_penalized campaignId={} depth={} phase={} endpointHost={} reason=query_too_heavy regionCanSplit=true",
-                            campaignId, region.depth(), phase, host);
+                    log.warn("[osm] endpoint_rate_limited campaignId={} endpointHost={} cooldownSeconds={} source=429",
+                            campaignId, host, cooldownSeconds);
 
                     continue;
                 }
+
+                boolean timeoutOr504 = isTimeoutOr504(e);
+
+                boolean shouldSplitImmediately = timeoutOr504
+                        && region.maxEdgeKm() > failureSplitThresholdKm
+                        && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm);
+
+                if (shouldSplitImmediately) {
+                    circuitBreaker.releaseProbe(host);
+
+                    log.info("[osm] region_split_immediate campaignId={} depth={} phase={} endpointHost={} maxEdgeKm={} thresholdKm={} reason=timeout_or_504",
+                            campaignId, region.depth(), phase, host, region.maxEdgeKm(), failureSplitThresholdKm);
+
+                    return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Região ainda grande após timeout/504; subdividindo antes de failover.", elapsedMs);
+                }
+
+                boolean retryable = isRetryable(e);
 
                 if (retryable) {
                     circuitBreaker.recordFailure(host);
                     continue;
                 }
 
-                return AreaQueryResult.queryError("OSM_OVERPASS_QUERY_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage(), elapsedMs);
+                if (requestSent) {
+                    circuitBreaker.recordSuccess(host);
+                } else {
+                    circuitBreaker.releaseProbe(host);
+                }
 
+                return AreaQueryResult.queryError("OSM_OVERPASS_QUERY_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage(), elapsedMs);
             } finally {
                 if (acquired) {
                     overpassSemaphore.release();
@@ -427,12 +550,30 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         }
 
         long elapsedMs = elapsedMs(startNs);
-
-        if (hadTimeoutOr504 && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
-            return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Região pesada para consulta Overpass; subdividindo sem penalizar endpoints", elapsedMs);
-        }
-
         return AreaQueryResult.infraUnavailable("OSM_ALL_ENDPOINTS_FAILED", "Todos os endpoints Overpass indisponíveis", elapsedMs);
+    }
+
+    // Compatibilidade temporária com assinatura antiga
+    public AreaQueryResult queryRegion(
+            GeoScope scope,
+            String niche,
+            SearchRegion region,
+            AreaQueryPhase phase,
+            int rawLimit,
+            String ignoredPreferredEndpointHost,
+            DiscoveryBudget budget,
+            Long campaignId
+    ) {
+        return queryRegion(
+                scope,
+                scope.hasAdminAreaCandidate() ? GeographicStrategy.ADMIN_AREA : GeographicStrategy.BBOX_FALLBACK,
+                niche,
+                region,
+                phase,
+                rawLimit,
+                budget,
+                campaignId
+        );
     }
 
     private void awaitNominatimSlot(DiscoveryBudget budget) {
@@ -537,49 +678,113 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 "Falha ao resolver país após retentativas: " + requestedCountry);
     }
 
-    String buildStructuredQuery(String niche, SearchRegion region, int limit, int overpassTimeoutSeconds) {
-        String bbox = region.bbox();
+    String buildStructuredQuery(
+            String niche,
+            GeoScope scope,
+            GeographicStrategy geographicStrategy,
+            SearchRegion region,
+            int limit,
+            int overpassTimeoutSeconds
+    ) {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
-        StringBuilder sb = new StringBuilder();
-        sb.append("[out:json][timeout:")
-                .append(Math.max(1, overpassTimeoutSeconds))
-                .append("];(");
-        for (String t : strategy.tagFilters()) {
-            StringBuilder filterBuilder = new StringBuilder();
-            for (String part : t.split(",")) {
-                String[] kv = part.split("=", 2);
-                if (kv.length == 2 && !kv[0].isBlank() && !kv[1].isBlank()) {
-                    filterBuilder.append(String.format("[\"%s\"=\"%s\"]", escapeTag(kv[0].trim()), escapeTag(kv[1].trim())));
-                }
-            }
-            if (!filterBuilder.isEmpty()) {
-                sb.append(String.format("nwr%s(%s);", filterBuilder, bbox));
-            }
-        }
-        if (sb.length() <= ("[out:json][timeout:" + Math.max(1, overpassTimeoutSeconds) + "];(").length()) {
+
+        if (strategy.tagFilters().isEmpty()) {
             return null;
         }
-        sb.append(");out center tags ").append(Math.min(limit, MAX_OUT)).append(";");
+
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("[out:json][timeout:")
+                .append(Math.max(1, overpassTimeoutSeconds))
+                .append("];");
+
+        if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
+            sb.append(buildAdminAreaPreamble(scope));
+        }
+
+        sb.append("(");
+
+        String locationFilter = buildLocationFilter(geographicStrategy, region);
+
+        for (String baseFilter : strategy.tagFilters()) {
+
+            String tagFilter = buildStructuredTagFilter(baseFilter);
+
+            if (tagFilter == null || tagFilter.isBlank()) {
+                continue;
+            }
+
+            for (String contactKey : CONTACT_KEYS) {
+
+                sb.append("nwr")
+                        .append(tagFilter)
+                        .append("[\"")
+                        .append(escapeTag(contactKey))
+                        .append("\"]")
+                        .append(locationFilter)
+                        .append(";");
+            }
+        }
+
+        sb.append(");out center tags ")
+                .append(Math.min(limit, MAX_OUT))
+                .append(";");
+
         return sb.toString();
     }
 
-    String buildNameFallbackQuery(String niche, SearchRegion region, int limit, int overpassTimeoutSeconds) {
+    String buildNameFallbackQuery(
+            String niche,
+            GeoScope scope,
+            GeographicStrategy geographicStrategy,
+            SearchRegion region,
+            int limit,
+            int overpassTimeoutSeconds
+    ) {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
+
         String fallbackRegex = strategy.fallbackNameRegex();
+
         if (fallbackRegex == null || fallbackRegex.isBlank() || fallbackRegex.equals("''")) {
             return null;
         }
-        String bbox = region.bbox();
+
         StringBuilder sb = new StringBuilder();
+
         sb.append("[out:json][timeout:")
                 .append(Math.max(1, overpassTimeoutSeconds))
-                .append("];(");
-        sb.append(String.format("nwr[\"name\"~\"%s\",i](%s);", fallbackRegex, bbox));
-        sb.append(");out center tags ").append(Math.min(limit, MAX_OUT)).append(";");
+                .append("];");
+
+        if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
+            sb.append(buildAdminAreaPreamble(scope));
+        }
+
+        String locationFilter = buildLocationFilter(geographicStrategy, region);
+
+        sb.append("(");
+
+        for (String contactKey : CONTACT_KEYS) {
+            sb.append("nwr[\"name\"~\"")
+                    .append(fallbackRegex)
+                    .append("\",i][\"")
+                    .append(escapeTag(contactKey))
+                    .append("\"]")
+                    .append(locationFilter)
+                    .append(";");
+        }
+
+        sb.append(");out center tags ")
+                .append(Math.min(limit, MAX_OUT))
+                .append(";");
+
         return sb.toString();
     }
 
-    LeadCandidate mapElement(JsonNode el, GeoScope scope) {
+    LeadCandidate mapElement(
+            JsonNode el,
+            GeoScope scope,
+            boolean cityMembershipVerified
+    ) {
         JsonNode tags = el.path("tags");
         if (tags.isMissingNode() || !tags.isObject()) return null;
         String name = asTextOrNull(tags, "name");
@@ -589,50 +794,45 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         String id = el.path("id").asText("");
         if (type.isBlank() || id.isBlank()) return null;
 
+        String taggedCity = firstPresent(tags, "addr:city", "addr:town", "addr:village", "addr:municipality");
+
+        if (!cityMembershipVerified) {
+            if (taggedCity == null || !cityMatches(taggedCity, scope.city())) {
+                log.info("[osm] candidate_skipped reason=bbox_city_not_verified sourceType={} sourceId={} taggedCity={} requestedCity={}",
+                        type, id, taggedCity, scope.city());
+                return null;
+            }
+        }
+
         LeadCandidate candidate = new LeadCandidate(name.trim(), "openstreetmap", type + "/" + id);
         candidate.setCategory(buildCategory(tags));
         candidate.setWebsite(firstPresent(tags, "contact:website", "website", "url"));
         candidate.setPhone(firstPresent(tags, "contact:phone", "phone", "contact:mobile", "mobile"));
         candidate.setEmail(firstPresent(tags, "contact:email", "email"));
 
-        candidate.setCity(firstPresent(tags, "addr:city", "addr:town", "addr:village", "addr:municipality") != null
-                ? firstPresent(tags, "addr:city", "addr:town", "addr:village", "addr:municipality") : scope.city());
+        candidate.setCity(taggedCity != null ? taggedCity : scope.city());
         candidate.setState(asTextOrNull(tags, "addr:state") != null ? asTextOrNull(tags, "addr:state") : scope.state());
         candidate.setCountry(asTextOrNull(tags, "addr:country") != null ? asTextOrNull(tags, "addr:country") : scope.country());
-        candidate.setAddress(buildAddress(tags, scope));
+        candidate.setAddress(buildAddress(tags, scope, cityMembershipVerified));
         candidate.setInstagramStatus("NOT_FOUND");
 
-        String instagramRaw =
-                firstPresent(
-                        tags,
-                        "contact:instagram",
-                        "instagram"
-                );
+        String instagramRaw = firstPresent(tags, "contact:instagram", "instagram");
 
         if (instagramRaw != null && !instagramRaw.isBlank()) {
+            String normalizedInstagram = normalizer.normalizeInstagram(instagramRaw);
 
-            String normalizedInstagram =
-                    normalizer.normalizeInstagram(
-                            instagramRaw
-                    );
-
-            if (normalizedInstagram != null
-                    && !normalizedInstagram.isBlank()) {
-
-                candidate.setInstagramUsername(
-                        normalizedInstagram
-                );
-
-                candidate.setInstagramUrl(
-                        "https://instagram.com/"
-                                + normalizedInstagram
-                );
-
+            if (normalizedInstagram != null && !normalizedInstagram.isBlank()) {
+                candidate.setInstagramUsername(normalizedInstagram);
+                candidate.setInstagramUrl("https://instagram.com/" + normalizedInstagram);
                 candidate.setInstagramStatus("FOUND");
             }
         }
 
         return candidate;
+    }
+
+    LeadCandidate mapElement(JsonNode el, GeoScope scope) {
+        return mapElement(el, scope, false);
     }
 
     static boolean isRetryable(Exception e) {
@@ -696,13 +896,15 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return null;
     }
 
-    static String buildAddress(JsonNode tags, GeoScope scope) {
+    static String buildAddress(JsonNode tags, GeoScope scope, boolean cityMembershipVerified) {
         String street = asTextOrNull(tags, "addr:street");
         String number = asTextOrNull(tags, "addr:housenumber");
         String suburb = asTextOrNull(tags, "addr:suburb", "addr:neighbourhood", "addr:district");
         String city = asTextOrNull(tags, "addr:city", "addr:town", "addr:village", "addr:municipality");
         String state = asTextOrNull(tags, "addr:state");
-        if (city == null) city = scope.city();
+        if (city == null && cityMembershipVerified) {
+            city = scope.city();
+        }
         if (state == null) state = scope.state();
 
         List<String> head = new ArrayList<>();
@@ -727,6 +929,10 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return null;
     }
 
+    static String buildAddress(JsonNode tags, GeoScope scope) {
+        return buildAddress(tags, scope, false);
+    }
+
     private static FailureDetails getFailureDetails(Throwable t) {
         Throwable root = t;
         while (root.getCause() != null) {
@@ -743,29 +949,62 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         return (System.nanoTime() - startNs) / 1_000_000L;
     }
 
-    private boolean isQueryTooHeavyFailure(Throwable throwable) {
-        if (throwable instanceof HttpStatusCodeException http) {
-            if (http.getStatusCode().value() == 504) {
-                return true;
-            }
+    private boolean isRateLimited(Throwable throwable) {
+        return throwable instanceof HttpStatusCodeException http
+                && http.getStatusCode().value() == 429;
+    }
+
+    private long resolveRetryAfterSeconds(Throwable throwable) {
+        if (!(throwable instanceof HttpStatusCodeException http)) {
+            return rateLimitCooldownSeconds;
         }
 
-        Throwable root = rootCause(throwable);
+        String retryAfter = http.getResponseHeaders() != null
+                ? http.getResponseHeaders().getFirst("Retry-After")
+                : null;
 
-        if (root instanceof SocketTimeoutException) {
+        if (retryAfter == null || retryAfter.isBlank()) {
+            return rateLimitCooldownSeconds;
+        }
+
+        try {
+            long seconds = Long.parseLong(retryAfter.trim());
+            return Math.max(1L, seconds);
+        } catch (NumberFormatException ignored) {
+        }
+
+        try {
+            java.time.ZonedDateTime retryAt = java.time.ZonedDateTime.parse(
+                    retryAfter.trim(),
+                    java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+            );
+
+            long seconds = java.time.Duration.between(
+                    java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC),
+                    retryAt.withZoneSameInstant(java.time.ZoneOffset.UTC)
+            ).getSeconds();
+
+            return Math.max(1L, seconds);
+        } catch (RuntimeException ignored) {
+            return rateLimitCooldownSeconds;
+        }
+    }
+
+    private boolean isTimeoutOr504(Throwable throwable) {
+        if (throwable instanceof HttpStatusCodeException http
+                && http.getStatusCode().value() == 504) {
             return true;
         }
 
-        return false;
+        Throwable root = rootCause(throwable);
+        return root instanceof SocketTimeoutException;
     }
 
     private Throwable rootCause(Throwable throwable) {
         Throwable current = throwable;
-
         while (current.getCause() != null) {
             current = current.getCause();
         }
-
         return current;
     }
 
@@ -773,6 +1012,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         private static final class EndpointState {
             volatile State state = State.CLOSED;
             volatile long openSince = 0L;
+            volatile long openUntilEpochMs = 0L;
             volatile boolean halfOpenInFlight = false;
 
             enum State {
@@ -798,9 +1038,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 }
 
                 if (es.state == EndpointState.State.OPEN) {
-                    long elapsed = System.currentTimeMillis() - es.openSince;
+                    long now = System.currentTimeMillis();
+                    long until = es.openUntilEpochMs > 0L
+                            ? es.openUntilEpochMs
+                            : es.openSince + openSeconds * 1000L;
 
-                    if (elapsed < openSeconds * 1000L) {
+                    if (now < until) {
                         return false;
                     }
 
@@ -827,6 +1070,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             synchronized (es) {
                 es.state = EndpointState.State.CLOSED;
                 es.openSince = 0L;
+                es.openUntilEpochMs = 0L;
                 es.halfOpenInFlight = false;
             }
         }
@@ -835,8 +1079,22 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
 
             synchronized (es) {
+                long now = System.currentTimeMillis();
                 es.state = EndpointState.State.OPEN;
-                es.openSince = System.currentTimeMillis();
+                es.openSince = now;
+                es.openUntilEpochMs = now + openSeconds * 1000L;
+                es.halfOpenInFlight = false;
+            }
+        }
+
+        void recordRateLimited(String host, long cooldownSeconds) {
+            EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
+
+            synchronized (es) {
+                long now = System.currentTimeMillis();
+                es.state = EndpointState.State.OPEN;
+                es.openSince = now;
+                es.openUntilEpochMs = now + Math.max(1L, cooldownSeconds) * 1000L;
                 es.halfOpenInFlight = false;
             }
         }
@@ -849,7 +1107,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             }
 
             synchronized (es) {
-
                 if (
                         es.state == EndpointState.State.HALF_OPEN
                         && es.halfOpenInFlight

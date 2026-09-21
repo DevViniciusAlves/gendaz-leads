@@ -17,6 +17,7 @@ public record AreaQueryResult(
     public enum Outcome {
         SUCCESS,
         SPLIT_REQUIRED,
+        ADMIN_AREA_UNAVAILABLE,
         INFRA_UNAVAILABLE,
         QUERY_ERROR
     }
@@ -50,6 +51,21 @@ public record AreaQueryResult(
                 null,
                 code,
                 message,
+                elapsedMs
+        );
+    }
+
+    public static AreaQueryResult adminAreaUnavailable(
+            String endpointHost,
+            long elapsedMs
+    ) {
+        return new AreaQueryResult(
+                Outcome.ADMIN_AREA_UNAVAILABLE,
+                List.of(),
+                false,
+                endpointHost,
+                "OSM_ADMIN_AREA_UNAVAILABLE",
+                "A relation OSM não possui area Overpass utilizável; usando bbox fallback.",
                 elapsedMs
         );
     }

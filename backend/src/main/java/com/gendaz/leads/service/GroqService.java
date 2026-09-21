@@ -52,6 +52,16 @@ public class GroqService {
         factory.setConnectTimeout(10000);
         factory.setReadTimeout(timeoutMs);
         this.restClient = builder.requestFactory(factory).build();
+
+        log.info(
+                "[groq] config model={} enabled={} timeoutMs={} maxRetries={} envOverridePresent={} springApplicationJsonPresent={}",
+                this.model,
+                this.enabled,
+                this.timeoutMs,
+                this.maxRetries,
+                System.getenv("GROQ_MODEL") != null,
+                System.getenv("SPRING_APPLICATION_JSON") != null
+        );
     }
 
     public String getModel() {
