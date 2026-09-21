@@ -377,15 +377,19 @@ public class CampaignLeadDiscoveryService {
                 } else if (structured.outcome()
                         == AreaQueryResult.Outcome.INFRA_UNAVAILABLE) {
 
-                    consecutiveInfraFailures++;
+                    if (structured.httpAttemptMade()) {
+                        consecutiveInfraFailures++;
+                    }
                     infraDegraded = true;
                     finalErrorCode = structured.errorCode();
                     finalErrorMessage = structured.errorMessage();
 
                     if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
-                        adminAreaInfraFailures++;
-                        log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={}",
-                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth());
+                        if (structured.httpAttemptMade()) {
+                            adminAreaInfraFailures++;
+                        }
+                        log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={} httpAttempt={}",
+                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth(), structured.httpAttemptMade());
                         if (adminAreaInfraFailures >= adminAreaInfraFailuresBeforeBbox && scope.bboxValid()) {
                             geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
                             queue.add(region);
@@ -410,8 +414,8 @@ public class CampaignLeadDiscoveryService {
                         continue;
                     }
 
-                    log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={}",
-                            campaign.getId(), queue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures);
+                    log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={} httpAttempt={}",
+                            campaign.getId(), queue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures, structured.httpAttemptMade());
                     continue;
 
                 } else {
@@ -511,15 +515,19 @@ public class CampaignLeadDiscoveryService {
                                 == AreaQueryResult.Outcome.INFRA_UNAVAILABLE
                 ) {
 
-                    consecutiveInfraFailures++;
+                    if (fallback.httpAttemptMade()) {
+                        consecutiveInfraFailures++;
+                    }
                     infraDegraded = true;
                     finalErrorCode = fallback.errorCode();
                     finalErrorMessage = fallback.errorMessage();
 
                     if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
-                        adminAreaInfraFailures++;
-                        log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={}",
-                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth());
+                        if (fallback.httpAttemptMade()) {
+                            adminAreaInfraFailures++;
+                        }
+                        log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={} httpAttempt={}",
+                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth(), fallback.httpAttemptMade());
                         if (adminAreaInfraFailures >= adminAreaInfraFailuresBeforeBbox && scope.bboxValid()) {
                             geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
                             queue.add(region);
@@ -544,8 +552,8 @@ public class CampaignLeadDiscoveryService {
                         continue;
                     }
 
-                    log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={}",
-                            campaign.getId(), queue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures);
+                    log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={} httpAttempt={}",
+                            campaign.getId(), queue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures, fallback.httpAttemptMade());
                     continue;
 
                 } else {

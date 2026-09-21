@@ -11,7 +11,8 @@ public record AreaQueryResult(
         String endpointHost,
         String errorCode,
         String errorMessage,
-        long elapsedMs
+        long elapsedMs,
+        boolean httpAttemptMade
 ) {
 
     public enum Outcome {
@@ -35,7 +36,8 @@ public record AreaQueryResult(
                 endpointHost,
                 null,
                 null,
-                elapsedMs
+                elapsedMs,
+                true
         );
     }
 
@@ -51,7 +53,8 @@ public record AreaQueryResult(
                 null,
                 code,
                 message,
-                elapsedMs
+                elapsedMs,
+                false
         );
     }
 
@@ -66,7 +69,8 @@ public record AreaQueryResult(
                 endpointHost,
                 "OSM_ADMIN_AREA_UNAVAILABLE",
                 "A relation OSM não possui area Overpass utilizável; usando bbox fallback.",
-                elapsedMs
+                elapsedMs,
+                true
         );
     }
 
@@ -82,7 +86,25 @@ public record AreaQueryResult(
                 null,
                 code,
                 message,
-                elapsedMs
+                elapsedMs,
+                false
+        );
+    }
+
+    public static AreaQueryResult infraUnavailableWithAttempt(
+            String code,
+            String message,
+            long elapsedMs
+    ) {
+        return new AreaQueryResult(
+                Outcome.INFRA_UNAVAILABLE,
+                List.of(),
+                false,
+                null,
+                code,
+                message,
+                elapsedMs,
+                true
         );
     }
 
@@ -98,7 +120,8 @@ public record AreaQueryResult(
                 null,
                 code,
                 message,
-                elapsedMs
+                elapsedMs,
+                true
         );
     }
 }

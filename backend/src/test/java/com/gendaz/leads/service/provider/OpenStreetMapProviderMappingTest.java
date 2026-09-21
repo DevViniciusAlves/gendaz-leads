@@ -43,8 +43,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("+55 65 9999-8888", candidate.getPhone());
@@ -63,8 +63,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("+55 65 9999-8888", candidate.getPhone());
@@ -83,8 +83,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("+55 65 9999-8888", candidate.getPhone());
@@ -103,8 +103,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("+55 65 9999-8888", candidate.getPhone());
@@ -123,8 +123,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("contato@barbearia.com", candidate.getEmail());
@@ -143,8 +143,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("contato@barbearia.com", candidate.getEmail());
@@ -163,8 +163,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("https://barbearia.com", candidate.getWebsite());
@@ -183,8 +183,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("https://barbearia.com", candidate.getWebsite());
@@ -203,8 +203,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("https://barbearia.com", candidate.getWebsite());
@@ -223,8 +223,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("barbearia", candidate.getInstagramUsername());
@@ -245,8 +245,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("barbearia", candidate.getInstagramUsername());
@@ -267,8 +267,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("barbearia", candidate.getInstagramUsername());
@@ -289,8 +289,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Várzea Grande", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Várzea Grande", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("Cuiabá", candidate.getCity());
@@ -309,8 +309,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("Várzea Grande", candidate.getCity());
@@ -329,8 +329,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("Poconé", candidate.getCity());
@@ -349,8 +349,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("Poconé", candidate.getCity());
@@ -370,7 +370,7 @@ class OpenStreetMapProviderMappingTest {
         element.put("lon", -56.1);
 
         var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MS", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("MT", candidate.getState());
@@ -389,8 +389,8 @@ class OpenStreetMapProviderMappingTest {
         element.put("lat", -15.6);
         element.put("lon", -56.1);
 
-        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true);
-        LeadCandidate candidate = provider.mapElement(element, scope);
+        var scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        LeadCandidate candidate = provider.mapElement(element, scope, true);
 
         assertNotNull(candidate);
         assertEquals("Brasil", candidate.getCountry());

@@ -246,6 +246,20 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             "contact:instagram"
     );
 
+    private static final String CONTACT_KEYS_REGEX = "^(" +
+            "phone|" +
+            "contact:phone|" +
+            "mobile|" +
+            "contact:mobile|" +
+            "website|" +
+            "contact:website|" +
+            "url|" +
+            "email|" +
+            "contact:email|" +
+            "instagram|" +
+            "contact:instagram" +
+            ")$";
+
     private String buildStructuredTagFilter(String rawFilter) {
         StringBuilder filterBuilder = new StringBuilder();
 
@@ -410,204 +424,263 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     ) {
         List<String> endpoints = orderedEndpointsRoundRobin();
         long startNs = System.nanoTime();
+        boolean anyHttpAttemptMade = false;
 
-        for (int endpointIdx = 0; endpointIdx < endpoints.size(); endpointIdx++) {
-            String url = endpoints.get(endpointIdx);
-            String host = hostOf(url);
+        while (!budget.expired()) {
+            boolean anyEndpointTried = false;
 
-            if (!circuitBreaker.tryAcquire(host)) {
-                log.info("[osm] endpoint_skipped campaignId={} phase={} endpointHost={} reason=circuit_open", campaignId, phase, host);
-                continue;
-            }
+            for (int endpointIdx = 0; endpointIdx < endpoints.size(); endpointIdx++) {
+                String url = endpoints.get(endpointIdx);
+                String host = hostOf(url);
 
-            long waitBudgetMs = budget.remainingMs();
-            if (waitBudgetMs <= 0) {
-                circuitBreaker.releaseProbe(host);
-                return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente antes de adquirir semaphore", elapsedMs(startNs));
-            }
+                if (!circuitBreaker.tryAcquire(host)) {
+                    log.info("[osm] endpoint_skipped campaignId={} phase={} endpointHost={} reason=circuit_open", campaignId, phase, host);
+                    continue;
+                }
 
-            boolean acquired = false;
-            boolean requestSent = false;
-            try {
-                acquired = overpassSemaphore.tryAcquire(waitBudgetMs, TimeUnit.MILLISECONDS);
-                if (!acquired) {
+                anyEndpointTried = true;
+
+                long waitBudgetMs = budget.remainingMs();
+                if (waitBudgetMs <= 0) {
                     circuitBreaker.releaseProbe(host);
-                    return AreaQueryResult.infraUnavailable("OSM_SEMAPHORE_TIMEOUT", "Budget esgotado aguardando acesso ao Overpass", elapsedMs(startNs));
+                    return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente antes de adquirir semaphore", elapsedMs(startNs));
                 }
 
-                int effectiveTimeoutMs = budget.clampTimeout(timeoutMs);
-                if (effectiveTimeoutMs <= 0) {
-                    circuitBreaker.releaseProbe(host);
-                    return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente após adquirir semaphore", elapsedMs(startNs));
-                }
+                boolean acquired = false;
+                boolean requestSent = false;
+                try {
+                    acquired = overpassSemaphore.tryAcquire(waitBudgetMs, TimeUnit.MILLISECONDS);
+                    if (!acquired) {
+                        circuitBreaker.releaseProbe(host);
+                        return AreaQueryResult.infraUnavailable("OSM_SEMAPHORE_TIMEOUT", "Budget esgotado aguardando acesso ao Overpass", elapsedMs(startNs));
+                    }
 
-                int overpassTimeoutSeconds = Math.max(1, (int) Math.ceil(effectiveTimeoutMs / 1000.0));
+                    int effectiveTimeoutMs = budget.clampTimeout(timeoutMs);
+                    if (effectiveTimeoutMs <= 0) {
+                        circuitBreaker.releaseProbe(host);
+                        return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente após adquirir semaphore", elapsedMs(startNs));
+                    }
 
-                String query;
-                if (phase == AreaQueryPhase.STRUCTURED) {
-                    query = buildStructuredQuery(niche, scope, geographicStrategy, region, rawLimit, overpassTimeoutSeconds);
-                } else {
-                    query = buildNameFallbackQuery(niche, scope, geographicStrategy, region, rawLimit, overpassTimeoutSeconds);
-                }
+                    int overpassTimeoutSeconds = Math.max(1, (int) Math.ceil(effectiveTimeoutMs / 1000.0));
 
-                if (query == null) {
-                    circuitBreaker.releaseProbe(host);
-                    return AreaQueryResult.success(List.of(), false, null, elapsedMs(startNs));
-                }
+                    String query;
+                    if (phase == AreaQueryPhase.STRUCTURED) {
+                        query = buildStructuredQuery(niche, scope, geographicStrategy, region, rawLimit, overpassTimeoutSeconds);
+                    } else {
+                        query = buildNameFallbackQuery(niche, scope, geographicStrategy, region, rawLimit, overpassTimeoutSeconds);
+                    }
 
-                log.info("[osm] area_query_start campaignId={} depth={} phase={} geographicStrategy={} maxEdgeKm={} bbox={} rawLimit={} endpointHost={} remainingBudgetMs={} contactFirst=true",
-                        campaignId, region.depth(), phase, geographicStrategy, region.maxEdgeKm(), region.bbox(), rawLimit, host, budget.remainingMs());
+                    if (query == null) {
+                        circuitBreaker.releaseProbe(host);
+                        return AreaQueryResult.success(List.of(), false, null, elapsedMs(startNs));
+                    }
 
-                requestSent = true;
-                String response = client(effectiveTimeoutMs).post()
-                        .uri(url)
-                        .header("Content-Type", "application/x-www-form-urlencoded")
-                        .body("data=" + java.net.URLEncoder.encode(query, java.nio.charset.StandardCharsets.UTF_8))
-                        .retrieve()
-                        .body(String.class);
+                    log.info("[osm] area_query_start campaignId={} depth={} phase={} geographicStrategy={} maxEdgeKm={} bbox={} rawLimit={} endpointHost={} remainingBudgetMs={} contactFirst=true",
+                            campaignId, region.depth(), phase, geographicStrategy, region.maxEdgeKm(), region.bbox(), rawLimit, host, budget.remainingMs());
 
-                long elapsedMs = elapsedMs(startNs);
+                    requestSent = true;
+                    anyHttpAttemptMade = true;
+                    String response = client(effectiveTimeoutMs).post()
+                            .uri(url)
+                            .header("Content-Type", "application/x-www-form-urlencoded")
+                            .body("data=" + java.net.URLEncoder.encode(query, java.nio.charset.StandardCharsets.UTF_8))
+                            .retrieve()
+                            .body(String.class);
 
-                JsonNode root = objectMapper.readTree(response);
-                JsonNode elements = root.path("elements");
-                if (elements.isMissingNode() || !elements.isArray()) {
+                    long elapsedMs = elapsedMs(startNs);
+
+                    JsonNode root = objectMapper.readTree(response);
+                    JsonNode elements = root.path("elements");
+                    if (elements.isMissingNode() || !elements.isArray()) {
+                        circuitBreaker.recordSuccess(host);
+                        return AreaQueryResult.success(List.of(), false, host, elapsedMs);
+                    }
+
+                    boolean adminAreaResolved = geographicStrategy != GeographicStrategy.ADMIN_AREA;
+                    List<JsonNode> leadElements = new ArrayList<>();
+
+                    for (JsonNode element : elements) {
+                        String elementType = element.path("type").asText("");
+
+                        if (geographicStrategy == GeographicStrategy.ADMIN_AREA && "area".equalsIgnoreCase(elementType)) {
+                            adminAreaResolved = true;
+                            continue;
+                        }
+
+                        leadElements.add(element);
+                    }
+
+                    if (geographicStrategy == GeographicStrategy.ADMIN_AREA && !adminAreaResolved) {
+                        circuitBreaker.recordSuccess(host);
+
+                        log.warn("[osm] admin_area_unavailable campaignId={} osmType={} osmId={} endpointHost={} fallback=BBOX",
+                                campaignId, scope.osmType(), scope.osmId(), host);
+
+                        return AreaQueryResult.adminAreaUnavailable(host, elapsedMs);
+                    }
+
+                    if (leadElements.isEmpty()) {
+                        circuitBreaker.recordSuccess(host);
+                        return AreaQueryResult.success(List.of(), false, host, elapsedMs);
+                    }
+
+                    int rawLeadElements = leadElements.size();
+                    boolean saturated = rawLeadElements >= rawLimit;
+
+                    List<LeadCandidate> candidates = new ArrayList<>();
+                    for (JsonNode el : leadElements) {
+                        if (candidates.size() >= rawLimit) break;
+                        LeadCandidate candidate = mapElement(el, scope, geographicStrategy == GeographicStrategy.ADMIN_AREA);
+                        if (candidate != null) {
+                            candidates.add(candidate);
+                        }
+                    }
+
+                    log.info("[osm] area_query_success campaignId={} depth={} phase={} geographicStrategy={} endpointHost={} rawElements={} mapped={} saturated={} elapsedMs={}",
+                            campaignId, region.depth(), phase, geographicStrategy, host, rawLeadElements, candidates.size(), saturated, elapsedMs);
+
                     circuitBreaker.recordSuccess(host);
-                    return AreaQueryResult.success(List.of(), false, host, elapsedMs);
-                }
+                    return AreaQueryResult.success(candidates, saturated, host, elapsedMs);
 
-                boolean adminAreaResolved = geographicStrategy != GeographicStrategy.ADMIN_AREA;
-                List<JsonNode> leadElements = new ArrayList<>();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    circuitBreaker.releaseProbe(host);
 
-                for (JsonNode element : elements) {
-                    String elementType = element.path("type").asText("");
+                    log.warn("[osm] overpass_interrupted campaignId={} depth={} phase={} endpointHost={} requestSent={}",
+                            campaignId, region.depth(), phase, host, requestSent);
 
-                    if (geographicStrategy == GeographicStrategy.ADMIN_AREA && "area".equalsIgnoreCase(elementType)) {
-                        adminAreaResolved = true;
+                    if (requestSent) {
+                        return AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida antes da conclusão da chamada Overpass.", elapsedMs(startNs));
+                    } else {
+                        return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida antes da conclusão da chamada Overpass.", elapsedMs(startNs));
+                    }
+
+                } catch (Exception e) {
+                    FailureDetails fd = getFailureDetails(e);
+                    long elapsedMs = elapsedMs(startNs);
+                    log.warn("[osm] overpass_failed campaignId={} depth={} phase={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} elapsedMs={}",
+                            campaignId, region.depth(), phase, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), elapsedMs);
+
+                    if (isRateLimited(e)) {
+                        long cooldownSeconds = resolveRetryAfterSeconds(e);
+                        circuitBreaker.recordRateLimited(host, cooldownSeconds);
+
+                        log.warn("[osm] endpoint_rate_limited campaignId={} endpointHost={} cooldownSeconds={} source=429",
+                                campaignId, host, cooldownSeconds);
+
                         continue;
                     }
 
-                    leadElements.add(element);
-                }
+                    boolean isConnectionRefused = isConnectionRefused(e);
+                    boolean isReadTimeout = isReadTimeout(e);
+                    boolean is504 = is504(e);
+                    boolean timeoutOr504 = isTimeoutOr504(e);
 
-                if (geographicStrategy == GeographicStrategy.ADMIN_AREA && !adminAreaResolved) {
-                    circuitBreaker.recordSuccess(host);
+                    // Check for split BEFORE opening circuit for timeout/504 on large regions
+                    boolean shouldSplitImmediately = timeoutOr504
+                            && region.maxEdgeKm() > failureSplitThresholdKm
+                            && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm);
 
-                    log.warn("[osm] admin_area_unavailable campaignId={} osmType={} osmId={} endpointHost={} fallback=BBOX",
-                            campaignId, scope.osmType(), scope.osmId(), host);
+                    if (shouldSplitImmediately) {
+                        circuitBreaker.releaseProbe(host);
 
-                    return AreaQueryResult.adminAreaUnavailable(host, elapsedMs);
-                }
+                        log.info("[osm] region_split_immediate campaignId={} depth={} phase={} endpointHost={} maxEdgeKm={} thresholdKm={} reason=timeout_or_504",
+                                campaignId, region.depth(), phase, host, region.maxEdgeKm(), failureSplitThresholdKm);
 
-                if (leadElements.isEmpty()) {
-                    circuitBreaker.recordSuccess(host);
-                    return AreaQueryResult.success(List.of(), false, host, elapsedMs);
-                }
+                        return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Região ainda grande após timeout/504; subdividindo antes de failover.", elapsedMs);
+                    }
 
-                int rawLeadElements = leadElements.size();
-                boolean saturated = rawLeadElements >= rawLimit;
+                    if (isConnectionRefused) {
+                        log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=connection_refused cooldownSeconds={}",
+                                campaignId, host, connectionRefusedCooldownSeconds);
+                        circuitBreaker.recordRateLimited(host, connectionRefusedCooldownSeconds);
+                        continue;
+                    }
 
-                List<LeadCandidate> candidates = new ArrayList<>();
-                for (JsonNode el : leadElements) {
-                    if (candidates.size() >= rawLimit) break;
-                    LeadCandidate candidate = mapElement(el, scope, geographicStrategy == GeographicStrategy.ADMIN_AREA);
-                    if (candidate != null) {
-                        candidates.add(candidate);
+                    if (isReadTimeout) {
+                        log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=read_timeout cooldownSeconds={}",
+                                campaignId, host, timeoutCooldownSeconds);
+                        circuitBreaker.recordRateLimited(host, timeoutCooldownSeconds);
+                        continue;
+                    }
+
+                    if (is504) {
+                        log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=504_gateway_timeout cooldownSeconds={}",
+                                campaignId, host, timeoutCooldownSeconds);
+                        circuitBreaker.recordRateLimited(host, timeoutCooldownSeconds);
+                        continue;
+                    }
+
+                    boolean retryable = isRetryable(e);
+
+                    if (retryable) {
+                        circuitBreaker.recordFailure(host);
+                        continue;
+                    }
+
+                    if (requestSent) {
+                        circuitBreaker.recordSuccess(host);
+                    } else {
+                        circuitBreaker.releaseProbe(host);
+                    }
+
+                    return AreaQueryResult.queryError("OSM_OVERPASS_QUERY_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage(), elapsedMs);
+                } finally {
+                    if (acquired) {
+                        overpassSemaphore.release();
                     }
                 }
+            }
 
-                log.info("[osm] area_query_success campaignId={} depth={} phase={} geographicStrategy={} endpointHost={} rawElements={} mapped={} saturated={} elapsedMs={}",
-                        campaignId, region.depth(), phase, geographicStrategy, host, rawLeadElements, candidates.size(), saturated, elapsedMs);
+            // All endpoints were skipped (circuit open) or all failed with continue
+            if (!anyEndpointTried) {
+                long minWaitMs = circuitBreaker.getMinWaitMsForAvailableEndpoint();
+                if (minWaitMs > 0 && minWaitMs != Long.MAX_VALUE) {
+                    long remainingBudgetMs = budget.remainingMs();
+                    if (remainingBudgetMs <= 0) {
+                        if (anyHttpAttemptMade) {
+                            return AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Budget esgotado aguardando endpoint disponível", elapsedMs(startNs));
+                        } else {
+                            return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget esgotado aguardando endpoint disponível", elapsedMs(startNs));
+                        }
+                    }
 
-                circuitBreaker.recordSuccess(host);
-                return AreaQueryResult.success(candidates, saturated, host, elapsedMs);
+                    long waitMs = Math.min(minWaitMs, remainingBudgetMs);
 
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                circuitBreaker.releaseProbe(host);
+                    log.info("[osm] overpass_waiting_for_endpoint campaignId={} depth={} phase={} waitMs={} remainingBudgetMs={} nextEndpointCheckMs={}",
+                            campaignId, region.depth(), phase, waitMs, remainingBudgetMs, minWaitMs);
 
-                log.warn("[osm] overpass_interrupted campaignId={} depth={} phase={} endpointHost={} requestSent={}",
-                        campaignId, region.depth(), phase, host, requestSent);
-
-                return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida antes da conclusão da chamada Overpass.", elapsedMs(startNs));
-
-            } catch (Exception e) {
-                FailureDetails fd = getFailureDetails(e);
-                long elapsedMs = elapsedMs(startNs);
-                log.warn("[osm] overpass_failed campaignId={} depth={} phase={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} elapsedMs={}",
-                        campaignId, region.depth(), phase, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), elapsedMs);
-
-                if (isRateLimited(e)) {
-                    long cooldownSeconds = resolveRetryAfterSeconds(e);
-                    circuitBreaker.recordRateLimited(host, cooldownSeconds);
-
-                    log.warn("[osm] endpoint_rate_limited campaignId={} endpointHost={} cooldownSeconds={} source=429",
-                            campaignId, host, cooldownSeconds);
-
+                    try {
+                        Thread.sleep(waitMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        if (anyHttpAttemptMade) {
+                            return AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida aguardando endpoint Overpass", elapsedMs(startNs));
+                        } else {
+                            return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida aguardando endpoint Overpass", elapsedMs(startNs));
+                        }
+                    }
+                    // Loop continues, re-evaluate endpoints
                     continue;
                 }
+            }
 
-                boolean isConnectionRefused = isConnectionRefused(e);
-                boolean isReadTimeout = isReadTimeout(e);
-                boolean is504 = is504(e);
-                boolean timeoutOr504 = isTimeoutOr504(e);
-
-                if (isConnectionRefused) {
-                    log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=connection_refused cooldownSeconds={}",
-                            campaignId, host, connectionRefusedCooldownSeconds);
-                    circuitBreaker.recordRateLimited(host, connectionRefusedCooldownSeconds);
-                    continue;
-                }
-
-                if (isReadTimeout) {
-                    log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=read_timeout cooldownSeconds={}",
-                            campaignId, host, timeoutCooldownSeconds);
-                    circuitBreaker.recordRateLimited(host, timeoutCooldownSeconds);
-                    continue;
-                }
-
-                if (is504) {
-                    log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=504_gateway_timeout cooldownSeconds={}",
-                            campaignId, host, timeoutCooldownSeconds);
-                    circuitBreaker.recordRateLimited(host, timeoutCooldownSeconds);
-                    continue;
-                }
-
-                boolean shouldSplitImmediately = timeoutOr504
-                        && region.maxEdgeKm() > failureSplitThresholdKm
-                        && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm);
-
-                if (shouldSplitImmediately) {
-                    circuitBreaker.releaseProbe(host);
-
-                    log.info("[osm] region_split_immediate campaignId={} depth={} phase={} endpointHost={} maxEdgeKm={} thresholdKm={} reason=timeout_or_504",
-                            campaignId, region.depth(), phase, host, region.maxEdgeKm(), failureSplitThresholdKm);
-
-                    return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Região ainda grande após timeout/504; subdividindo antes de failover.", elapsedMs);
-                }
-
-                boolean retryable = isRetryable(e);
-
-                if (retryable) {
-                    circuitBreaker.recordFailure(host);
-                    continue;
-                }
-
-                if (requestSent) {
-                    circuitBreaker.recordSuccess(host);
-                } else {
-                    circuitBreaker.releaseProbe(host);
-                }
-
-                return AreaQueryResult.queryError("OSM_OVERPASS_QUERY_ERROR", "Falha não recuperável no Overpass: " + fd.safeMessage(), elapsedMs);
-            } finally {
-                if (acquired) {
-                    overpassSemaphore.release();
-                }
+            // If we got here, either some endpoint was tried (and all failed with non-retryable errors)
+            // or no endpoints are known. Return the failure.
+            long elapsedMs = elapsedMs(startNs);
+            if (anyHttpAttemptMade) {
+                return AreaQueryResult.infraUnavailableWithAttempt("OSM_ALL_ENDPOINTS_FAILED", "Todos os endpoints Overpass indisponíveis", elapsedMs);
+            } else {
+                return AreaQueryResult.infraUnavailable("OSM_ALL_ENDPOINTS_FAILED", "Todos os endpoints Overpass indisponíveis", elapsedMs);
             }
         }
 
         long elapsedMs = elapsedMs(startNs);
-        return AreaQueryResult.infraUnavailable("OSM_ALL_ENDPOINTS_FAILED", "Todos os endpoints Overpass indisponíveis", elapsedMs);
+        if (anyHttpAttemptMade) {
+            return AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Budget de descoberta esgotado", elapsedMs);
+        } else {
+            return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget de descoberta esgotado", elapsedMs);
+        }
     }
 
     // Compatibilidade temporária com assinatura antiga
@@ -699,16 +772,13 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 continue;
             }
 
-            for (String contactKey : CONTACT_KEYS) {
-
-                sb.append("nwr")
-                        .append(tagFilter)
-                        .append("[\"")
-                        .append(escapeTag(contactKey))
-                        .append("\"]")
-                        .append(locationFilter)
-                        .append(";");
-            }
+            sb.append("nwr")
+                    .append(tagFilter)
+                    .append("[\"~\"")
+                    .append(escapeTag(CONTACT_KEYS_REGEX))
+                    .append("\"]")
+                    .append(locationFilter)
+                    .append(";");
         }
 
         sb.append(");out center tags ")
@@ -748,15 +818,13 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
         sb.append("(");
 
-        for (String contactKey : CONTACT_KEYS) {
-            sb.append("nwr[\"name\"~\"")
-                    .append(fallbackRegex)
-                    .append("\",i][\"")
-                    .append(escapeTag(contactKey))
-                    .append("\"]")
-                    .append(locationFilter)
-                    .append(";");
-        }
+        sb.append("nwr[\"name\"~\"")
+                .append(fallbackRegex)
+                .append("\",i][\"~\"")
+                .append(escapeTag(CONTACT_KEYS_REGEX))
+                .append("\"]")
+                .append(locationFilter)
+                .append(";");
 
         sb.append(");out center tags ")
                 .append(Math.min(limit, MAX_OUT))
@@ -1151,6 +1219,45 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                     es.halfOpenInFlight = false;
                 }
             }
+        }
+
+        /**
+         * Returns the minimum milliseconds until any known endpoint becomes available for a probe (HALF_OPEN).
+         * Returns 0 if any endpoint is currently CLOSED or HALF_OPEN (no probe in flight).
+         * Returns Long.MAX_VALUE if no endpoints are known.
+         */
+        long getMinWaitMsForAvailableEndpoint() {
+            long now = System.currentTimeMillis();
+            long minWait = Long.MAX_VALUE;
+            boolean anyKnown = false;
+
+            for (EndpointState es : states.values()) {
+                anyKnown = true;
+                synchronized (es) {
+                    if (es.state == EndpointState.State.CLOSED) {
+                        return 0L;
+                    }
+                    if (es.state == EndpointState.State.HALF_OPEN) {
+                        if (!es.halfOpenInFlight) {
+                            return 0L;
+                        }
+                        // Half-open but probe in flight, wait for it to complete (conservative: assume openSeconds)
+                        minWait = Math.min(minWait, openSeconds * 1000L);
+                    } else if (es.state == EndpointState.State.OPEN) {
+                        long until = es.openUntilEpochMs > 0L
+                                ? es.openUntilEpochMs
+                                : es.openSince + openSeconds * 1000L;
+                        long wait = until - now;
+                        if (wait < 0) wait = 0;
+                        minWait = Math.min(minWait, wait);
+                    }
+                }
+            }
+
+            if (!anyKnown) {
+                return 0L;
+            }
+            return minWait;
         }
     }
 }
