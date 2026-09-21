@@ -40,17 +40,24 @@ function sessionsRouter({ sessionManager, config, auth }) {
     return res.json({ sessionId: config.sessionId, ...status });
   }
 
+  async function handleReset(req, res) {
+    const status = await sessionManager.resetSession();
+    return res.json({ sessionId: config.sessionId, ...status });
+  }
+
   // Rotas canonicas (sessao unica, sem companyId na URL).
   router.post('/internal/whatsapp/session/connect', handleConnect);
   router.get('/internal/whatsapp/session/status', handleStatus);
   router.get('/internal/whatsapp/session/qr', handleQr);
   router.post('/internal/whatsapp/session/logout', handleLogout);
+  router.post('/internal/whatsapp/session/reset', handleReset);
 
   // Alias compativel com arquitetura anterior /sessions/{sessionId}/...
   router.post('/internal/whatsapp/sessions/:sessionId/connect', checkSessionParam, handleConnect);
   router.get('/internal/whatsapp/sessions/:sessionId/status', checkSessionParam, handleStatus);
   router.get('/internal/whatsapp/sessions/:sessionId/qr', checkSessionParam, handleQr);
   router.post('/internal/whatsapp/sessions/:sessionId/logout', checkSessionParam, handleLogout);
+  router.post('/internal/whatsapp/sessions/:sessionId/reset', checkSessionParam, handleReset);
 
   return router;
 }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.exception.ApiException;
+import com.gendaz.leads.util.CountryCodeResolver;
 import com.gendaz.leads.util.Normalizer;
 import com.gendaz.leads.util.SsrfGuard;
 import jakarta.annotation.PostConstruct;
@@ -60,6 +61,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.fallback-url:}")
     private String fallbackUrl;
 
+    @Value("${app.discovery.osm.nominatim-base-url:https://nominatim.openstreetmap.org}")
+    private String nominatimBaseUrl;
+
+    @Value("${app.discovery.osm.nominatim-429-backoff-ms:3000}")
+    private long nominatim429BackoffMs;
+
     @Value("${app.discovery.osm.max-concurrency:1}")
     private int maxConcurrency;
 
@@ -88,7 +95,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     private OverpassCircuitBreaker circuitBreaker;
     private Semaphore overpassSemaphore;
 
-    private final Map<String, TimedValue<ResolvedCountry>> countryCache = new ConcurrentHashMap<>();
     private final Map<String, TimedValue<GeoScope>> geoCache = new ConcurrentHashMap<>();
 
     private final Object nominatimRateLock = new Object();
@@ -101,8 +107,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             return System.currentTimeMillis() < expiresAtMs;
         }
     }
-
-    record ResolvedCountry(String countryCode, String countryName) {}
 
     record FailureDetails(String rootCauseType, String safeMessage) {}
 
@@ -120,8 +124,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         this.overpassSemaphore = new Semaphore(Math.max(1, maxConcurrency), true);
         this.circuitBreaker = new OverpassCircuitBreaker(circuitOpenSeconds);
         List<String> endpoints = buildEndpointList();
-        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} queryMaxEdgeKm={} failureSplitThresholdKm={} adaptiveMaxDepth={} adaptiveMinEdgeKm={} rateLimitCooldownSeconds={}",
-                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, queryMaxEdgeKm, failureSplitThresholdKm, adaptiveMaxDepth, adaptiveMinEdgeKm, rateLimitCooldownSeconds);
+        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} nominatimBaseUrl={} nominatim429BackoffMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} queryMaxEdgeKm={} failureSplitThresholdKm={} adaptiveMaxDepth={} adaptiveMinEdgeKm={} rateLimitCooldownSeconds={}",
+                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, nominatimBaseUrl, nominatim429BackoffMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, queryMaxEdgeKm, failureSplitThresholdKm, adaptiveMaxDepth, adaptiveMinEdgeKm, rateLimitCooldownSeconds);
     }
 
     private RestClient client(int effectiveTimeoutMs) {
@@ -256,17 +260,17 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             DiscoveryBudget budget
     ) {
         String cityKey = request.city().trim().toLowerCase();
-        String countryKey = request.country().trim().toLowerCase();
-        String cacheKey = "geo:" + cityKey + "|" + countryKey;
+        String requestedCountryCode = CountryCodeResolver.resolveToIso2(request.country());
+        String cacheKey = "geo:" + cityKey + "|" + requestedCountryCode;
 
         TimedValue<GeoScope> cached = geoCache.get(cacheKey);
         if (cached != null && cached.valid()) {
-            log.info("[osm] geocode_cache_hit campaignId={} city={} country={}", request.campaignId(), request.city(), request.country());
+            log.info("[osm] geocode_cache_hit campaignId={} city={} countryCode={}", request.campaignId(), request.city(), requestedCountryCode);
             return cached.value();
         }
 
-        ResolvedCountry resolved = resolveRequestedCountryCode(request.country(), budget, request.campaignId());
-        String requestedCountryCode = resolved.countryCode();
+        log.info("[osm] country_resolved_local campaignId={} requestedCountry={} countryCode={}",
+                request.campaignId(), request.country(), requestedCountryCode);
 
         String response;
         Exception lastFailure = null;
@@ -287,7 +291,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 response = client(effectiveTimeout).get()
                         .uri(uriBuilder -> uriBuilder
                                 .scheme("https")
-                                .host("nominatim.openstreetmap.org")
+                                .host(nominatimBaseUrl.replace("https://", "").replace("http://", ""))
                                 .path("/search")
                                 .queryParam("q", request.city())
                                 .queryParam("countrycodes", requestedCountryCode)
@@ -355,6 +359,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 lastFailure = e;
                 boolean retryable = isRetryable(e);
                 FailureDetails fd = getFailureDetails(e);
+                long retryDelayMs = 0;
+                if (e instanceof HttpStatusCodeException http && http.getStatusCode().value() == 429) {
+                    retryDelayMs = resolveRetryAfterMs(http);
+                    log.warn("[osm] nominatim_rate_limited campaignId={} city={} countryCode={} attempt={}/{} retryDelayMs={}",
+                            request.campaignId(), request.city(), requestedCountryCode, attempt, nominatimMaxAttempts, retryDelayMs);
+                }
                 log.warn("[osm] geocode_failed campaignId={} attempt={}/{} errorType={} rootCauseType={} rootCauseMessage={} retryable={}",
                         request.campaignId(), attempt, nominatimMaxAttempts, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
                 if (!retryable) throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR", "Falha não recuperável: " + fd.safeMessage());
@@ -604,78 +614,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
             lastNominatimRequestAtMs = System.currentTimeMillis();
         }
-    }
-
-    private ResolvedCountry resolveRequestedCountryCode(String requestedCountry, DiscoveryBudget budget, Long campaignId) {
-        String cacheKey = "country:" + requestedCountry.trim().toLowerCase();
-        TimedValue<ResolvedCountry> cached = countryCache.get(cacheKey);
-        if (cached != null && cached.valid()) {
-            log.info("[osm] country_cache_hit campaignId={} requestedCountry={} resolvedCountryCode={}", campaignId, requestedCountry, cached.value().countryCode());
-            return cached.value();
-        }
-
-        Exception lastFailure = null;
-        for (int attempt = 1; attempt <= nominatimMaxAttempts; attempt++) {
-            if (budget.expired()) {
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante resolução de país");
-            }
-
-            awaitNominatimSlot(budget);
-
-            int effectiveTimeout = budget.clampTimeout(nominatimTimeoutMs);
-            if (effectiveTimeout <= 0) {
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Budget esgotado antes da chamada ao Nominatim.");
-            }
-
-            try {
-                String response = client(effectiveTimeout).get()
-                        .uri(uriBuilder -> uriBuilder
-                                .scheme("https").host("nominatim.openstreetmap.org").path("/search")
-                                .queryParam("q", requestedCountry)
-                                .queryParam("format", "json")
-                                .queryParam("limit", "5")
-                                .queryParam("addressdetails", "1")
-                                .queryParam("featuretype", "country")
-                                .build())
-                        .retrieve()
-                        .body(String.class);
-
-                JsonNode arr = objectMapper.readTree(response);
-                if (!arr.isArray() || arr.isEmpty()) {
-                    throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND", "País não encontrado: " + requestedCountry);
-                }
-
-                for (JsonNode hit : arr) {
-                    JsonNode address = hit.path("address");
-                    String countryCode = address.path("country_code").asText(null);
-                    String countryName = address.path("country").asText(null);
-                    if (countryCode != null && !countryCode.isBlank()) {
-                        String normalizedCode = countryCode.trim().toLowerCase();
-                        String normalizedName = countryName != null ? countryName.trim() : requestedCountry;
-                        log.info("[osm] country_resolved campaignId={} requestedCountry={} resolvedCountryCode={} resolvedCountryName={}",
-                                campaignId, requestedCountry, normalizedCode, normalizedName);
-                        ResolvedCountry resolved = new ResolvedCountry(normalizedCode, normalizedName);
-                        countryCache.put(cacheKey, new TimedValue<>(resolved, System.currentTimeMillis() + nominatimCacheSeconds * 1000L));
-                        return resolved;
-                    }
-                }
-
-                throw new ApiException(HttpStatus.NOT_FOUND, "LOCATION_NOT_FOUND", "País não encontrado: " + requestedCountry);
-
-            } catch (ApiException e) {
-                throw e;
-            } catch (RestClientException | java.io.IOException e) {
-                lastFailure = e;
-                boolean retryable = isRetryable(e);
-                FailureDetails fd = getFailureDetails(e);
-                log.warn("[osm] country_resolve_failed campaignId={} attempt={}/{} errorType={} rootCauseType={} rootCauseMessage={} retryable={}",
-                        campaignId, attempt, nominatimMaxAttempts, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
-                if (!retryable) throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR", "Falha não recuperável ao resolver país: " + fd.safeMessage());
-            }
-        }
-
-        throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR",
-                "Falha ao resolver país após retentativas: " + requestedCountry);
     }
 
     String buildStructuredQuery(
@@ -947,6 +885,38 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
     private long elapsedMs(long startNs) {
         return (System.nanoTime() - startNs) / 1_000_000L;
+    }
+
+    private long resolveRetryAfterMs(HttpStatusCodeException http) {
+        String retryAfter = http.getResponseHeaders() != null
+                ? http.getResponseHeaders().getFirst("Retry-After")
+                : null;
+
+        if (retryAfter == null || retryAfter.isBlank()) {
+            return nominatim429BackoffMs;
+        }
+
+        try {
+            long seconds = Long.parseLong(retryAfter.trim());
+            return Math.max(1L, seconds) * 1000L;
+        } catch (NumberFormatException ignored) {
+        }
+
+        try {
+            java.time.ZonedDateTime retryAt = java.time.ZonedDateTime.parse(
+                    retryAfter.trim(),
+                    java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+            );
+
+            long millis = java.time.Duration.between(
+                    java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC),
+                    retryAt.withZoneSameInstant(java.time.ZoneOffset.UTC)
+            ).toMillis();
+
+            return Math.max(1L, millis);
+        } catch (RuntimeException ignored) {
+            return nominatim429BackoffMs;
+        }
     }
 
     private boolean isRateLimited(Throwable throwable) {

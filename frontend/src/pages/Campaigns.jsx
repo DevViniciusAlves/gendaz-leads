@@ -14,6 +14,9 @@ export function Campaigns() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [countries, setCountries] = useState([])
+  const [countriesLoading, setCountriesLoading] = useState(true)
+  const [countriesError, setCountriesError] = useState('')
   const navigate = useNavigate()
   const { push } = useToast()
 
@@ -28,14 +31,26 @@ export function Campaigns() {
 
   useEffect(load, [push])
 
+  useEffect(() => {
+    api.get('/api/meta/countries')
+      .then((data) => {
+        setCountries(data)
+        setCountriesLoading(false)
+      })
+      .catch((err) => {
+        setCountriesError(err.message)
+        setCountriesLoading(false)
+      })
+  }, [])
+
   async function createCampaign(e) {
     e.preventDefault()
     const niche = e.target.niche.value.trim()
     const city = e.target.city.value.trim()
-    const country = e.target.country.value.trim()
+    const country = e.target.country.value
     const quantity = Number(e.target.quantity.value)
     if (!niche || !city || !country) {
-      push('Preencha nicho, cidade e pais.', 'error')
+      push('Preencha nicho, cidade e país.', 'error')
       return
     }
     try {
@@ -153,6 +168,9 @@ export function Campaigns() {
             </>
           }
         >
+          {countriesError && (
+            <div className="error-state">Erro ao carregar países: {countriesError}</div>
+          )}
           <form id="campaign-form" onSubmit={createCampaign}>
             <div className="field">
               <label htmlFor="niche">Nicho</label>
@@ -163,8 +181,24 @@ export function Campaigns() {
               <input id="city" name="city" placeholder="Ex: Sao Paulo" required />
             </div>
             <div className="field">
-              <label htmlFor="country">Pais</label>
-              <input id="country" name="country" placeholder="Ex: Brasil" required />
+              <label htmlFor="country">País</label>
+              <select
+                id="country"
+                name="country"
+                defaultValue="br"
+                required
+                disabled={countriesLoading || countries.length === 0}
+              >
+                {countries.map((country) => (
+                  <option key={country.code} value={country.code}>
+                    {country.name}
+                  </option>
+                ))}
+              </select>
+              {countriesLoading && <div className="hint">Carregando países...</div>}
+              {countries.length === 0 && !countriesLoading && !countriesError && (
+                <div className="hint">Nenhum país disponível</div>
+              )}
             </div>
             <div className="field">
               <label htmlFor="quantity">Quantidade</label>
@@ -177,7 +211,7 @@ export function Campaigns() {
                 defaultValue="10"
                 required
               />
-              <div className="hint">Minimo 3, maximo 30.</div>
+              <div className="hint">Mínimo 3, máximo 30.</div>
             </div>
           </form>
         </Modal>

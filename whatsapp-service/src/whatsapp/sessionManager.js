@@ -161,6 +161,11 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
       if (state.shuttingDown) return;
       const { connection, lastDisconnect, qr } = update || {};
       if (qr) setQr(qr);
+      
+      // Detectar erro "Bad MAC" no lastDisconnect
+      const errorMessage = lastDisconnect?.error?.message || '';
+      const isBadMac = errorMessage.includes('Bad MAC') || errorMessage.includes('bad mac');
+      
       if (connection === 'connecting') {
         if (state.status !== STATES.QR_REQUIRED) setStatus(STATES.CONNECTING);
       } else if (connection === 'open') {
@@ -195,6 +200,12 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
         const loggedOut = DisconnectReason && code === DisconnectReason.loggedOut;
         const forbidden = DisconnectReason && code === DisconnectReason.forbidden;
         const replaced = DisconnectReason && code === DisconnectReason.connectionReplaced;
+        if (isBadMac) {
+          log.error && log.error('Bad MAC detectado na sessão WhatsApp; marcando erro e bloqueando reconnect automático.');
+          state.reconnectAttempts = 0;
+          setStatus(STATES.ERROR, 'bad_mac');
+          return;
+        }
         if (loggedOut) {
           await flushCredsWrites(); // propagate errors for observability
           await authStore.clear(); // propagate errors for observability
@@ -277,6 +288,22 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     setQr(null);
     state.reconnectAttempts = 0;
     setStatus(STATES.LOGGED_OUT);
+    return publicStatus();
+  }
+
+  async function resetSession() {
+    clearReconnectTimer();
+    state.socketGeneration += 1;
+    if (state.sock && typeof state.sock.end === 'function') {
+      await state.sock.end();
+    }
+    state.sock = null;
+    await flushCredsWrites();
+    await authStore.clear();
+    setQr(null);
+    state.reconnectAttempts = 0;
+    setStatus(STATES.NOT_CONNECTED);
+    log.info && log.info('Sessão WhatsApp resetada manualmente; aguardando novo QR.');
     return publicStatus();
   }
 
@@ -408,6 +435,7 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     connect,
     connectInternal,
     logout,
+    resetSession,
     shutdown,
     getQr,
     publicStatus,

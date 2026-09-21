@@ -7,6 +7,7 @@ import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.repository.CampaignRepository;
 import com.gendaz.leads.repository.UserRepository;
 import com.gendaz.leads.security.SecurityService;
+import com.gendaz.leads.util.CountryCodeResolver;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -43,7 +44,8 @@ public class CampaignCreateTransactionService {
                 .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "Usuario nao encontrado."));
         
         String city = request.city().trim();
-        String country = request.country().trim();
+        String countryCode = CountryCodeResolver.resolveToIso2(request.country());
+        String country = CountryCodeResolver.displayNamePtBr(countryCode);
         String location = city + ", " + country;
         String name = request.niche() + " — " + location;
         
