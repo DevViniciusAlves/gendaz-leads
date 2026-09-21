@@ -1,0 +1,780 @@
+package com.gendaz.leads.service;
+
+import com.gendaz.leads.domain.LeadCandidate;
+import com.gendaz.leads.entity.Campaign;
+import com.gendaz.leads.entity.Lead;
+import com.gendaz.leads.entity.LeadEvent;
+import com.gendaz.leads.repository.CampaignRepository;
+import com.gendaz.leads.repository.CampaignLeadRepository;
+import com.gendaz.leads.repository.LeadEventRepository;
+import com.gendaz.leads.repository.LeadRepository;
+import com.gendaz.leads.service.provider.AreaQueryPhase;
+import com.gendaz.leads.service.provider.AreaQueryResult;
+import com.gendaz.leads.service.provider.DiscoveryBudget;
+import com.gendaz.leads.service.provider.GeoScope;
+import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
+import com.gendaz.leads.service.provider.NicheMapper;
+import com.gendaz.leads.service.provider.OpenStreetMapProvider;
+import com.gendaz.leads.service.provider.SearchRegion;
+import com.gendaz.leads.util.Normalizer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import com.gendaz.leads.exception.ApiException;
+
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.Set;
+
+@Service
+public class CampaignLeadDiscoveryService {
+
+    private static final Logger log =
+            LoggerFactory.getLogger(CampaignLeadDiscoveryService.class);
+
+    private final CampaignRepository campaignRepository;
+    private final CampaignLeadRepository campaignLeadRepository;
+    private final LeadRepository leadRepository;
+    private final LeadEventRepository leadEventRepository;
+    private final DeduplicationService deduplicationService;
+    private final CampaignLeadPersistenceService persistenceService;
+    private final WebsiteContactEnricher websiteContactEnricher;
+    private final Normalizer normalizer;
+    private final OpenStreetMapProvider osm;
+
+    @Value("${app.discovery.osm.base-budget-ms:90000}")
+    private long baseBudgetMs;
+
+    @Value("${app.discovery.osm.per-lead-budget-ms:3000}")
+    private long perLeadBudgetMs;
+
+    @Value("${app.discovery.osm.max-budget-ms:180000}")
+    private long maxBudgetMs;
+
+    @Value("${app.discovery.osm.query-min-raw-limit:40}")
+    private int queryMinRawLimit;
+
+    @Value("${app.discovery.osm.query-raw-per-lead:8}")
+    private int queryRawPerLead;
+
+    @Value("${app.discovery.osm.adaptive-max-depth:6}")
+    private int adaptiveMaxDepth;
+
+    @Value("${app.discovery.osm.adaptive-min-edge-km:2.0}")
+    private double adaptiveMinEdgeKm;
+
+    public CampaignLeadDiscoveryService(
+            CampaignRepository campaignRepository,
+            CampaignLeadRepository campaignLeadRepository,
+            LeadRepository leadRepository,
+            LeadEventRepository leadEventRepository,
+            DeduplicationService deduplicationService,
+            CampaignLeadPersistenceService persistenceService,
+            WebsiteContactEnricher websiteContactEnricher,
+            Normalizer normalizer,
+            OpenStreetMapProvider osm
+    ) {
+        this.campaignRepository = campaignRepository;
+        this.campaignLeadRepository = campaignLeadRepository;
+        this.leadRepository = leadRepository;
+        this.leadEventRepository = leadEventRepository;
+        this.deduplicationService = deduplicationService;
+        this.persistenceService = persistenceService;
+        this.websiteContactEnricher = websiteContactEnricher;
+        this.normalizer = normalizer;
+        this.osm = osm;
+    }
+
+    public DiscoveryExecutionResult discoverAndPersist(
+            Campaign campaign,
+            int targetToAdd
+    ) {
+        if (targetToAdd <= 0) {
+            int total = (int) campaignLeadRepository
+                    .countByCampaignId(campaign.getId());
+
+            return new DiscoveryExecutionResult(
+                    DiscoveryExecutionResult.Outcome.COMPLETE,
+                    0,
+                    total,
+                    0,
+                    0,
+                    0,
+                    0,
+                    true,
+                    null,
+                    null
+            );
+        }
+
+        validateCampaignLocation(campaign);
+
+        DiscoveryBudget budget =
+                DiscoveryBudget.forTarget(
+                        targetToAdd,
+                        baseBudgetMs,
+                        perLeadBudgetMs,
+                        maxBudgetMs
+                );
+
+        LeadDiscoveryRequest request =
+                new LeadDiscoveryRequest(
+                        campaign.getId(),
+                        campaign.getNiche(),
+                        campaign.getCity(),
+                        campaign.getCountry(),
+                        targetToAdd
+                );
+
+        GeoScope scope =
+                osm.resolveScope(
+                        request,
+                        budget
+                );
+
+        PriorityQueue<SearchRegion> queue =
+                new PriorityQueue<>(
+                        Comparator
+                                .comparingDouble(
+                                        SearchRegion::distanceFromCityCenterKm
+                                )
+                                .thenComparingInt(SearchRegion::depth)
+                                .thenComparingDouble(SearchRegion::south)
+                                .thenComparingDouble(SearchRegion::west)
+                );
+
+        queue.add(scope.rootRegion());
+
+        Set<String> seenSourceIds =
+                new HashSet<>();
+
+        Map<String, WebsiteContactEnricher.WebsiteContactData>
+                enrichmentCache =
+                new HashMap<>();
+
+        int accepted = 0;
+        int areasAttempted = 0;
+        int areasSucceeded = 0;
+        int areasSplit = 0;
+        int areasSkipped = 0;
+
+        boolean anyValidQuery = false;
+        boolean infraDegraded = false;
+
+        String preferredEndpointHost = null;
+        String finalErrorCode = null;
+        String finalErrorMessage = null;
+
+        while (
+                !queue.isEmpty()
+                && accepted < targetToAdd
+                && !budget.expired()
+        ) {
+            SearchRegion region = queue.poll();
+
+            int remainingUseful =
+                    targetToAdd - accepted;
+
+            int rawLimit =
+                    calculateRawLimit(remainingUseful);
+
+            NicheMapper.NicheStrategy strategy =
+                    NicheMapper.resolve(campaign.getNiche());
+
+            boolean hasStructured =
+                    !strategy.tagFilters().isEmpty();
+
+            if (hasStructured) {
+                areasAttempted++;
+
+                AreaQueryResult structured =
+                        osm.queryRegion(
+                                scope,
+                                campaign.getNiche(),
+                                region,
+                                AreaQueryPhase.STRUCTURED,
+                                rawLimit,
+                                preferredEndpointHost,
+                                budget,
+                                campaign.getId()
+                        );
+
+                if (structured.outcome()
+                        == AreaQueryResult.Outcome.SUCCESS) {
+
+                    anyValidQuery = true;
+                    areasSucceeded++;
+
+                    if (structured.endpointHost() != null) {
+                        preferredEndpointHost =
+                                structured.endpointHost();
+                    }
+
+                    accepted += acceptCandidates(
+                            campaign,
+                            structured.candidates(),
+                            targetToAdd - accepted,
+                            seenSourceIds,
+                            enrichmentCache
+                    );
+
+                    updateProgress(
+                            campaign,
+                            accepted,
+                            targetToAdd
+                    );
+
+                    if (accepted >= targetToAdd) {
+                        break;
+                    }
+
+                    if (structured.saturated()) {
+                        if (region.canSplit(
+                                adaptiveMaxDepth,
+                                adaptiveMinEdgeKm
+                        )) {
+                            queue.addAll(
+                                    region.split(
+                                            scope.lat(),
+                                            scope.lon()
+                                    )
+                            );
+
+                            areasSplit++;
+                            continue;
+                        }
+
+                        infraDegraded = true;
+                        finalErrorCode =
+                                "OSM_REGION_SATURATED";
+
+                        finalErrorMessage =
+                                "Região atingiu o limite de resultados e não pode ser subdividida novamente.";
+
+                        continue;
+                    }
+
+                } else if (
+                        structured.outcome()
+                                == AreaQueryResult.Outcome.SPLIT_REQUIRED
+                ) {
+
+                    if (region.canSplit(
+                            adaptiveMaxDepth,
+                            adaptiveMinEdgeKm
+                    )) {
+                        queue.addAll(
+                                region.split(
+                                        scope.lat(),
+                                        scope.lon()
+                                )
+                        );
+
+                        areasSplit++;
+                        continue;
+                    }
+
+                    infraDegraded = true;
+                    finalErrorCode =
+                            structured.errorCode();
+                    finalErrorMessage =
+                            structured.errorMessage();
+
+                    continue;
+
+                } else if (
+                        structured.outcome()
+                                == AreaQueryResult.Outcome.INFRA_UNAVAILABLE
+                ) {
+
+                    infraDegraded = true;
+                    finalErrorCode =
+                            structured.errorCode();
+                    finalErrorMessage =
+                            structured.errorMessage();
+
+                    break;
+
+                } else {
+                    throw new ApiException(
+                            HttpStatus.BAD_GATEWAY,
+                            structured.errorCode(),
+                            structured.errorMessage()
+                    );
+                }
+            }
+
+            if (
+                    accepted < targetToAdd
+                    && !budget.expired()
+            ) {
+                areasAttempted++;
+
+                AreaQueryResult fallback =
+                        osm.queryRegion(
+                                scope,
+                                campaign.getNiche(),
+                                region,
+                                AreaQueryPhase.NAME_FALLBACK,
+                                rawLimit,
+                                preferredEndpointHost,
+                                budget,
+                                campaign.getId()
+                        );
+
+                if (fallback.outcome()
+                        == AreaQueryResult.Outcome.SUCCESS) {
+
+                    anyValidQuery = true;
+                    areasSucceeded++;
+
+                    if (fallback.endpointHost() != null) {
+                        preferredEndpointHost =
+                                fallback.endpointHost();
+                    }
+
+                    accepted += acceptCandidates(
+                            campaign,
+                            fallback.candidates(),
+                            targetToAdd - accepted,
+                            seenSourceIds,
+                            enrichmentCache
+                    );
+
+                    updateProgress(
+                            campaign,
+                            accepted,
+                            targetToAdd
+                    );
+
+                    if (accepted >= targetToAdd) {
+                        break;
+                    }
+
+                    if (fallback.saturated()) {
+                        if (region.canSplit(
+                                adaptiveMaxDepth,
+                                adaptiveMinEdgeKm
+                        )) {
+                            queue.addAll(
+                                    region.split(
+                                            scope.lat(),
+                                            scope.lon()
+                                    )
+                            );
+
+                            areasSplit++;
+                        } else {
+                            infraDegraded = true;
+                            finalErrorCode =
+                                    "OSM_REGION_SATURATED";
+
+                            finalErrorMessage =
+                                    "Fallback atingiu o limite e a região não pode ser subdividida novamente.";
+                        }
+                    }
+
+                } else if (
+                        fallback.outcome()
+                                == AreaQueryResult.Outcome.SPLIT_REQUIRED
+                ) {
+
+                    if (region.canSplit(
+                            adaptiveMaxDepth,
+                            adaptiveMinEdgeKm
+                    )) {
+                        queue.addAll(
+                                region.split(
+                                        scope.lat(),
+                                        scope.lon()
+                                )
+                        );
+
+                        areasSplit++;
+                    } else {
+                        infraDegraded = true;
+                        finalErrorCode =
+                                fallback.errorCode();
+                        finalErrorMessage =
+                                fallback.errorMessage();
+                    }
+
+                } else if (
+                        fallback.outcome()
+                                == AreaQueryResult.Outcome.INFRA_UNAVAILABLE
+                ) {
+
+                    infraDegraded = true;
+                    finalErrorCode =
+                            fallback.errorCode();
+                    finalErrorMessage =
+                            fallback.errorMessage();
+
+                    break;
+
+                } else {
+                    throw new ApiException(
+                            HttpStatus.BAD_GATEWAY,
+                            fallback.errorCode(),
+                            fallback.errorMessage()
+                    );
+                }
+            }
+        }
+
+        boolean coverageExhausted = queue.isEmpty();
+
+        int totalCampaignLeads =
+                (int) campaignLeadRepository
+                        .countByCampaignId(
+                                campaign.getId()
+                        );
+
+        DiscoveryExecutionResult.Outcome outcome;
+
+        if (accepted >= targetToAdd) {
+            outcome =
+                    DiscoveryExecutionResult.Outcome.COMPLETE;
+
+        } else if (accepted > 0) {
+            outcome =
+                    DiscoveryExecutionResult.Outcome.PARTIAL;
+
+            if (finalErrorMessage == null) {
+                finalErrorMessage =
+                        budget.expired()
+                                ? "Budget de descoberta esgotado após encontrar parte dos leads."
+                                : "A região pesquisada não forneceu a quantidade total de leads úteis.";
+            }
+
+        } else if (!anyValidQuery && infraDegraded) {
+            outcome =
+                    DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE;
+
+        } else if (budget.expired() && !coverageExhausted) {
+            outcome =
+                    DiscoveryExecutionResult.Outcome.BUDGET_EXHAUSTED;
+
+            if (finalErrorCode == null) {
+                finalErrorCode =
+                        "OSM_DISCOVERY_BUDGET_EXHAUSTED";
+            }
+
+            if (finalErrorMessage == null) {
+                finalErrorMessage =
+                        "Budget operacional terminou antes de concluir a cobertura necessária.";
+            }
+
+        } else if (
+                anyValidQuery
+                && coverageExhausted
+                && !infraDegraded
+        ) {
+            outcome =
+                    DiscoveryExecutionResult.Outcome.EMPTY;
+
+            finalErrorCode =
+                    "OSM_NO_USEFUL_LEADS";
+
+            finalErrorMessage =
+                    "Nenhum lead útil encontrado após consultas válidas.";
+        } else {
+            outcome =
+                    DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE;
+
+            if (finalErrorCode == null) {
+                finalErrorCode =
+                        "OSM_DISCOVERY_INCOMPLETE";
+            }
+
+            if (finalErrorMessage == null) {
+                finalErrorMessage =
+                        "A infraestrutura impediu a conclusão da descoberta.";
+            }
+        }
+
+        log.info(
+                "[osm] discovery_summary campaignId={} acceptedThisRun={} totalCampaignLeads={} areasAttempted={} areasSucceeded={} areasSplit={} areasSkipped={} coverageExhausted={} budgetElapsedMs={} budgetTotalMs={} outcome={}",
+                campaign.getId(),
+                accepted,
+                totalCampaignLeads,
+                areasAttempted,
+                areasSucceeded,
+                areasSplit,
+                areasSkipped,
+                coverageExhausted,
+                budget.elapsedMs(),
+                budget.totalMs(),
+                outcome
+        );
+
+        return new DiscoveryExecutionResult(
+                outcome,
+                accepted,
+                totalCampaignLeads,
+                areasAttempted,
+                areasSucceeded,
+                areasSplit,
+                areasSkipped,
+                coverageExhausted,
+                finalErrorCode,
+                finalErrorMessage
+        );
+    }
+
+    private void validateCampaignLocation(Campaign campaign) {
+        if (campaign.getCity() == null || campaign.getCity().isBlank()) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "LEGACY_CAMPAIGN_LOCATION_MISSING",
+                    "Esta campanha antiga não possui cidade e país estruturados. Crie uma nova campanha para refazer a descoberta."
+            );
+        }
+        if (campaign.getCountry() == null || campaign.getCountry().isBlank()) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "LEGACY_CAMPAIGN_LOCATION_MISSING",
+                    "Esta campanha antiga não possui cidade e país estruturados. Crie uma nova campanha para refazer a descoberta."
+            );
+        }
+    }
+
+    private int calculateRawLimit(int remainingUseful) {
+        int calculated = Math.max(
+                queryMinRawLimit,
+                remainingUseful * queryRawPerLead
+        );
+        return Math.min(calculated, 200);
+    }
+
+    private int acceptCandidates(
+            Campaign campaign,
+            List<LeadCandidate> candidates,
+            int remainingNeeded,
+            Set<String> seenSourceIds,
+            Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache
+    ) {
+        int accepted = 0;
+
+        for (LeadCandidate candidate : candidates) {
+            if (accepted >= remainingNeeded) {
+                break;
+            }
+
+            String sourceKey =
+                    normalizer.normalizeSourceId(
+                            candidate.getSource(),
+                            candidate.getSourceId()
+                    );
+
+            if (sourceKey == null) {
+                continue;
+            }
+
+            if (!seenSourceIds.add(sourceKey)) {
+                continue;
+            }
+
+            var beforeEnrichment =
+                    deduplicationService.check(candidate);
+
+            if (beforeEnrichment.existing().isPresent()) {
+                registerDuplicateEvent(
+                        campaign,
+                        beforeEnrichment,
+                        candidate
+                );
+                continue;
+            }
+
+            if (!isUseful(candidate)) {
+                registerSkippedNoContact(
+                        campaign,
+                        candidate
+                );
+                continue;
+            }
+
+            enrichCandidateIfNeeded(
+                    candidate,
+                    enrichmentCache
+            );
+
+            var afterEnrichment =
+                    deduplicationService.check(candidate);
+
+            if (afterEnrichment.existing().isPresent()) {
+                registerDuplicateEvent(
+                        campaign,
+                        afterEnrichment,
+                        candidate
+                );
+                continue;
+            }
+
+            if (!isUseful(candidate)) {
+                registerSkippedNoContact(
+                        campaign,
+                        candidate
+                );
+                continue;
+            }
+
+            try {
+                Lead lead =
+                        persistenceService
+                                .createLeadForCampaign(
+                                        candidate,
+                                        campaign
+                                );
+
+                leadEventRepository.save(
+                        LeadEvent.builder()
+                                .leadId(lead.getId())
+                                .campaignId(campaign.getId())
+                                .eventType("lead_found")
+                                .eventMetadata(
+                                        "source="
+                                                + candidate.getSource()
+                                )
+                                .build()
+                );
+
+                accepted++;
+
+            } catch (DataIntegrityViolationException e) {
+                log.info(
+                        "Lead ignorado por conflito de unicidade: campaignId={} sourceId={}",
+                        campaign.getId(),
+                        candidate.getSourceId()
+                );
+            }
+        }
+
+        return accepted;
+    }
+
+    private void enrichCandidateIfNeeded(
+            LeadCandidate candidate,
+            Map<String, WebsiteContactEnricher.WebsiteContactData> cache
+    ) {
+        if (!needsEnrichment(candidate)) {
+            return;
+        }
+
+        String website =
+                normalizer.normalizeWebsite(
+                        candidate.getWebsite()
+                );
+
+        if (website == null) {
+            return;
+        }
+
+        WebsiteContactEnricher.WebsiteContactData data =
+                cache.computeIfAbsent(
+                        website,
+                        websiteContactEnricher::enrich
+                );
+
+        if (data == null) {
+            return;
+        }
+
+        if (!hasText(candidate.getPhone())
+                && hasText(data.phone())) {
+            candidate.setPhone(data.phone());
+        }
+
+        if (!hasText(candidate.getEmail())
+                && hasText(data.email())) {
+            candidate.setEmail(data.email());
+        }
+
+        if (!hasText(candidate.getInstagramUsername())
+                && hasText(data.instagramUsername())) {
+
+            candidate.setInstagramUsername(
+                    data.instagramUsername()
+            );
+
+            candidate.setInstagramUrl(
+                    "https://instagram.com/"
+                            + data.instagramUsername()
+            );
+
+            candidate.setInstagramStatus("FOUND");
+        }
+    }
+
+    private boolean needsEnrichment(LeadCandidate c) {
+        return hasText(c.getWebsite())
+                && (
+                !hasText(c.getPhone())
+                || !hasText(c.getEmail())
+                || !hasText(c.getInstagramUsername())
+        );
+    }
+
+    private boolean isUseful(LeadCandidate c) {
+        return hasText(c.getPhone())
+                || hasText(c.getEmail())
+                || hasText(c.getInstagramUsername())
+                || hasText(c.getInstagramUrl())
+                || hasText(c.getWebsite());
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private void registerDuplicateEvent(
+            Campaign campaign,
+            DeduplicationService.DuplicateCheck check,
+            LeadCandidate candidate
+    ) {
+        Lead existing = check.existing().get();
+        leadEventRepository.save(
+                LeadEvent.builder()
+                        .leadId(existing.getId())
+                        .campaignId(campaign.getId())
+                        .eventType("lead_duplicate")
+                        .eventMetadata("reason=" + check.reason())
+                        .build()
+        );
+    }
+
+    private void registerSkippedNoContact(
+            Campaign campaign,
+            LeadCandidate candidate
+    ) {
+        leadEventRepository.save(
+                LeadEvent.builder()
+                        .leadId(null)
+                        .campaignId(campaign.getId())
+                        .eventType("lead_skipped")
+                        .eventMetadata("reason=no_contact source=" + candidate.getSource() + " sourceId=" + candidate.getSourceId())
+                        .build()
+        );
+    }
+
+    private void updateProgress(
+            Campaign campaign,
+            int accepted,
+            int targetToAdd
+    ) {
+        int existing = (int) campaignLeadRepository.countByCampaignId(campaign.getId());
+        int total = existing + accepted;
+        campaign.setProgressCurrent(total);
+        campaign.setProgressTotal(targetToAdd + existing);
+        campaign.setProgressStage("Buscando leads (" + total + "/" + (targetToAdd + existing) + ")");
+        campaignRepository.save(campaign);
+    }
+}

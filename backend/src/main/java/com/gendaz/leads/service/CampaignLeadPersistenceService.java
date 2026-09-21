@@ -39,7 +39,7 @@ public class CampaignLeadPersistenceService {
                 .address(candidate.getAddress())
                 .city(candidate.getCity())
                 .state(candidate.getState())
-                .country(candidate.getCountry() != null ? candidate.getCountry() : "BR")
+                .country(candidate.getCountry())
                 .phone(candidate.getPhone())
                 .normalizedPhone(normalizer.normalizePhone(candidate.getPhone()))
                 .email(candidate.getEmail())

@@ -285,7 +285,7 @@ export function CampaignDetail() {
             {c.name}
           </h1>
           <p className="page-sub">
-            {c.niche} · {c.city}, {c.country} · Solicitados:{' '}
+            {c.niche} · {c.city && c.country ? `${c.city}, ${c.country}` : (c.location || '—')} · Solicitados:{' '}
             {formatNumber(c.requestedQuantity)}
           </p>
         </div>

@@ -142,6 +142,8 @@ export function LeadDetail() {
             </dd>
           <dt>Telefone</dt>
           <dd>{lead.phone || '—'}</dd>
+          <dt>Email</dt>
+          <dd>{lead.email || '—'}</dd>
           <dt>Website</dt>
           <dd>
             {lead.website ? (

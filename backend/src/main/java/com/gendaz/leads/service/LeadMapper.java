@@ -25,7 +25,8 @@ public class LeadMapper {
 
         return new LeadResponse(
                 lead.getId(), lead.getBusinessName(), lead.getCategory(), lead.getAddress(),
-                lead.getCity(), lead.getState(), lead.getCountry(), lead.getPhone(), lead.getWebsite(),
+                lead.getCity(), lead.getState(), lead.getCountry(), lead.getPhone(), lead.getEmail(),
+                lead.getWebsite(),
                 lead.getInstagramUsername(), lead.getInstagramUrl(), lead.getInstagramStatus(),
                 lead.getSource(), lead.getSourceId(), lead.isDoNotContact(), lead.getStatus(),
                 lead.getCurrentCampaignId(), campaignName, lead.getCreatedAt(), a, m);

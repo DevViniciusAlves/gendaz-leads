@@ -20,20 +20,27 @@ public class WebsiteContactEnricher {
     private static final Pattern IG_LINK = Pattern.compile(
             "(?:https?://)?(?:www\\.)?instagram\\.com/([A-Za-z0-9_.]+)", Pattern.CASE_INSENSITIVE);
 
-    @Value("${app.enrichment.connect-timeout-ms:3000}")
-    private int connectTimeoutMs;
-
-    @Value("${app.enrichment.read-timeout-ms:5000}")
-    private int readTimeoutMs;
-
-    @Value("${app.enrichment.max-bytes:500000}")
-    private int maxBytes;
-
     private final RestClient restClient;
     private final Normalizer normalizer;
     private final SsrfGuard ssrfGuard;
+    private final int connectTimeoutMs;
+    private final int readTimeoutMs;
+    private final int maxBytes;
 
-    public WebsiteContactEnricher(RestClient.Builder builder, Normalizer normalizer, SsrfGuard ssrfGuard) {
+    public WebsiteContactEnricher(
+            RestClient.Builder builder,
+            Normalizer normalizer,
+            SsrfGuard ssrfGuard,
+            @Value("${app.enrichment.connect-timeout-ms:2000}") int connectTimeoutMs,
+            @Value("${app.enrichment.read-timeout-ms:3000}") int readTimeoutMs,
+            @Value("${app.enrichment.max-bytes:500000}") int maxBytes
+    ) {
+        this.normalizer = normalizer;
+        this.ssrfGuard = ssrfGuard;
+        this.connectTimeoutMs = connectTimeoutMs;
+        this.readTimeoutMs = readTimeoutMs;
+        this.maxBytes = maxBytes;
+
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(connectTimeoutMs);
         factory.setReadTimeout(readTimeoutMs);
@@ -41,8 +48,6 @@ public class WebsiteContactEnricher {
                 .requestFactory(factory)
                 .defaultHeader("User-Agent", "GendazLeads/1.0 (+https://gendaz.com)")
                 .build();
-        this.normalizer = normalizer;
-        this.ssrfGuard = ssrfGuard;
     }
 
     public record WebsiteContactData(String phone, String email, String instagramUsername) {}

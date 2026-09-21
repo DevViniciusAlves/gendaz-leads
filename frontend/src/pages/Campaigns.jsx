@@ -109,7 +109,7 @@ export function Campaigns() {
                     <td>
                       <strong>{c.name}</strong>
                       <div className="muted" style={{ fontSize: 12 }}>
-                        {c.niche} · {c.city}, {c.country}
+                        {c.niche} · {c.city && c.country ? `${c.city}, ${c.country}` : (c.location || '—')}
                       </div>
                     </td>
                     <td>

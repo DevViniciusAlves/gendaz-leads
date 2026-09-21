@@ -4,9 +4,6 @@ import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.entity.*;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.repository.*;
-import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
-import com.gendaz.leads.service.provider.LeadDiscoveryResult;
-import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.util.Normalizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,10 +13,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
 @Service
 public class AsyncCampaignProcessor {
@@ -32,14 +26,14 @@ public class AsyncCampaignProcessor {
     private final LeadAnalysisService leadAnalysisService;
     private final DeduplicationService deduplicationService;
     private final Normalizer normalizer;
-    private final OpenStreetMapProvider openStreetMapProvider;
+    private final CampaignLeadDiscoveryService campaignLeadDiscoveryService;
     private final CampaignLeadPersistenceService persistenceService;
     private final CampaignLeadRepository campaignLeadRepository;
 
     public AsyncCampaignProcessor(CampaignRepository campaignRepository, LeadRepository leadRepository,
                                   LeadEventRepository leadEventRepository, LeadAnalysisService leadAnalysisService,
                                   DeduplicationService deduplicationService, Normalizer normalizer,
-                                  OpenStreetMapProvider openStreetMapProvider,
+                                  CampaignLeadDiscoveryService campaignLeadDiscoveryService,
                                   CampaignLeadPersistenceService persistenceService,
                                   CampaignLeadRepository campaignLeadRepository) {
         this.campaignRepository = campaignRepository;
@@ -48,7 +42,7 @@ public class AsyncCampaignProcessor {
         this.leadAnalysisService = leadAnalysisService;
         this.deduplicationService = deduplicationService;
         this.normalizer = normalizer;
-        this.openStreetMapProvider = openStreetMapProvider;
+        this.campaignLeadDiscoveryService = campaignLeadDiscoveryService;
         this.persistenceService = persistenceService;
         this.campaignLeadRepository = campaignLeadRepository;
     }
@@ -118,78 +112,53 @@ public class AsyncCampaignProcessor {
         campaign.setProgressCurrent(0);
         campaignRepository.save(campaign);
 
-        LeadDiscoveryRequest request = new LeadDiscoveryRequest(
-                campaign.getId(),
-                campaign.getNiche(),
-                campaign.getCity(),
-                campaign.getCountry(),
-                needed
-        );
+        DiscoveryExecutionResult result =
+                campaignLeadDiscoveryService
+                        .discoverAndPersist(
+                                campaign,
+                                needed
+                        );
 
-        LeadDiscoveryResult result;
-        try {
-            if (openStreetMapProvider.isEnabled()) {
-                result = openStreetMapProvider.discover(request);
-            } else {
-                log.warn("OpenStreetMapProvider não está habilitado para campanha {}", campaign.getId());
-                result = LeadDiscoveryResult.empty("OSM_DISABLED", "Provider desabilitado");
+        recompute(campaign);
+
+        switch (result.outcome()) {
+
+            case COMPLETE -> {
+                return result.acceptedThisRun();
             }
-        } catch (ApiException e) {
-            log.warn("Provider {} falhou: {} ({})", openStreetMapProvider.getName(), e.getMessage(), e.getCode());
-            throw e;
-        } catch (RuntimeException e) {
-            log.warn("Provider {} falhou: {}", openStreetMapProvider.getName(), e.getMessage());
-            throw new ApiException(
-                    HttpStatus.BAD_GATEWAY,
-                    "OSM_OVERPASS_ERROR",
-                    e.getMessage() != null ? e.getMessage() : "Falha ao consultar OpenStreetMap/Overpass.");
-        }
 
-        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.INFRA_UNAVAILABLE) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
-        }
-        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.DEADLINE_EXCEEDED) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
-        }
-
-        Set<String> batchSeen = new LinkedHashSet<>();
-        int discovered = 0;
-
-        List<Lead> existingLeads = leadRepository.findByCampaign(campaign.getId());
-        for (Lead lead : existingLeads) {
-            String key = batchKeyFromLead(lead);
-            if (key != null) batchSeen.add(key);
-        }
-
-        for (LeadCandidate candidate : result.candidates()) {
-            if (discovered >= needed) break;
-
-            String key = batchKey(candidate);
-            if (key != null && !batchSeen.add(key)) continue;
-
-            var dup = deduplicationService.check(candidate);
-            if (dup.existing().isPresent()) {
-                leadEventRepository.save(LeadEvent.builder()
-                        .leadId(dup.existing().get().getId())
-                        .campaignId(campaign.getId())
-                        .eventType("lead_duplicate")
-                        .eventMetadata("reason=" + dup.reason())
-                        .build());
-                continue;
-            }
-            try {
-                Lead lead = persistenceService.createLeadForCampaign(candidate, campaign);
-                leadEventRepository.save(LeadEvent.builder()
-                        .leadId(lead.getId()).campaignId(campaign.getId())
-                        .eventType("lead_found").eventMetadata("source=" + candidate.getSource()).build());
-                discovered++;
-                campaign.setProgressCurrent(discovered);
+            case PARTIAL -> {
+                campaign.setErrorMessage(
+                        truncate(
+                                result.errorMessage()
+                        )
+                );
                 campaignRepository.save(campaign);
-            } catch (DataIntegrityViolationException e) {
-                log.warn("Conflito de unicidade ao inserir lead (possível duplicata): {}", candidate.getBusinessName());
+                return result.acceptedThisRun();
             }
+
+            case EMPTY -> throw new ApiException(
+                    HttpStatus.NOT_FOUND,
+                    result.errorCode(),
+                    result.errorMessage()
+            );
+
+            case INFRA_UNAVAILABLE -> throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    result.errorCode(),
+                    result.errorMessage()
+            );
+
+            case BUDGET_EXHAUSTED -> throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    result.errorCode(),
+                    result.errorMessage()
+            );
         }
-        return discovered;
+
+        throw new IllegalStateException(
+                "Outcome de discovery não tratado"
+        );
     }
 
     private String batchKeyFromLead(Lead lead) {
@@ -228,85 +197,79 @@ public class AsyncCampaignProcessor {
 
     private void discoverStage(Campaign campaign) {
         campaign.setStatus("DISCOVERING");
-        campaign.setProgressStage("Localizando cidade");
-        campaign.setProgressTotal(campaign.getRequestedQuantity());
-        campaign.setProgressCurrent(0);
-        campaignRepository.save(campaign);
-
-        LeadDiscoveryRequest request = new LeadDiscoveryRequest(
-                campaign.getId(),
-                campaign.getNiche(),
-                campaign.getCity(),
-                campaign.getCountry(),
+        campaign.setProgressStage("Buscando leads");
+        campaign.setProgressTotal(
                 campaign.getRequestedQuantity()
         );
-
-        LeadDiscoveryResult result;
-        try {
-            if (openStreetMapProvider.isEnabled()) {
-                campaign.setProgressStage("Buscando leads");
-                campaignRepository.save(campaign);
-                result = openStreetMapProvider.discover(request);
-            } else {
-                log.warn("OpenStreetMapProvider não está habilitado para campanha {}", campaign.getId());
-                result = LeadDiscoveryResult.empty("OSM_DISABLED", "Provider desabilitado");
-            }
-        } catch (ApiException e) {
-            log.warn("Provider {} falhou: {} ({})", openStreetMapProvider.getName(), e.getMessage(), e.getCode());
-            throw e;
-        } catch (RuntimeException e) {
-            log.warn("Provider {} falhou: {}", openStreetMapProvider.getName(), e.getMessage());
-            throw new ApiException(
-                    HttpStatus.BAD_GATEWAY,
-                    "OSM_OVERPASS_ERROR",
-                    e.getMessage() != null ? e.getMessage() : "Falha ao consultar OpenStreetMap/Overpass.");
-        }
-
-        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.INFRA_UNAVAILABLE) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
-        }
-        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.DEADLINE_EXCEEDED) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, result.errorCode(), result.errorMessage());
-        }
-
-        Set<String> batchSeen = new LinkedHashSet<>();
-        int discovered = 0;
-
-        for (LeadCandidate candidate : result.candidates()) {
-            if (discovered >= campaign.getRequestedQuantity()) break;
-
-            String key = batchKey(candidate);
-            if (key != null && !batchSeen.add(key)) continue;
-
-            var dup = deduplicationService.check(candidate);
-            if (dup.existing().isPresent()) {
-                leadEventRepository.save(LeadEvent.builder()
-                        .leadId(dup.existing().get().getId())
-                        .campaignId(campaign.getId())
-                        .eventType("lead_duplicate")
-                        .eventMetadata("reason=" + dup.reason())
-                        .build());
-                continue;
-            }
-            try {
-                Lead lead = persistenceService.createLeadForCampaign(candidate, campaign);
-                leadEventRepository.save(LeadEvent.builder()
-                        .leadId(lead.getId()).campaignId(campaign.getId())
-                        .eventType("lead_found").eventMetadata("source=" + candidate.getSource()).build());
-                discovered++;
-                campaign.setDiscoveredCount(discovered);
-                campaign.setProgressCurrent(discovered);
-                campaignRepository.save(campaign);
-            } catch (DataIntegrityViolationException e) {
-                log.warn("Conflito de unicidade ao inserir lead (possível duplicata): {}", candidate.getBusinessName());
-            }
-        }
-        campaign.setDiscoveredCount(discovered);
+        campaign.setProgressCurrent(
+                (int) campaignLeadRepository
+                        .countByCampaignId(
+                                campaign.getId()
+                        )
+        );
+        campaign.setErrorMessage(null);
         campaignRepository.save(campaign);
 
-        if (result.outcome() == LeadDiscoveryResult.DiscoveryOutcome.EMPTY) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "EMPTY", "Nenhum lead com dados de contato encontrado na cidade");
+        int existing =
+                (int) campaignLeadRepository
+                        .countByCampaignId(
+                                campaign.getId()
+                        );
+
+        int needed =
+                Math.max(
+                        0,
+                        campaign.getRequestedQuantity()
+                                - existing
+                );
+
+        DiscoveryExecutionResult result =
+                campaignLeadDiscoveryService
+                        .discoverAndPersist(
+                                campaign,
+                                needed
+                        );
+
+        recompute(campaign);
+
+        switch (result.outcome()) {
+
+            case COMPLETE -> {
+                return;
+            }
+
+            case PARTIAL -> {
+                campaign.setErrorMessage(
+                        truncate(
+                                result.errorMessage()
+                        )
+                );
+                campaignRepository.save(campaign);
+                return;
+            }
+
+            case EMPTY -> throw new ApiException(
+                    HttpStatus.NOT_FOUND,
+                    result.errorCode(),
+                    result.errorMessage()
+            );
+
+            case INFRA_UNAVAILABLE -> throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    result.errorCode(),
+                    result.errorMessage()
+            );
+
+            case BUDGET_EXHAUSTED -> throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    result.errorCode(),
+                    result.errorMessage()
+            );
         }
+
+        throw new IllegalStateException(
+                "Outcome de discovery não tratado"
+        );
     }
 
     private void analyzeStage(Campaign campaign) {

@@ -10,5 +10,10 @@ public interface LeadDiscoveryProvider {
 
     boolean isEnabled();
 
+    GeoScope resolveScope(LeadDiscoveryRequest request, DiscoveryBudget budget);
+
+    AreaQueryResult queryRegion(GeoScope scope, String niche, SearchRegion region, AreaQueryPhase phase, int rawLimit, String preferredEndpointHost, DiscoveryBudget budget, Long campaignId);
+
+    @Deprecated
     LeadDiscoveryResult discover(LeadDiscoveryRequest request);
 }

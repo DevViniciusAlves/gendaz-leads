@@ -14,6 +14,7 @@ public record LeadResponse(
         String state,
         String country,
         String phone,
+        String email,
         String website,
         String instagramUsername,
         String instagramUrl,

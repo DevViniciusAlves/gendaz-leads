@@ -24,16 +24,26 @@ app:
   discovery:
     osm:
       enabled: ${OSM_ENABLED:true}
-      timeout-ms: ${OSM_TIMEOUT_MS:20000}
-      discovery-deadline-ms: ${OSM_DISCOVERY_DEADLINE_MS:60000}
+      timeout-ms: ${OSM_TIMEOUT_MS:10000}
+      nominatim-timeout-ms: ${OSM_NOMINATIM_TIMEOUT_MS:8000}
+      nominatim-max-attempts: ${OSM_NOMINATIM_MAX_ATTEMPTS:2}
+      nominatim-cache-seconds: ${OSM_NOMINATIM_CACHE_SECONDS:3600}
+      nominatim-min-interval-ms: ${OSM_NOMINATIM_MIN_INTERVAL_MS:1000}
+      base-budget-ms: ${OSM_DISCOVERY_BASE_BUDGET_MS:90000}
+      per-lead-budget-ms: ${OSM_DISCOVERY_PER_LEAD_BUDGET_MS:3000}
+      max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:180000}
+      query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:40}
+      query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:8}
+      adaptive-max-depth: ${OSM_ADAPTIVE_MAX_DEPTH:6}
+      adaptive-min-edge-km: ${OSM_ADAPTIVE_MIN_EDGE_KM:2.0}
       overpass-endpoints: ${OSM_OVERPASS_ENDPOINTS:https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter}
       overpass-url: ${OSM_OVERPASS_URL:https://overpass-api.de/api/interpreter}
       fallback-url: ${OSM_OVERPASS_FALLBACK_URL:}
       max-concurrency: ${OSM_OVERPASS_MAX_CONCURRENCY:1}
-      circuit-open-seconds: ${OSM_CIRCUIT_OPEN_SECONDS:180}
+      circuit-open-seconds: ${OSM_CIRCUIT_OPEN_SECONDS:30}
   groq:
     api-key: ${GROQ_API_KEY}
-    model: ${GROQ_MODEL:llama-3.3-70b-versatile}
+    model: ${GROQ_MODEL:openai/gpt-oss-120b}
     enabled: ${GROQ_ENABLED:true}
     timeout-ms: ${GROQ_TIMEOUT_MS:30000}
     max-retries: ${GROQ_MAX_RETRIES:2}

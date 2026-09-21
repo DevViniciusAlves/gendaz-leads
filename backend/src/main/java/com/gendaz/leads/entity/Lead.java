@@ -31,8 +31,7 @@ public class Lead {
 
     private String state;
 
-    @Builder.Default
-    private String country = "BR";
+    private String country;
 
     private String phone;
 

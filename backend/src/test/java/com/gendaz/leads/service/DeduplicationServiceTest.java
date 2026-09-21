@@ -32,22 +32,18 @@ class DeduplicationServiceTest {
     }
 
     @Test
-    void detectsDuplicateByEmail() {
-        LeadCandidate candidate = new LeadCandidate("Clinica Sorriso", "google", "xyz");
-        candidate.setEmail("contato@clinicasorriso.com");
+    void detectsDuplicateBySourceId() {
+        LeadCandidate candidate = new LeadCandidate("Clinica Sorriso", "openstreetmap", "node/123");
         candidate.setCity("Cuiaba");
         candidate.setCountry("Brasil");
 
         when(leadRepository.findFirstByNormalizedInstagramIgnoreCase(any())).thenReturn(Optional.empty());
-        when(leadRepository.findFirstByNormalizedSourceIdIgnoreCase(any())).thenReturn(Optional.empty());
-        when(leadRepository.findFirstByNormalizedWebsiteIgnoreCase(any())).thenReturn(Optional.empty());
-        when(leadRepository.findFirstByNormalizedPhoneIgnoreCase(any())).thenReturn(Optional.empty());
-        when(leadRepository.findFirstByNormalizedEmailIgnoreCase("contato@clinicasorriso.com"))
+        when(leadRepository.findFirstByNormalizedSourceIdIgnoreCase("openstreetmap_node/123"))
                 .thenReturn(Optional.of(Lead.builder().id(30L).build()));
 
         var result = service.check(candidate);
         assertTrue(result.existing().isPresent());
-        assertEquals("email", result.reason());
+        assertEquals("source_id", result.reason());
     }
 
     @Test
