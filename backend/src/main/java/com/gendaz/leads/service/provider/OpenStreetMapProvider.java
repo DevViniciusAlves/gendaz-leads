@@ -365,7 +365,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 "Falha ao geocodificar cidade após retentativas: " + request.city() + " (" + request.country() + ")");
     }
 
-    public AreaQueryResult queryRegion(
+    public AreaQueryResult queryRegionWithStrategy(
             GeoScope scope,
             GeographicStrategy geographicStrategy,
             String niche,
@@ -564,7 +564,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             DiscoveryBudget budget,
             Long campaignId
     ) {
-        return queryRegion(
+        return queryRegionWithStrategy(
                 scope,
                 scope.hasAdminAreaCandidate() ? GeographicStrategy.ADMIN_AREA : GeographicStrategy.BBOX_FALLBACK,
                 niche,

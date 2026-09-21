@@ -257,6 +257,16 @@ public class CampaignLeadDiscoveryService {
             SearchRegion region = planStep.region();
             areasSplit += planStep.splitsPerformed();
 
+            log.info(
+                    "[osm] planner_http_leaf campaignId={} depth={} maxEdgeKm={} bbox={} queueRemaining={} geographicStrategy={}",
+                    campaign.getId(),
+                    region.depth(),
+                    region.maxEdgeKm(),
+                    region.bbox(),
+                    queue.size(),
+                    geographicStrategy
+            );
+
             int remainingUseful =
                     targetToAdd - accepted;
 
@@ -273,7 +283,7 @@ public class CampaignLeadDiscoveryService {
                 areasAttempted++;
 
                 AreaQueryResult structured =
-                        osm.queryRegion(
+                        osm.queryRegionWithStrategy(
                                 scope,
                                 geographicStrategy,
                                 campaign.getNiche(),
@@ -372,7 +382,7 @@ public class CampaignLeadDiscoveryService {
                 areasAttempted++;
 
                 AreaQueryResult fallback =
-                        osm.queryRegion(
+                        osm.queryRegionWithStrategy(
                                 scope,
                                 geographicStrategy,
                                 campaign.getNiche(),
