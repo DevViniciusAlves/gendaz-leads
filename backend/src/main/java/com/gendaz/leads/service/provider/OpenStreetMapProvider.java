@@ -88,6 +88,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     @Value("${app.discovery.osm.rate-limit-cooldown-seconds:60}")
     private long rateLimitCooldownSeconds;
 
+    @Value("${app.discovery.osm.connection-refused-cooldown-seconds:30}")
+    private long connectionRefusedCooldownSeconds;
+
+    @Value("${app.discovery.osm.timeout-cooldown-seconds:15}")
+    private long timeoutCooldownSeconds;
+
     private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
     private final Normalizer normalizer;
@@ -124,8 +130,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         this.overpassSemaphore = new Semaphore(Math.max(1, maxConcurrency), true);
         this.circuitBreaker = new OverpassCircuitBreaker(circuitOpenSeconds);
         List<String> endpoints = buildEndpointList();
-        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} nominatimBaseUrl={} nominatim429BackoffMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} queryMaxEdgeKm={} failureSplitThresholdKm={} adaptiveMaxDepth={} adaptiveMinEdgeKm={} rateLimitCooldownSeconds={}",
-                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, nominatimBaseUrl, nominatim429BackoffMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, queryMaxEdgeKm, failureSplitThresholdKm, adaptiveMaxDepth, adaptiveMinEdgeKm, rateLimitCooldownSeconds);
+        log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} nominatimBaseUrl={} nominatim429BackoffMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} queryMaxEdgeKm={} failureSplitThresholdKm={} adaptiveMaxDepth={} adaptiveMinEdgeKm={} rateLimitCooldownSeconds={} connectionRefusedCooldownSeconds={} timeoutCooldownSeconds={}",
+                enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, nominatimBaseUrl, nominatim429BackoffMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, queryMaxEdgeKm, failureSplitThresholdKm, adaptiveMaxDepth, adaptiveMinEdgeKm, rateLimitCooldownSeconds, connectionRefusedCooldownSeconds, timeoutCooldownSeconds);
     }
 
     private RestClient client(int effectiveTimeoutMs) {
@@ -185,11 +191,28 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         }
     }
 
+    private Optional<Long> adminAreaId(GeoScope scope) {
+        if (!scope.hasAdminAreaCandidate()) {
+            return Optional.empty();
+        }
+        if (scope.osmId() > 0L) {
+            // Overpass area id for relations: 3600000000 + osmId
+            return Optional.of(3600000000L + scope.osmId());
+        }
+        return Optional.empty();
+    }
+
     private String buildAdminAreaPreamble(GeoScope scope) {
         if (!scope.hasAdminAreaCandidate()) {
             return "";
         }
 
+        Optional<Long> areaId = adminAreaId(scope);
+        if (areaId.isPresent()) {
+            return "area(" + areaId.get() + ")->.searchArea;.searchArea out ids;";
+        }
+
+        // Fallback to map_to_area for ways/nodes if needed
         return "rel(id:"
                 + scope.osmId()
                 + ")->.adminBoundary;"
@@ -523,7 +546,31 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                     continue;
                 }
 
+                boolean isConnectionRefused = isConnectionRefused(e);
+                boolean isReadTimeout = isReadTimeout(e);
+                boolean is504 = is504(e);
                 boolean timeoutOr504 = isTimeoutOr504(e);
+
+                if (isConnectionRefused) {
+                    log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=connection_refused cooldownSeconds={}",
+                            campaignId, host, connectionRefusedCooldownSeconds);
+                    circuitBreaker.recordRateLimited(host, connectionRefusedCooldownSeconds);
+                    continue;
+                }
+
+                if (isReadTimeout) {
+                    log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=read_timeout cooldownSeconds={}",
+                            campaignId, host, timeoutCooldownSeconds);
+                    circuitBreaker.recordRateLimited(host, timeoutCooldownSeconds);
+                    continue;
+                }
+
+                if (is504) {
+                    log.warn("[osm] endpoint_circuit_opened campaignId={} endpointHost={} reason=504_gateway_timeout cooldownSeconds={}",
+                            campaignId, host, timeoutCooldownSeconds);
+                    circuitBreaker.recordRateLimited(host, timeoutCooldownSeconds);
+                    continue;
+                }
 
                 boolean shouldSplitImmediately = timeoutOr504
                         && region.maxEdgeKm() > failureSplitThresholdKm
@@ -919,11 +966,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         }
     }
 
-    private boolean isRateLimited(Throwable throwable) {
-        return throwable instanceof HttpStatusCodeException http
-                && http.getStatusCode().value() == 429;
-    }
-
     private long resolveRetryAfterSeconds(Throwable throwable) {
         if (!(throwable instanceof HttpStatusCodeException http)) {
             return rateLimitCooldownSeconds;
@@ -958,6 +1000,31 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         } catch (RuntimeException ignored) {
             return rateLimitCooldownSeconds;
         }
+    }
+
+    private boolean isRateLimited(Throwable throwable) {
+        return throwable instanceof HttpStatusCodeException http
+                && http.getStatusCode().value() == 429;
+    }
+
+    private boolean isConnectionRefused(Throwable throwable) {
+        Throwable root = rootCause(throwable);
+        return root instanceof ConnectException
+                || (root.getMessage() != null && root.getMessage().toLowerCase().contains("connection refused"));
+    }
+
+    private boolean isReadTimeout(Throwable throwable) {
+        Throwable root = rootCause(throwable);
+        return root instanceof SocketTimeoutException
+                || (root.getMessage() != null && root.getMessage().toLowerCase().contains("read timed out"));
+    }
+
+    private boolean is504(Throwable throwable) {
+        if (throwable instanceof HttpStatusCodeException http
+                && http.getStatusCode().value() == 504) {
+            return true;
+        }
+        return false;
     }
 
     private boolean isTimeoutOr504(Throwable throwable) {

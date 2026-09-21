@@ -59,10 +59,10 @@ public class CampaignLeadDiscoveryService {
     @Value("${app.discovery.osm.max-budget-ms:180000}")
     private long maxBudgetMs;
 
-    @Value("${app.discovery.osm.query-min-raw-limit:40}")
+    @Value("${app.discovery.osm.query-min-raw-limit:20}")
     private int queryMinRawLimit;
 
-    @Value("${app.discovery.osm.query-raw-per-lead:8}")
+    @Value("${app.discovery.osm.query-raw-per-lead:6}")
     private int queryRawPerLead;
 
     @Value("${app.discovery.osm.adaptive-max-depth:12}")
@@ -76,6 +76,15 @@ public class CampaignLeadDiscoveryService {
 
     @Value("${app.discovery.osm.failure-split-threshold-km:6.0}")
     private double failureSplitThresholdKm;
+
+    @Value("${app.discovery.osm.infra-split-threshold-km:2.0}")
+    private double infraSplitThresholdKm;
+
+    @Value("${app.discovery.osm.max-consecutive-infra-failures:6}")
+    private int maxConsecutiveInfraFailures;
+
+    @Value("${app.discovery.osm.admin-area-infra-failures-before-bbox:2}")
+    private int adminAreaInfraFailuresBeforeBbox;
 
     public CampaignLeadDiscoveryService(
             CampaignRepository campaignRepository,
@@ -240,6 +249,10 @@ public class CampaignLeadDiscoveryService {
         boolean anyValidQuery = false;
         boolean infraDegraded = false;
 
+        int consecutiveInfraFailures = 0;
+        int adminAreaInfraFailures = 0;
+        Set<String> failedHostsThisCampaign = new HashSet<>();
+
         String finalErrorCode = null;
         String finalErrorMessage = null;
 
@@ -312,6 +325,9 @@ public class CampaignLeadDiscoveryService {
 
                     anyValidQuery = true;
                     areasSucceeded++;
+                    consecutiveInfraFailures = 0;
+                    adminAreaInfraFailures = 0;
+                    failedHostsThisCampaign.clear();
 
                     accepted += acceptCandidates(
                             campaign,
@@ -361,10 +377,42 @@ public class CampaignLeadDiscoveryService {
                 } else if (structured.outcome()
                         == AreaQueryResult.Outcome.INFRA_UNAVAILABLE) {
 
+                    consecutiveInfraFailures++;
                     infraDegraded = true;
                     finalErrorCode = structured.errorCode();
                     finalErrorMessage = structured.errorMessage();
-                    break;
+
+                    if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
+                        adminAreaInfraFailures++;
+                        log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={}",
+                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth());
+                        if (adminAreaInfraFailures >= adminAreaInfraFailuresBeforeBbox && scope.bboxValid()) {
+                            geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
+                            queue.add(region);
+                            log.warn("[osm] switching_to_bbox_fallback campaignId={} reason=admin_area_infra_unstable adminAreaInfraFailures={} threshold={}",
+                                    campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox);
+                            continue;
+                        }
+                    }
+
+                    if (queue.isEmpty() || consecutiveInfraFailures >= maxConsecutiveInfraFailures) {
+                        break;
+                    }
+
+                    if (region.maxEdgeKm() <= infraSplitThresholdKm
+                            && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)
+                            && budget.remainingMs() > 0) {
+
+                        log.info("[osm] infra_split_small_region campaignId={} maxEdgeKm={} thresholdKm={} depth={} queueRemaining={}",
+                                campaign.getId(), region.maxEdgeKm(), infraSplitThresholdKm, region.depth(), queue.size());
+                        queue.addAll(region.split(scope.lat(), scope.lon()));
+                        areasSplit++;
+                        continue;
+                    }
+
+                    log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={}",
+                            campaign.getId(), queue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures);
+                    continue;
 
                 } else {
                     throw new ApiException(
@@ -411,6 +459,9 @@ public class CampaignLeadDiscoveryService {
 
                     anyValidQuery = true;
                     areasSucceeded++;
+                    consecutiveInfraFailures = 0;
+                    adminAreaInfraFailures = 0;
+                    failedHostsThisCampaign.clear();
 
                     accepted += acceptCandidates(
                             campaign,
@@ -460,10 +511,42 @@ public class CampaignLeadDiscoveryService {
                                 == AreaQueryResult.Outcome.INFRA_UNAVAILABLE
                 ) {
 
+                    consecutiveInfraFailures++;
                     infraDegraded = true;
                     finalErrorCode = fallback.errorCode();
                     finalErrorMessage = fallback.errorMessage();
-                    break;
+
+                    if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
+                        adminAreaInfraFailures++;
+                        log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={}",
+                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth());
+                        if (adminAreaInfraFailures >= adminAreaInfraFailuresBeforeBbox && scope.bboxValid()) {
+                            geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
+                            queue.add(region);
+                            log.warn("[osm] switching_to_bbox_fallback campaignId={} reason=admin_area_infra_unstable adminAreaInfraFailures={} threshold={}",
+                                    campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox);
+                            continue;
+                        }
+                    }
+
+                    if (queue.isEmpty() || consecutiveInfraFailures >= maxConsecutiveInfraFailures) {
+                        break;
+                    }
+
+                    if (region.maxEdgeKm() <= infraSplitThresholdKm
+                            && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)
+                            && budget.remainingMs() > 0) {
+
+                        log.info("[osm] infra_split_small_region campaignId={} maxEdgeKm={} thresholdKm={} depth={} queueRemaining={}",
+                                campaign.getId(), region.maxEdgeKm(), infraSplitThresholdKm, region.depth(), queue.size());
+                        queue.addAll(region.split(scope.lat(), scope.lon()));
+                        areasSplit++;
+                        continue;
+                    }
+
+                    log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={}",
+                            campaign.getId(), queue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures);
+                    continue;
 
                 } else {
                     throw new ApiException(
@@ -504,6 +587,11 @@ public class CampaignLeadDiscoveryService {
             outcome =
                     DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE;
 
+            if (finalErrorCode == null || finalErrorCode.equals("OSM_ALL_ENDPOINTS_FAILED")) {
+                finalErrorCode = "OSM_OVERPASS_TEMPORARILY_UNAVAILABLE";
+                finalErrorMessage = "Os servidores públicos do OpenStreetMap/Overpass estão instáveis agora. Tente novamente em alguns minutos.";
+            }
+
         } else if (budget.expired() && !coverageExhausted) {
             outcome =
                     DiscoveryExecutionResult.Outcome.BUDGET_EXHAUSTED;
@@ -537,12 +625,12 @@ public class CampaignLeadDiscoveryService {
 
             if (finalErrorCode == null) {
                 finalErrorCode =
-                        "OSM_DISCOVERY_INCOMPLETE";
+                        "OSM_OVERPASS_TEMPORARILY_UNAVAILABLE";
             }
 
             if (finalErrorMessage == null) {
                 finalErrorMessage =
-                        "A infraestrutura impediu a conclusão da descoberta.";
+                        "Os servidores públicos do OpenStreetMap/Overpass estão instáveis agora. Tente novamente em alguns minutos.";
             }
         }
 

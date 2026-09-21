@@ -34,10 +34,11 @@ app:
       base-budget-ms: ${OSM_DISCOVERY_BASE_BUDGET_MS:90000}
       per-lead-budget-ms: ${OSM_DISCOVERY_PER_LEAD_BUDGET_MS:3000}
       max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:180000}
-      query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:40}
-      query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:8}
+      query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:20}
+      query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:6}
       query-max-edge-km: ${OSM_QUERY_MAX_EDGE_KM:12.0}
       failure-split-threshold-km: ${OSM_FAILURE_SPLIT_THRESHOLD_KM:6.0}
+      infra-split-threshold-km: ${OSM_INFRA_SPLIT_THRESHOLD_KM:2.0}
       adaptive-max-depth: ${OSM_ADAPTIVE_MAX_DEPTH:12}
       adaptive-min-edge-km: ${OSM_ADAPTIVE_MIN_EDGE_KM:1.0}
       overpass-endpoints: ${OSM_OVERPASS_ENDPOINTS:https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter}
@@ -46,6 +47,10 @@ app:
       max-concurrency: ${OSM_OVERPASS_MAX_CONCURRENCY:1}
       circuit-open-seconds: ${OSM_CIRCUIT_OPEN_SECONDS:30}
       rate-limit-cooldown-seconds: ${OSM_429_COOLDOWN_SECONDS:60}
+      max-consecutive-infra-failures: ${OSM_MAX_CONSECUTIVE_INFRA_FAILURES:6}
+      admin-area-infra-failures-before-bbox: ${OSM_ADMIN_AREA_INFRA_FAILURES_BEFORE_BBOX:2}
+      connection-refused-cooldown-seconds: ${OSM_CONNECTION_REFUSED_COOLDOWN_SECONDS:30}
+      timeout-cooldown-seconds: ${OSM_TIMEOUT_COOLDOWN_SECONDS:15}
   groq:
     api-key: ${GROQ_API_KEY}
     model: ${GROQ_MODEL:openai/gpt-oss-120b}
