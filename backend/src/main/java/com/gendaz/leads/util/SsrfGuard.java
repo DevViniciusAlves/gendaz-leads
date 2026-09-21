@@ -52,24 +52,65 @@ public class SsrfGuard {
         int a = Byte.toUnsignedInt(b[0]);
         int second = Byte.toUnsignedInt(b[1]);
 
-        if (a == 0) return true;
+        if (a == 0) return false;
         if (a == 10) return false;
         if (a == 127) return false;
-        if (a == 169 && second == 254) return false;
-        if (a == 192 && second == 168) return false;
-        if (a == 172 && second >= 16 && second <= 31) return false;
 
-        // CGNAT 100.64.0.0/10
-        if (a == 100 && second >= 64 && second <= 127) return false;
+        if (a == 100 && second >= 64 && second <= 127) {
+            return false;
+        }
+
+        if (a == 169 && second == 254) {
+            return false;
+        }
+
+        if (a == 172 && second >= 16 && second <= 31) {
+            return false;
+        }
+
+        if (a == 192 && second == 168) {
+            return false;
+        }
+
+        if (a >= 224) {
+            return false;
+        }
 
         return true;
     }
 
     private boolean isPublicIpv6(InetAddress address) {
-        String ip = address.getHostAddress();
-        if (ip.startsWith("::1")) return false;
-        if (ip.startsWith("fc00:") || ip.startsWith("fd00:")) return false;
-        if (ip.startsWith("fe80:")) return false;
+        byte[] b = address.getAddress();
+
+        if (b.length != 16) {
+            return false;
+        }
+
+        boolean loopback = true;
+        for (int i = 0; i < 15; i++) {
+            if (b[i] != 0) {
+                loopback = false;
+                break;
+            }
+        }
+
+        if (loopback && b[15] == 1) {
+            return false;
+        }
+
+        int first = Byte.toUnsignedInt(b[0]);
+        int second = Byte.toUnsignedInt(b[1]);
+
+        // fc00::/7
+        if ((first & 0xFE) == 0xFC) {
+            return false;
+        }
+
+        // fe80::/10
+        if (first == 0xFE && (second & 0xC0) == 0x80) {
+            return false;
+        }
+
         return true;
     }
 }

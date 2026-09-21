@@ -54,23 +54,56 @@ public class WebsiteContactEnricher {
     public record WebsiteContactData(String phone, String email, String instagramUsername) {}
 
     public WebsiteContactData enrich(String website) {
-        if (website == null || website.isBlank() || !ssrfGuard.isSafe(website)) {
+
+        if (website == null || website.isBlank()) {
             return new WebsiteContactData(null, null, null);
         }
-        String target = website.trim();
-        if (!target.startsWith("http")) target = "https://" + target;
+
+        String target = normalizeTargetUrl(website);
+
+        if (target == null || !ssrfGuard.isSafe(target)) {
+            return new WebsiteContactData(null, null, null);
+        }
 
         try {
             String body = fetchWithRedirectValidation(target, 0);
-            if (body == null || body.length() > maxBytes) return new WebsiteContactData(null, null, null);
 
-            String phone = extractPhone(body);
-            String email = extractEmail(body);
-            String instagram = extractInstagram(body);
+            if (body == null || body.length() > maxBytes) {
+                return new WebsiteContactData(null, null, null);
+            }
 
-            return new WebsiteContactData(phone, email, instagram);
+            return new WebsiteContactData(extractPhone(body), extractEmail(body), extractInstagram(body));
+
         } catch (RuntimeException | IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             return new WebsiteContactData(null, null, null);
+        }
+    }
+
+    private String normalizeTargetUrl(String website) {
+        String value = website.trim();
+
+        if (value.isBlank()) {
+            return null;
+        }
+
+        if (!value.startsWith("http://") && !value.startsWith("https://")) {
+            value = "https://" + value;
+        }
+
+        try {
+            URI uri = URI.create(value);
+
+            if (uri.getHost() == null) {
+                return null;
+            }
+
+            return uri.toString();
+
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 
@@ -93,15 +126,33 @@ public class WebsiteContactEnricher {
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
         int status = response.statusCode();
+
         if (status >= 300 && status < 400) {
             String location = response.headers().firstValue("Location").orElse(null);
             if (location != null) {
                 String nextUrl = resolveUrl(url, location);
+                if (!ssrfGuard.isSafe(nextUrl)) {
+                    return null;
+                }
                 return fetchWithRedirectValidation(nextUrl, redirectCount + 1);
             }
         }
 
-        return response.body();
+        if (status < 200 || status >= 300) {
+            return null;
+        }
+
+        String body = response.body();
+
+        if (body == null) {
+            return null;
+        }
+
+        if (body.length() > maxBytes) {
+            return null;
+        }
+
+        return body;
     }
 
     private String resolveUrl(String base, String location) {

@@ -205,14 +205,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante geocodificação");
             }
 
-            long remainingMs = budget.remainingMs();
-            if (remainingMs <= 0) {
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante geocodificação");
-            }
-
             awaitNominatimSlot(budget);
 
-            int effectiveTimeout = (int) Math.min(nominatimTimeoutMs, remainingMs);
+            int effectiveTimeout = budget.clampTimeout(nominatimTimeoutMs);
+            if (effectiveTimeout <= 0) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Budget esgotado antes da chamada ao Nominatim.");
+            }
 
             try {
                 response = client(effectiveTimeout).get()
@@ -319,22 +317,19 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
             long waitBudgetMs = budget.remainingMs();
             if (waitBudgetMs <= 0) {
-                circuitBreaker.recordFailure(host);
-                return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente aguardando semaphore", (System.nanoTime() - startNs) / 1_000_000L);
+                return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente antes de adquirir semaphore", elapsedMs(startNs));
             }
 
             boolean acquired = false;
             try {
                 acquired = overpassSemaphore.tryAcquire(waitBudgetMs, TimeUnit.MILLISECONDS);
                 if (!acquired) {
-                    circuitBreaker.recordFailure(host);
-                    return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Timeout aguardando acesso ao Overpass", (System.nanoTime() - startNs) / 1_000_000L);
+                    return AreaQueryResult.infraUnavailable("OSM_SEMAPHORE_TIMEOUT", "Budget esgotado aguardando acesso ao Overpass", elapsedMs(startNs));
                 }
 
                 int effectiveTimeoutMs = budget.clampTimeout(timeoutMs);
                 if (effectiveTimeoutMs <= 0) {
-                    circuitBreaker.recordFailure(host);
-                    return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente para timeout efetivo", (System.nanoTime() - startNs) / 1_000_000L);
+                    return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget insuficiente após adquirir semaphore", elapsedMs(startNs));
                 }
 
                 int overpassTimeoutSeconds = Math.max(1, (int) Math.ceil(effectiveTimeoutMs / 1000.0));
@@ -348,7 +343,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
                 if (query == null) {
                     circuitBreaker.recordSuccess(host);
-                    return AreaQueryResult.success(List.of(), false, host, (System.nanoTime() - startNs) / 1_000_000L);
+                    return AreaQueryResult.success(List.of(), false, host, elapsedMs(startNs));
                 }
 
                 log.info("[osm] area_query_start campaignId={} depth={} phase={} bbox={} rawLimit={} preferredEndpointHost={} remainingBudgetMs={}",
@@ -361,7 +356,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                         .retrieve()
                         .body(String.class);
 
-                long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+                long elapsedMs = elapsedMs(startNs);
 
                 JsonNode root = objectMapper.readTree(response);
                 JsonNode elements = root.path("elements");
@@ -393,7 +388,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 lastFailure = e;
                 boolean retryable = isRetryable(e);
                 FailureDetails fd = getFailureDetails(e);
-                long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+                long elapsedMs = elapsedMs(startNs);
                 log.warn("[osm] overpass_failed campaignId={} depth={} phase={} endpointHost={} errorType={} rootCauseType={} rootCauseMessage={} retryable={} elapsedMs={}",
                         campaignId, region.depth(), phase, host, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable, elapsedMs);
 
@@ -424,7 +419,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             }
         }
 
-        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+        long elapsedMs = elapsedMs(startNs);
 
         if (hadTimeoutOr504 && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
             return AreaQueryResult.splitRequired("OSM_SPLIT_REQUIRED", "Timeout/504 em todos os endpoints, subdividindo região", elapsedMs);
@@ -477,14 +472,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante resolução de país");
             }
 
-            long remainingMs = budget.remainingMs();
-            if (remainingMs <= 0) {
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Deadline excedido durante resolução de país");
-            }
-
             awaitNominatimSlot(budget);
 
-            int effectiveTimeout = (int) Math.min(nominatimTimeoutMs, remainingMs);
+            int effectiveTimeout = budget.clampTimeout(nominatimTimeoutMs);
+            if (effectiveTimeout <= 0) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_DISCOVERY_TIMEOUT", "Budget esgotado antes da chamada ao Nominatim.");
+            }
 
             try {
                 String response = client(effectiveTimeout).get()
@@ -737,6 +730,10 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         message = message.replaceAll("(?i)(password|token|secret|url|database_url|key)=[^\\s&]+", "$1=***");
         if (message.length() > 300) message = message.substring(0, 300);
         return new FailureDetails(type, message);
+    }
+
+    private long elapsedMs(long startNs) {
+        return (System.nanoTime() - startNs) / 1_000_000L;
     }
 
     static class OverpassCircuitBreaker {
