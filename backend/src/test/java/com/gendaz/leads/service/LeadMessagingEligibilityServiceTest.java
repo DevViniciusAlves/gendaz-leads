@@ -2,6 +2,7 @@ package com.gendaz.leads.service;
 
 import com.gendaz.leads.entity.Lead;
 import com.gendaz.leads.entity.MessageSend;
+import com.gendaz.leads.repository.CampaignLeadRepository;
 import com.gendaz.leads.repository.MessageSendRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -14,6 +15,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -24,6 +26,9 @@ class LeadMessagingEligibilityServiceTest {
 
     @Mock
     WhatsAppRecipientNormalizer recipientNormalizer;
+
+    @Mock
+    CampaignLeadRepository campaignLeadRepository;
 
     @InjectMocks
     LeadMessagingEligibilityService eligibilityService;
@@ -48,6 +53,7 @@ class LeadMessagingEligibilityServiceTest {
     void messageReadyWithValidPhoneIsEligible() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
         when(messageSendRepository.findByLeadId(1L)).thenReturn(List.of());
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "(11) 99999-9999", false, "MESSAGE_READY"), 10L);
 
@@ -59,6 +65,7 @@ class LeadMessagingEligibilityServiceTest {
     void approvedIsAlsoEligible() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
         when(messageSendRepository.findByLeadId(1L)).thenReturn(List.of());
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "11999999999", false, "APPROVED"), 10L);
 
@@ -67,6 +74,7 @@ class LeadMessagingEligibilityServiceTest {
 
     @Test
     void doNotContactBlocks() {
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "11999999999", true, "MESSAGE_READY"), 10L);
 
         assertFalse(r.eligible());
@@ -75,6 +83,7 @@ class LeadMessagingEligibilityServiceTest {
 
     @Test
     void missingPhoneBlocks() {
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, null, false, "MESSAGE_READY"), 10L);
 
         assertFalse(r.eligible());
@@ -84,6 +93,7 @@ class LeadMessagingEligibilityServiceTest {
     @Test
     void invalidPhoneBlocks() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn(null);
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "999", false, "MESSAGE_READY"), 10L);
 
@@ -95,6 +105,7 @@ class LeadMessagingEligibilityServiceTest {
     void queuedBlocks() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
         when(messageSendRepository.findByLeadId(1L)).thenReturn(List.of(send("QUEUED")));
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "11999999999", false, "MESSAGE_READY"), 10L);
 
@@ -106,6 +117,7 @@ class LeadMessagingEligibilityServiceTest {
     void sendingBlocks() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
         when(messageSendRepository.findByLeadId(1L)).thenReturn(List.of(send("SENDING")));
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "11999999999", false, "MESSAGE_READY"), 10L);
 
@@ -117,6 +129,7 @@ class LeadMessagingEligibilityServiceTest {
     void sentBlocks() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
         when(messageSendRepository.findByLeadId(1L)).thenReturn(List.of(send("SENT")));
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "11999999999", false, "MESSAGE_READY"), 10L);
 
@@ -128,6 +141,7 @@ class LeadMessagingEligibilityServiceTest {
     void deliveryUnknownBlocks() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
         when(messageSendRepository.findByLeadId(1L)).thenReturn(List.of(send("DELIVERY_UNKNOWN")));
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "11999999999", false, "MESSAGE_READY"), 10L);
 
@@ -139,6 +153,7 @@ class LeadMessagingEligibilityServiceTest {
     void failedDoesNotBlock() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
         when(messageSendRepository.findByLeadId(1L)).thenReturn(List.of(send("FAILED")));
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 10L, "11999999999", false, "MESSAGE_READY"), 10L);
 
@@ -147,6 +162,7 @@ class LeadMessagingEligibilityServiceTest {
 
     @Test
     void wrongCampaignBlocks() {
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(false);
         EligibilityResult r = eligibilityService.checkEligibility(lead(1L, 99L, "11999999999", false, "MESSAGE_READY"), 10L);
 
         assertFalse(r.eligible());
@@ -156,6 +172,7 @@ class LeadMessagingEligibilityServiceTest {
     @Test
     void batchOverloadAvoidsRepositoryCall() {
         when(recipientNormalizer.normalizeForWhatsApp(any(), any())).thenReturn("5511999999999");
+        when(campaignLeadRepository.existsByCampaignIdAndLeadId(anyLong(), anyLong())).thenReturn(true);
 
         EligibilityResult r = eligibilityService.checkEligibility(
                 lead(1L, 10L, "11999999999", false, "MESSAGE_READY"), 10L, List.of());

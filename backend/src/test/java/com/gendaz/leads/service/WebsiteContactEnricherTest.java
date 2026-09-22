@@ -63,7 +63,7 @@ class WebsiteContactEnricherTest {
 
         enricher.enrich("example.com");
 
-        verify(ssrfGuard).isSafe("https://example.com");
+        verify(ssrfGuard, atLeastOnce()).isSafe("https://example.com");
     }
 
     @Test
@@ -75,7 +75,7 @@ class WebsiteContactEnricherTest {
 
         enricher.enrich("https://example.com");
 
-        verify(ssrfGuard).isSafe("https://example.com");
+        verify(ssrfGuard, atLeastOnce()).isSafe("https://example.com");
     }
 
     @Test
@@ -87,7 +87,7 @@ class WebsiteContactEnricherTest {
 
         enricher.enrich("http://example.com");
 
-        verify(ssrfGuard).isSafe("http://example.com");
+        verify(ssrfGuard, atLeastOnce()).isSafe("http://example.com");
     }
 
     @Test

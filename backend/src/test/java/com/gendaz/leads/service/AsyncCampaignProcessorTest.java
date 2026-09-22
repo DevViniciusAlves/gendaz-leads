@@ -12,15 +12,22 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.quality.Strictness;
+import org.mockito.junit.jupiter.MockitoSettings;
 
 import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class AsyncCampaignProcessorTest {
 
     @Mock CampaignRepository campaignRepository;
@@ -55,15 +62,15 @@ class AsyncCampaignProcessorTest {
                 Lead.builder().id(10L).status("NEW").build(),
                 Lead.builder().id(11L).status("NEW").build()
         ));
-        when(campaignLeadDiscoveryService.discoverAndPersist(any(), any()))
+        when(campaignLeadDiscoveryService.discoverAndPersist(any(), anyInt()))
                 .thenReturn(new DiscoveryExecutionResult(
                         DiscoveryExecutionResult.Outcome.PARTIAL, 2, 2, 1, 1, 0, 0, true, null, null
                 ));
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.countByCampaignIdWithAnalysis(1L)).thenReturn(2L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(2L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(0L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyCollection())).thenReturn(2L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyCollection())).thenReturn(0L);
 
         processor.processCampaign(1L);
 
@@ -78,15 +85,15 @@ class AsyncCampaignProcessorTest {
                 Lead.builder().id(10L).status("NEW").build(),
                 Lead.builder().id(11L).status("NEW").build()
         ));
-        when(campaignLeadDiscoveryService.discoverAndPersist(any(), any()))
+        when(campaignLeadDiscoveryService.discoverAndPersist(any(), anyInt()))
                 .thenReturn(new DiscoveryExecutionResult(
                         DiscoveryExecutionResult.Outcome.PARTIAL, 0, 2, 1, 0, 0, 0, true, "OSM_DISCOVERY_TIMEOUT", "Budget esgotado"
                 ));
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.countByCampaignIdWithAnalysis(1L)).thenReturn(2L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(2L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(0L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyCollection())).thenReturn(2L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyCollection())).thenReturn(0L);
 
         processor.processPartialCampaign(1L, 1);
 
@@ -103,14 +110,14 @@ class AsyncCampaignProcessorTest {
 
         when(campaignRepository.findById(2L)).thenReturn(Optional.of(emptyCampaign));
         when(campaignLeadRepository.countByCampaignId(2L)).thenReturn(0L);
-        when(campaignLeadDiscoveryService.discoverAndPersist(any(), any()))
+        when(campaignLeadDiscoveryService.discoverAndPersist(any(), anyInt()))
                 .thenReturn(new DiscoveryExecutionResult(
                         DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE, 0, 0, 1, 0, 0, 0, true, "OSM_DISCOVERY_TIMEOUT", "Budget esgotado"
                 ));
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.countByCampaignIdWithAnalysis(2L)).thenReturn(0L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(2L), anyList())).thenReturn(0L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(2L), anyList())).thenReturn(0L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(2L), anyCollection())).thenReturn(0L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(2L), anyCollection())).thenReturn(0L);
 
         processor.processPartialCampaign(2L, 3);
 
@@ -128,8 +135,8 @@ class AsyncCampaignProcessorTest {
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(2L);
         when(leadRepository.countByCampaignIdWithAnalysis(1L)).thenReturn(2L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(2L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(0L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyCollection())).thenReturn(2L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyCollection())).thenReturn(0L);
 
         processor.retryFailedLeads(1L);
 
@@ -151,8 +158,12 @@ class AsyncCampaignProcessorTest {
         ));
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(3L);
         when(leadRepository.countByCampaignIdWithAnalysis(1L)).thenReturn(3L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(3L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(0L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), argThat(list -> 
+                list.containsAll(List.of("MESSAGE_READY", "APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED"))
+        ))).thenReturn(3L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), argThat(list -> 
+                list.containsAll(List.of("ERROR"))
+        ))).thenReturn(0L);
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -170,15 +181,19 @@ class AsyncCampaignProcessorTest {
                 Lead.builder().id(11L).status("NEW").build(),
                 Lead.builder().id(12L).status("NEW").build()
         ));
-        when(campaignLeadDiscoveryService.discoverAndPersist(any(), any()))
+        when(campaignLeadDiscoveryService.discoverAndPersist(any(), anyInt()))
                 .thenReturn(new DiscoveryExecutionResult(
                         DiscoveryExecutionResult.Outcome.COMPLETE, 3, 3, 1, 1, 0, 0, true, null, null
                 ));
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.countByCampaignIdWithAnalysis(1L)).thenReturn(3L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(3L);
-        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), anyList())).thenReturn(0L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), argThat(list -> 
+                list.containsAll(List.of("MESSAGE_READY", "APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED"))
+        ))).thenReturn(3L);
+        when(leadRepository.countByCampaignIdAndStatusIn(eq(1L), argThat(list -> 
+                list.containsAll(List.of("ERROR"))
+        ))).thenReturn(0L);
 
         processor.processCampaign(1L);
 

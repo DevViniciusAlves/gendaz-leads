@@ -99,8 +99,14 @@ public class CampaignMessageEnqueueTransactionService {
     }
 
     private boolean isMemberOfCampaign(Lead lead, Long campaignId) {
-        if (lead.getCurrentCampaignId() != null && lead.getCurrentCampaignId().equals(campaignId)) return true;
-        return campaignLeadRepository.existsByCampaignIdAndLeadId(campaignId, lead.getId());
+        return lead != null
+                && lead.getId() != null
+                && campaignId != null
+                && campaignLeadRepository
+                .existsByCampaignIdAndLeadId(
+                        campaignId,
+                        lead.getId()
+                );
     }
 
 }

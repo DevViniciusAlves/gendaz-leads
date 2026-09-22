@@ -2,6 +2,7 @@ package com.gendaz.leads.service;
 
 import com.gendaz.leads.entity.Lead;
 import com.gendaz.leads.entity.MessageSend;
+import com.gendaz.leads.repository.CampaignLeadRepository;
 import com.gendaz.leads.repository.MessageSendRepository;
 import org.springframework.stereotype.Service;
 
@@ -16,11 +17,14 @@ public class LeadMessagingEligibilityService {
 
     private final MessageSendRepository messageSendRepository;
     private final WhatsAppRecipientNormalizer recipientNormalizer;
+    private final CampaignLeadRepository campaignLeadRepository;
 
     public LeadMessagingEligibilityService(MessageSendRepository messageSendRepository,
-                                          WhatsAppRecipientNormalizer recipientNormalizer) {
+                                           WhatsAppRecipientNormalizer recipientNormalizer,
+                                           CampaignLeadRepository campaignLeadRepository) {
         this.messageSendRepository = messageSendRepository;
         this.recipientNormalizer = recipientNormalizer;
+        this.campaignLeadRepository = campaignLeadRepository;
     }
 
     public EligibilityResult checkEligibility(Lead lead, Long campaignId) {
@@ -35,9 +39,23 @@ public class LeadMessagingEligibilityService {
             return new EligibilityResult(false, "WRONG_CAMPAIGN", "Lead nulo.", null);
         }
 
-        if (campaignId != null && lead.getCurrentCampaignId() != null
-                && !lead.getCurrentCampaignId().equals(campaignId)) {
-            return new EligibilityResult(false, "WRONG_CAMPAIGN", "Lead não pertence à campanha.", null);
+        if (campaignId != null) {
+            boolean member =
+                    lead.getId() != null
+                            && campaignLeadRepository
+                            .existsByCampaignIdAndLeadId(
+                                    campaignId,
+                                    lead.getId()
+                            );
+
+            if (!member) {
+                return new EligibilityResult(
+                        false,
+                        "WRONG_CAMPAIGN",
+                        "Lead não pertence à campanha.",
+                        null
+                );
+            }
         }
 
         if (lead.isDoNotContact()) {

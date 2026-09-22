@@ -74,34 +74,34 @@ app:
     min-leads: ${MIN_LEADS_PER_REQUEST:3}
     max-leads: ${MAX_LEADS_PER_REQUEST:30}
     discovery-multiplier: ${DISCOVERY_MULTIPLIER:3}
-discovery:
-        osm:
-          enabled: ${OSM_ENABLED:true}
-          timeout-ms: ${OSM_TIMEOUT_MS:10000}
+  discovery:
+    osm:
+      enabled: ${OSM_ENABLED:true}
+      timeout-ms: ${OSM_TIMEOUT_MS:10000}
 
-          nominatim-timeout-ms: ${OSM_NOMINATIM_TIMEOUT_MS:8000}
-          nominatim-max-attempts: ${OSM_NOMINATIM_MAX_ATTEMPTS:2}
-          nominatim-cache-seconds: ${OSM_NOMINATIM_CACHE_SECONDS:3600}
-          nominatim-min-interval-ms: ${OSM_NOMINATIM_MIN_INTERVAL_MS:1000}
-          nominatim-base-url: ${OSM_NOMINATIM_BASE_URL:https://nominatim.openstreetmap.org}
-          nominatim-429-backoff-ms: ${OSM_NOMINATIM_429_BACKOFF_MS:3000}
+      nominatim-timeout-ms: ${OSM_NOMINATIM_TIMEOUT_MS:8000}
+      nominatim-max-attempts: ${OSM_NOMINATIM_MAX_ATTEMPTS:2}
+      nominatim-cache-seconds: ${OSM_NOMINATIM_CACHE_SECONDS:3600}
+      nominatim-min-interval-ms: ${OSM_NOMINATIM_MIN_INTERVAL_MS:1000}
+      nominatim-base-url: ${OSM_NOMINATIM_BASE_URL:https://nominatim.openstreetmap.org}
+      nominatim-429-backoff-ms: ${OSM_NOMINATIM_429_BACKOFF_MS:3000}
 
-          base-budget-ms: ${OSM_DISCOVERY_BASE_BUDGET_MS:180000}
-          per-lead-budget-ms: ${OSM_DISCOVERY_PER_LEAD_BUDGET_MS:15000}
-          max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:300000}
+      base-budget-ms: ${OSM_DISCOVERY_BASE_BUDGET_MS:180000}
+      per-lead-budget-ms: ${OSM_DISCOVERY_PER_LEAD_BUDGET_MS:15000}
+      max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:300000}
 
-          region-budget-ms: ${OSM_DISCOVERY_REGION_BUDGET_MS:30000}
-          fallback-region-budget-ms: ${OSM_DISCOVERY_FALLBACK_REGION_BUDGET_MS:20000}
-          max-region-deferrals: ${OSM_DISCOVERY_MAX_REGION_DEFERRALS:1}
+      region-budget-ms: ${OSM_DISCOVERY_REGION_BUDGET_MS:30000}
+      fallback-region-budget-ms: ${OSM_DISCOVERY_FALLBACK_REGION_BUDGET_MS:20000}
+      max-region-deferrals: ${OSM_DISCOVERY_MAX_REGION_DEFERRALS:1}
 
-          query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:20}
-          query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:6}
-
+      query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:20}
+      query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:6}
       query-max-edge-km: ${OSM_QUERY_MAX_EDGE_KM:12.0}
       failure-split-threshold-km: ${OSM_FAILURE_SPLIT_THRESHOLD_KM:6.0}
       infra-split-threshold-km: ${OSM_INFRA_SPLIT_THRESHOLD_KM:2.0}
       adaptive-max-depth: ${OSM_ADAPTIVE_MAX_DEPTH:12}
       adaptive-min-edge-km: ${OSM_ADAPTIVE_MIN_EDGE_KM:1.0}
+
       overpass-endpoints: ${OSM_OVERPASS_ENDPOINTS:https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter}
       overpass-url: ${OSM_OVERPASS_URL:}
       fallback-url: ${OSM_OVERPASS_FALLBACK_URL:}
