@@ -6,11 +6,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.net.URLDecoder;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpClient.Redirect;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -24,6 +26,19 @@ public class WebsiteContactEnricher {
             "(?:mailto:)?([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})", Pattern.CASE_INSENSITIVE);
     private static final Pattern IG_LINK = Pattern.compile(
             "(?:https?://)?(?:www\\.)?instagram\\.com/([A-Za-z0-9_.]+)", Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern WHATSAPP_LINK =
+            Pattern.compile(
+                    "(?i)(?:https?://)?(?:www\\.)?"
+                            + "(?:wa\\.me/"
+                            + "|(?:api|web)\\.whatsapp\\.com/send\\?[^\\\"'\\s>]*?phone=)"
+                            + "([^&\\\"'\\s<>]+)"
+            );
+
+    private static final Pattern TEL_LINK =
+            Pattern.compile(
+                    "(?i)href\\s*=\\s*[\\\"']\\s*tel:([^\\\"']+)[\\\"']"
+            );
 
     private final Normalizer normalizer;
     private final SsrfGuard ssrfGuard;
@@ -168,15 +183,72 @@ public class WebsiteContactEnricher {
         }
     }
 
-    private String extractPhone(String html) {
-        Matcher m = PHONE_PATTERN.matcher(html);
-        while (m.find()) {
-            String phone = m.group(0);
-            String normalized = normalizer.normalizePhone(phone);
-            if (normalized != null && normalized.length() >= 8) {
+    private String normalizeExtractedPhone(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String decoded = raw;
+
+        try {
+            decoded = URLDecoder.decode(
+                    raw,
+                    StandardCharsets.UTF_8
+            );
+        } catch (IllegalArgumentException ignored) {
+            // mantém raw
+        }
+
+        String normalized = normalizer.normalizePhone(decoded);
+
+        if (normalized == null || normalized.length() < 8) {
+            return null;
+        }
+
+        return normalized;
+    }
+
+    String extractPhone(String html) {
+        if (html == null || html.isBlank()) {
+            return null;
+        }
+
+        Matcher whatsapp = WHATSAPP_LINK.matcher(html);
+
+        while (whatsapp.find()) {
+            String normalized = normalizeExtractedPhone(
+                    whatsapp.group(1)
+            );
+
+            if (normalized != null) {
                 return normalized;
             }
         }
+
+        Matcher tel = TEL_LINK.matcher(html);
+
+        while (tel.find()) {
+            String normalized = normalizeExtractedPhone(
+                    tel.group(1)
+            );
+
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+
+        Matcher generic = PHONE_PATTERN.matcher(html);
+
+        while (generic.find()) {
+            String normalized = normalizeExtractedPhone(
+                    generic.group(0)
+            );
+
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+
         return null;
     }
 

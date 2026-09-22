@@ -18,6 +18,7 @@ import com.gendaz.leads.service.provider.NicheMapper;
 import com.gendaz.leads.service.provider.LocalOsmCatalogProvider;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.provider.SearchRegion;
+import com.gendaz.leads.service.WhatsAppRecipientNormalizer;
 import com.gendaz.leads.util.Normalizer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -50,6 +51,7 @@ class CampaignLeadDiscoveryServiceTest {
     @Mock CampaignLeadPersistenceService persistenceService;
     @Mock WebsiteContactEnricher websiteContactEnricher;
     @Mock Normalizer normalizer;
+    @Mock WhatsAppRecipientNormalizer whatsAppRecipientNormalizer;
     @Mock OpenStreetMapProvider osm;
     @Mock LocalOsmCatalogProvider localCatalogProvider;
 
@@ -62,7 +64,7 @@ class CampaignLeadDiscoveryServiceTest {
     void setUp() throws Exception {
         service = new CampaignLeadDiscoveryService(
                 campaignRepository, campaignLeadRepository, leadRepository, leadEventRepository,
-                deduplicationService, persistenceService, websiteContactEnricher, normalizer, osm,
+                deduplicationService, persistenceService, websiteContactEnricher, whatsAppRecipientNormalizer, normalizer, osm,
                 localCatalogProvider
         );
 

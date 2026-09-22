@@ -5,22 +5,71 @@ import org.springframework.stereotype.Component;
 @Component
 public class WhatsAppRecipientNormalizer {
 
-    public String normalizeForWhatsApp(String phone, String country) {
-        if (phone == null || phone.isBlank()) return null;
+    public String normalizeForWhatsApp(
+            String phone,
+            String country
+    ) {
+        if (phone == null || phone.isBlank()) {
+            return null;
+        }
+
+        String[] candidates = phone.split(";");
+
+        for (String candidate : candidates) {
+            String normalized = normalizeSingle(
+                    candidate,
+                    country
+            );
+
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+
+        return null;
+    }
+
+    private String normalizeSingle(
+            String phone,
+            String country
+    ) {
+        if (phone == null || phone.isBlank()) {
+            return null;
+        }
 
         String digits = phone.replaceAll("\\D", "");
-        if (digits.isBlank()) return null;
 
-        // Remove prefixo internacional 00 (ex: 0055... -> 55...)
-        while (digits.startsWith("00") && digits.length() > 2) {
+        if (digits.isBlank()) {
+            return null;
+        }
+
+        while (digits.startsWith("00")
+                && digits.length() > 2) {
             digits = digits.substring(2);
         }
 
-        boolean isBr = (country == null || country.isBlank() || "BR".equalsIgnoreCase(country.trim()));
-        if (isBr) {
+        if (isBrazil(country)) {
             return normalizeBrazil(digits);
         }
+
         return normalizeForeign(digits);
+    }
+
+    private boolean isBrazil(String country) {
+        if (country == null || country.isBlank()) {
+            return true;
+        }
+
+        String normalized = java.text.Normalizer
+                .normalize(
+                        country.trim().toLowerCase(),
+                        java.text.Normalizer.Form.NFD
+                )
+                .replaceAll("\\p{M}", "");
+
+        return normalized.equals("br")
+                || normalized.equals("brasil")
+                || normalized.equals("brazil");
     }
 
     private String normalizeBrazil(String digits) {

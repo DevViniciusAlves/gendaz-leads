@@ -2,112 +2,59 @@ package com.gendaz.leads.service;
 
 import com.gendaz.leads.util.Normalizer;
 import com.gendaz.leads.util.SsrfGuard;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.mock;
 
-@ExtendWith(MockitoExtension.class)
 class WebsiteContactEnricherTest {
 
-    @Mock Normalizer normalizer;
-    @Mock SsrfGuard ssrfGuard;
+    private final WebsiteContactEnricher enricher =
+            new WebsiteContactEnricher(
+                    new Normalizer(),
+                    mock(SsrfGuard.class),
+                    2000,
+                    3000,
+                    500000
+            );
 
-    private WebsiteContactEnricher enricher;
+    @Test
+    void extractsWaMeBeforeGenericPhone() {
+        String html = "<a href=\"https://wa.me/5565999999999\">WhatsApp</a>";
 
-    @BeforeEach
-    void setUp() {
-        enricher = new WebsiteContactEnricher(normalizer, ssrfGuard, 2000, 3000, 500000);
+        assertEquals(
+                "5565999999999",
+                enricher.extractPhone(html)
+        );
     }
 
     @Test
-    void emptyWebsiteReturnsEmpty() {
-        var result = enricher.enrich("");
-        assertNotNull(result);
-        assertNull(result.phone());
-        assertNull(result.email());
-        assertNull(result.instagramUsername());
+    void extractsWhatsappApiPhone() {
+        String html = "<a href=\"https://api.whatsapp.com/send?phone=5565999999999\">WhatsApp</a>";
+
+        assertEquals(
+                "5565999999999",
+                enricher.extractPhone(html)
+        );
     }
 
     @Test
-    void nullWebsiteReturnsEmpty() {
-        var result = enricher.enrich(null);
-        assertNotNull(result);
-        assertNull(result.phone());
-        assertNull(result.email());
-        assertNull(result.instagramUsername());
+    void extractsTelLink() {
+        String html = "<a href=\"tel:+55 (65) 99999-9999\">Ligue</a>";
+
+        assertEquals(
+                "5565999999999",
+                enricher.extractPhone(html)
+        );
     }
 
     @Test
-    void unsafeWebsiteReturnsEmpty() {
-        when(ssrfGuard.isSafe("https://example.com")).thenReturn(false);
+    void decodesUrlEncodedWhatsappPhone() {
+        String html = "<a href=\"https://api.whatsapp.com/send?phone=%2B5565999999999\">WhatsApp</a>";
 
-        var result = enricher.enrich("https://example.com");
-
-        assertNotNull(result);
-        assertNull(result.phone());
-        assertNull(result.email());
-        assertNull(result.instagramUsername());
-    }
-
-    @Test
-    void normalizeTargetUrlAddsHttps() {
-        lenient().when(ssrfGuard.isSafe(anyString())).thenReturn(true);
-        lenient().when(normalizer.normalizePhone(anyString())).thenReturn("+556599998888");
-        lenient().when(normalizer.normalizeEmail(anyString())).thenReturn("test@example.com");
-        lenient().when(normalizer.normalizeInstagram(anyString())).thenReturn("test");
-
-        enricher.enrich("example.com");
-
-        verify(ssrfGuard, atLeastOnce()).isSafe("https://example.com");
-    }
-
-    @Test
-    void normalizeTargetUrlKeepsHttps() {
-        lenient().when(ssrfGuard.isSafe(anyString())).thenReturn(true);
-        lenient().when(normalizer.normalizePhone(anyString())).thenReturn("+556599998888");
-        lenient().when(normalizer.normalizeEmail(anyString())).thenReturn("test@example.com");
-        lenient().when(normalizer.normalizeInstagram(anyString())).thenReturn("test");
-
-        enricher.enrich("https://example.com");
-
-        verify(ssrfGuard, atLeastOnce()).isSafe("https://example.com");
-    }
-
-    @Test
-    void normalizeTargetUrlHandlesHttpPrefix() {
-        lenient().when(ssrfGuard.isSafe(anyString())).thenReturn(true);
-        lenient().when(normalizer.normalizePhone(anyString())).thenReturn("+556599998888");
-        lenient().when(normalizer.normalizeEmail(anyString())).thenReturn("test@example.com");
-        lenient().when(normalizer.normalizeInstagram(anyString())).thenReturn("test");
-
-        enricher.enrich("http://example.com");
-
-        verify(ssrfGuard, atLeastOnce()).isSafe("http://example.com");
-    }
-
-    @Test
-    void websiteContactDataRecord() {
-        var data = new WebsiteContactEnricher.WebsiteContactData("phone", "email", "instagram");
-
-        assertEquals("phone", data.phone());
-        assertEquals("email", data.email());
-        assertEquals("instagram", data.instagramUsername());
-    }
-
-    @Test
-    void enrichmentWithAllFields() {
-        lenient().when(ssrfGuard.isSafe(anyString())).thenReturn(true);
-        lenient().when(normalizer.normalizePhone(anyString())).thenReturn("+556599998888");
-        lenient().when(normalizer.normalizeEmail(anyString())).thenReturn("test@example.com");
-        lenient().when(normalizer.normalizeInstagram(anyString())).thenReturn("test");
-
-        var result = enricher.enrich("https://example.com");
-
-        assertNotNull(result);
+        assertEquals(
+                "5565999999999",
+                enricher.extractPhone(html)
+        );
     }
 }

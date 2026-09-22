@@ -1,5 +1,7 @@
 package com.gendaz.leads.service.provider;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.domain.LeadCandidate;
 import com.gendaz.leads.entity.OsmCatalogRegion;
 import com.gendaz.leads.entity.OsmPlace;
@@ -46,6 +48,75 @@ public class LocalOsmCatalogProvider {
         this.normalizer = normalizer;
         this.candidateMultiplier = candidateMultiplier;
         this.maxCandidates = maxCandidates;
+    }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    private JsonNode parseTags(String tagsJson) {
+        if (tagsJson == null || tagsJson.isBlank()) {
+            return JSON.createObjectNode();
+        }
+
+        try {
+            JsonNode node = JSON.readTree(tagsJson);
+
+            if (node != null && node.isObject()) {
+                return node;
+            }
+        } catch (Exception e) {
+            log.warn(
+                    "[osm-catalog] invalid_tags_json error={}",
+                    e.getMessage()
+            );
+        }
+
+        return JSON.createObjectNode();
+    }
+
+    private String tag(JsonNode tags, String key) {
+        if (tags == null || key == null) {
+            return null;
+        }
+
+        JsonNode value = tags.get(key);
+
+        if (value == null || value.isNull()) {
+            return null;
+        }
+
+        String text = value.asText();
+
+        return text == null || text.isBlank()
+                ? null
+                : text.trim();
+    }
+
+    private String firstPhoneLike(String... values) {
+        if (values == null) {
+            return null;
+        }
+
+        for (String value : values) {
+            if (value == null || value.isBlank()) {
+                continue;
+            }
+
+            for (String candidate : value.split(";")) {
+                String raw = candidate.trim();
+
+                if (raw.isBlank()) {
+                    continue;
+                }
+
+                String digits = raw.replaceAll("\\D", "");
+
+                if (digits.length() >= 8) {
+                    return raw;
+                }
+            }
+        }
+
+        return null;
     }
 
     public String getName() {
@@ -252,38 +323,86 @@ public class LocalOsmCatalogProvider {
     }
 
     private LeadCandidate mapToCandidate(OsmPlace place) {
-        if (place.getBusinessName() == null || place.getBusinessName().isBlank()) {
+        if (place.getBusinessName() == null
+                || place.getBusinessName().isBlank()) {
             return null;
         }
+
+        JsonNode tags = parseTags(place.getTags());
+
+        String phone = firstPhoneLike(
+                place.getPhone(),
+                tag(tags, "contact:whatsapp"),
+                tag(tags, "whatsapp"),
+                tag(tags, "contact:phone"),
+                tag(tags, "phone"),
+                tag(tags, "contact:mobile"),
+                tag(tags, "mobile")
+        );
+
+        String website = firstPresent(
+                place.getWebsite(),
+                tag(tags, "contact:website"),
+                tag(tags, "website"),
+                tag(tags, "url")
+        );
+
+        String email = firstPresent(
+                place.getEmail(),
+                tag(tags, "contact:email"),
+                tag(tags, "email")
+        );
+
+        String instagram = firstPresent(
+                place.getInstagram(),
+                tag(tags, "contact:instagram"),
+                tag(tags, "instagram")
+        );
+
         LeadCandidate candidate = new LeadCandidate(
                 place.getBusinessName().trim(),
                 "openstreetmap",
                 place.getOsmType() + "/" + place.getOsmId()
         );
+
         candidate.setCategory(buildCategory(place.getTags()));
-        candidate.setWebsite(firstPresent(place.getWebsite()));
-        candidate.setPhone(firstPresent(place.getPhone()));
-        candidate.setEmail(firstPresent(place.getEmail()));
+        candidate.setWebsite(website);
+        candidate.setPhone(phone);
+        candidate.setEmail(email);
         candidate.setCity(place.getCity());
         candidate.setState(place.getState());
         candidate.setCountry(place.getCountry());
         candidate.setAddress(place.getAddress());
+
         candidate.setInstagramStatus("NOT_FOUND");
-        if (place.getInstagram() != null && !place.getInstagram().isBlank()) {
-            String normalized = normalizer.normalizeInstagram(place.getInstagram());
+
+        if (instagram != null && !instagram.isBlank()) {
+            String normalized = normalizer.normalizeInstagram(instagram);
+
             if (normalized != null && !normalized.isBlank()) {
                 candidate.setInstagramUsername(normalized);
-                candidate.setInstagramUrl("https://instagram.com/" + normalized);
+                candidate.setInstagramUrl(
+                        "https://instagram.com/" + normalized
+                );
                 candidate.setInstagramStatus("FOUND");
             }
         }
+
+        log.info(
+                "[osm-catalog] candidate_contact sourceId={} phonePresent={} websitePresent={} instagramPresent={}",
+                candidate.getSourceId(),
+                candidate.getPhone() != null,
+                candidate.getWebsite() != null,
+                candidate.getInstagramUsername() != null
+        );
+
         return candidate;
     }
 
     private String buildCategory(String tagsJson) {
         if (tagsJson == null || tagsJson.isBlank()) return null;
         try {
-            com.fasterxml.jackson.databind.JsonNode tags = new com.fasterxml.jackson.databind.ObjectMapper().readTree(tagsJson);
+            JsonNode tags = JSON.readTree(tagsJson);
             if (tags.has("beauty")) return "beauty:" + tags.get("beauty").asText();
             if (tags.has("shop")) return "shop:" + tags.get("shop").asText();
             if (tags.has("amenity")) return "amenity:" + tags.get("amenity").asText();

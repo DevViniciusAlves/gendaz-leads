@@ -52,6 +52,7 @@ public class CampaignLeadDiscoveryService {
     private final DeduplicationService deduplicationService;
     private final CampaignLeadPersistenceService persistenceService;
     private final WebsiteContactEnricher websiteContactEnricher;
+    private final WhatsAppRecipientNormalizer whatsAppRecipientNormalizer;
     private final Normalizer normalizer;
     private final OpenStreetMapProvider osm;
     private final LocalOsmCatalogProvider localCatalogProvider;
@@ -118,6 +119,7 @@ public class CampaignLeadDiscoveryService {
             DeduplicationService deduplicationService,
             CampaignLeadPersistenceService persistenceService,
             WebsiteContactEnricher websiteContactEnricher,
+            WhatsAppRecipientNormalizer whatsAppRecipientNormalizer,
             Normalizer normalizer,
             OpenStreetMapProvider osm,
             LocalOsmCatalogProvider localCatalogProvider
@@ -129,6 +131,7 @@ public class CampaignLeadDiscoveryService {
         this.deduplicationService = deduplicationService;
         this.persistenceService = persistenceService;
         this.websiteContactEnricher = websiteContactEnricher;
+        this.whatsAppRecipientNormalizer = whatsAppRecipientNormalizer;
         this.normalizer = normalizer;
         this.osm = osm;
         this.localCatalogProvider = localCatalogProvider;
@@ -962,6 +965,8 @@ public class CampaignLeadDiscoveryService {
                 continue;
             }
 
+            normalizeCandidatePhone(candidate);
+
             var beforeEnrichment =
                     deduplicationService.check(candidate);
 
@@ -991,6 +996,8 @@ public class CampaignLeadDiscoveryService {
                     candidate,
                     enrichmentCache
             );
+
+            normalizeCandidatePhone(candidate);
 
             var afterEnrichment =
                     deduplicationService.check(candidate);
@@ -1207,6 +1214,20 @@ public class CampaignLeadDiscoveryService {
 
     private boolean hasRequiredProspectingContact(LeadCandidate candidate) {
         return candidate != null && hasText(candidate.getPhone());
+    }
+
+    private void normalizeCandidatePhone(LeadCandidate candidate) {
+        if (candidate == null || !hasText(candidate.getPhone())) {
+            return;
+        }
+
+        String normalized = whatsAppRecipientNormalizer
+                .normalizeForWhatsApp(
+                        candidate.getPhone(),
+                        candidate.getCountry()
+                );
+
+        candidate.setPhone(normalized);
     }
 
     private DiscoveryExecutionResult discoverFromLocalCatalog(

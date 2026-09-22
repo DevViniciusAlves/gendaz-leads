@@ -72,4 +72,58 @@ class WhatsAppRecipientNormalizerTest {
         assertNull(normalizer.normalizeForWhatsApp("   ", "BR"));
         assertNull(normalizer.normalizeForWhatsApp(null, "BR"));
     }
+
+    @Test
+    void brasilDisplayNameAdds55() {
+        assertEquals(
+                "5565999999999",
+                normalizer.normalizeForWhatsApp(
+                        "(65) 99999-9999",
+                        "Brasil"
+                )
+        );
+    }
+
+    @Test
+    void brazilDisplayNameAdds55() {
+        assertEquals(
+                "5565999999999",
+                normalizer.normalizeForWhatsApp(
+                        "(65) 99999-9999",
+                        "Brazil"
+                )
+        );
+    }
+
+    @Test
+    void whatsappUrlIsNormalized() {
+        assertEquals(
+                "5565999999999",
+                normalizer.normalizeForWhatsApp(
+                        "https://wa.me/5565999999999",
+                        "Brasil"
+                )
+        );
+    }
+
+    @Test
+    void multipleOsmPhonesUsesFirstValid() {
+        assertEquals(
+                "5565999999999",
+                normalizer.normalizeForWhatsApp(
+                        "+5565999999999; +5565888888888",
+                        "Brasil"
+                )
+        );
+    }
+
+    @Test
+    void whatsappYesIsInvalid() {
+        assertNull(
+                normalizer.normalizeForWhatsApp(
+                        "yes",
+                        "Brasil"
+                )
+        );
+    }
 }

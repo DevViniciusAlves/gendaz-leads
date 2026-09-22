@@ -8,6 +8,7 @@ then atomically publishes to osm_places.
 
 import argparse
 import json
+import re
 import sys
 import os
 import psycopg2
@@ -21,7 +22,14 @@ COMMERCIAL_TAG_KEYS = {
 }
 
 
-CONTACT_PHONE_KEYS = ['contact:phone', 'phone', 'contact:mobile', 'mobile']
+CONTACT_PHONE_KEYS = [
+    'contact:whatsapp',
+    'whatsapp',
+    'contact:phone',
+    'phone',
+    'contact:mobile',
+    'mobile',
+]
 CONTACT_WEBSITE_KEYS = ['contact:website', 'website', 'url']
 CONTACT_EMAIL_KEYS = ['contact:email', 'email']
 CONTACT_INSTAGRAM_KEYS = ['contact:instagram', 'instagram']
@@ -134,6 +142,32 @@ def first_present(tags: Dict[str, Any], keys: List[str]) -> Optional[str]:
         v = tags.get(k)
         if v is not None and str(v).strip():
             return str(v).strip()
+    return None
+
+
+def first_phone_like(tags: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    for key in keys:
+        value = tags.get(key)
+
+        if value is None:
+            continue
+
+        raw = str(value).strip()
+
+        if not raw:
+            continue
+
+        for candidate in raw.split(';'):
+            candidate = candidate.strip()
+
+            if not candidate:
+                continue
+
+            digits = re.sub(r'\D', '', candidate)
+
+            if len(digits) >= 8:
+                return candidate
+
     return None
 
 
@@ -262,7 +296,7 @@ def parse_feature(feature: Dict[str, Any], sync_run_id: int, region_id: int,
         return None
 
     # Extract contacts
-    phone = first_present(tags, CONTACT_PHONE_KEYS)
+    phone = first_phone_like(tags, CONTACT_PHONE_KEYS)
     website = first_present(tags, CONTACT_WEBSITE_KEYS)
     email = first_present(tags, CONTACT_EMAIL_KEYS)
     instagram = first_present(tags, CONTACT_INSTAGRAM_KEYS)

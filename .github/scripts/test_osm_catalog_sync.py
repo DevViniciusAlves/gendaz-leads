@@ -264,6 +264,85 @@ class TestParseFeature(unittest.TestCase):
         result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
         self.assertEqual(result['website'], 'http://contact.example.com')
 
+    def test_contact_whatsapp_precedence(self):
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 90001,
+                'name': 'Barbearia WhatsApp',
+                'shop': 'barber',
+                'phone': '+5565888888888',
+                'contact:whatsapp': '+5565999999999',
+            },
+            'geometry': {
+                'type': 'Point',
+                'coordinates': [-56.1, -15.6]
+            }
+        }
+
+        result = parse_feature(
+            feature, 1, 1,
+            'Cuiabá', 'Mato Grosso', 'br'
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result['phone'],
+            '+5565999999999'
+        )
+
+    def test_contact_whatsapp_yes_falls_back_to_phone(self):
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 90002,
+                'name': 'Barbearia Phone',
+                'shop': 'barber',
+                'contact:whatsapp': 'yes',
+                'phone': '+5565999999999',
+            },
+            'geometry': {
+                'type': 'Point',
+                'coordinates': [-56.1, -15.6]
+            }
+        }
+
+        result = parse_feature(
+            feature, 1, 1,
+            'Cuiabá', 'Mato Grosso', 'br'
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result['phone'],
+            '+5565999999999'
+        )
+
+    def test_multiple_phone_values_uses_first_valid(self):
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 90003,
+                'name': 'Barbearia Multi',
+                'shop': 'barber',
+                'contact:phone': '+5565999999999; +5565888888888',
+            },
+            'geometry': {
+                'type': 'Point',
+                'coordinates': [-56.1, -15.6]
+            }
+        }
+
+        result = parse_feature(
+            feature, 1, 1,
+            'Cuiabá', 'Mato Grosso', 'br'
+        )
+
+        self.assertEqual(
+            result['phone'],
+            '+5565999999999'
+        )
+
 
 class TestRecordSeparatorHandling(unittest.TestCase):
     def test_line_with_record_separator(self):
