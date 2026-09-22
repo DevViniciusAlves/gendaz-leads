@@ -107,14 +107,18 @@ export default function App() {
               }
             />
             <Route
-              path="/osm"
+              path="/sincronizar"
               element={
-                <ProtectedRoute requiredRole="ADMIN">
+                <ProtectedRoute>
                   <AppShell>
                     <OsmCatalog />
                   </AppShell>
                 </ProtectedRoute>
               }
+            />
+            <Route
+              path="/osm"
+              element={<Navigate to="/sincronizar" replace />}
             />
             <Route
               path="/templates"

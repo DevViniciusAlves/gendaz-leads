@@ -208,8 +208,9 @@ public class LocalOsmCatalogProvider {
 
         for (String part : parts) {
             String value = normalizeForCompare(part);
+
             if (!value.isBlank()) {
-                normalized.add(java.util.regex.Pattern.quote(value));
+                normalized.add(value);
             }
         }
 

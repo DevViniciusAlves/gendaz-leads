@@ -5,7 +5,6 @@ import { IconDashboard, IconCampaigns, IconLeads, IconChat, IconLogout, IconData
 export function AppShell({ children }) {
   const user = getUser()
   const navigate = useNavigate()
-  const isAdmin = user?.role === 'ADMIN'
 
   function logout() {
     clearSession()
@@ -46,15 +45,13 @@ export function AppShell({ children }) {
           <IconChat />
           WhatsApp
         </NavLink>
-        {isAdmin && (
-          <NavLink
-            to="/osm"
-            className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}
-          >
-            <IconDatabase />
-            Catálogo OSM
-          </NavLink>
-        )}
+        <NavLink
+          to="/sincronizar"
+          className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}
+        >
+          <IconDatabase />
+          Sincronizar
+        </NavLink>
       </aside>
       <div className="main">
         <header className="topbar">

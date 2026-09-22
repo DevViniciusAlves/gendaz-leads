@@ -118,8 +118,30 @@ export function OsmCatalog() {
       const response = await api.post('/api/osm-catalog/sync', { city, country })
       push('Sincronização iniciada. Verifique o status na tabela.', 'success')
       setShowForm(false)
-      // Start polling for this new sync run
-      if (response.syncRunId) {
+      // Insert the new run immediately into the region
+      if (response.syncRunId && response.regionId) {
+        setRegions((prev) =>
+          prev.map((region) =>
+            region.id === response.regionId
+              ? {
+                  ...region,
+                  syncRuns: [
+                    {
+                      id: response.syncRunId,
+                      regionId: response.regionId,
+                      city: response.city,
+                      state: response.state,
+                      country: response.country,
+                      status: response.status || 'QUEUED'
+                    }
+                  ]
+                }
+              : region
+          )
+        )
+
+        checkedActiveRuns.current.add(response.regionId)
+
         startPolling(response.syncRunId)
       }
     } catch (err) {
@@ -136,18 +158,28 @@ export function OsmCatalog() {
     const interval = setInterval(async () => {
       try {
         const data = await api.get(`/api/osm-catalog/sync/${syncRunId}`)
+        // Update region with latest sync run by regionId
+        setRegions((prev) =>
+          prev.map((region) =>
+            region.id === data.regionId
+              ? {
+                  ...region,
+                  syncRuns: [data]
+                }
+              : region
+          )
+        )
+
         if (data.status === 'SUCCESS' || data.status === 'FAILED') {
           clearInterval(pollingIntervals.current[syncRunId])
           delete pollingIntervals.current[syncRunId]
+
+          checkedActiveRuns.current.delete(data.regionId)
+
           loadRegions()
+
+          return
         }
-        // Update region with latest sync run
-        setRegions(prev => prev.map(r => {
-          if (r.syncRuns && r.syncRuns[0] && r.syncRuns[0].id === syncRunId) {
-            return { ...r, syncRuns: [data] }
-          }
-          return r
-        }))
       } catch (err) {
         push(err.message, 'error')
         clearInterval(pollingIntervals.current[syncRunId])
@@ -184,9 +216,9 @@ export function OsmCatalog() {
         <div>
           <h1 className="page-title">
             <IconDatabase width={22} height={22} style={{ marginRight: 8, verticalAlign: 'middle' }} />
-            Catálogo OSM
+            Sincronizar
           </h1>
-          <p className="page-sub">Gerencie o catálogo local de estabelecimentos do OpenStreetMap.</p>
+          <p className="page-sub">Atualize os dados de estabelecimentos antes de gerar novos leads.</p>
         </div>
         <button className="btn btn-primary" onClick={() => setShowForm(true)} disabled={countriesLoading}>
           <IconPlus width={15} height={15} />

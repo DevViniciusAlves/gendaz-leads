@@ -184,6 +184,24 @@ def normalize_name(name: str) -> str:
     return s
 
 
+def representative_ring_point(ring):
+    if not ring:
+        raise ValueError('Empty polygon ring')
+
+    points = ring
+
+    if len(points) > 1 and points[0] == points[-1]:
+        points = points[:-1]
+
+    if not points:
+        raise ValueError('Polygon ring has no usable points')
+
+    x = sum(float(p[0]) for p in points) / len(points)
+    y = sum(float(p[1]) for p in points) / len(points)
+
+    return x, y
+
+
 def extract_representative_coords(feature: Dict[str, Any]) -> Tuple[float, float]:
     geom = feature.get('geometry')
     if not geom:
@@ -199,13 +217,13 @@ def extract_representative_coords(feature: Dict[str, Any]) -> Tuple[float, float
         else:
             return float(coords[0][0][0]), float(coords[0][0][1])
     elif gtype in ('Polygon', 'MultiPolygon'):
-        # Use centroid of first ring
         if gtype == 'Polygon':
             ring = coords[0]
         else:
             ring = coords[0][0]
-        x = sum(p[0] for p in ring) / len(ring)
-        y = sum(p[1] for p in ring) / len(ring)
+
+        x, y = representative_ring_point(ring)
+
         return float(x), float(y)
     else:
         raise ValueError(f'Unsupported geometry type: {gtype}')

@@ -138,7 +138,7 @@ jobs:
           echo "[osm-sync] downloading checksum"
           curl -fL --retry 3 --retry-delay 5 -o "${PBF_FILE}.md5" "$CHECKSUM_URL"
 
-          EXPECTED=$(cat "${PBF_FILE}.md5" | awk '{print $1}')
+          EXPECTED=$(awk '{print $1}' "${PBF_FILE}.md5")
           ACTUAL=$(md5sum "$PBF_FILE" | awk '{print $1}')
 
           if [ "$EXPECTED" != "$ACTUAL" ]; then
@@ -239,10 +239,36 @@ jobs:
       - name: Update sync run FAILED
         if: failure()
         run: |
-          psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
-            UPDATE osm_sync_runs
-            SET status = 'FAILED', finished_at = NOW()
-            WHERE id = $SYNC_RUN_ID
-              AND status != 'SUCCESS';
-          "
+          if [ -z "${OSM_SYNC_DATABASE_URL:-}" ]; then
+            echo "[osm-sync] failed before database connection was available"
+            exit 0
+          fi
+
+          psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 <<SQL
+          UPDATE osm_sync_runs
+          SET
+              status = 'FAILED',
+              finished_at = NOW(),
+              error_message = COALESCE(
+                  error_message,
+                  'GitHub Actions workflow failed before catalog publish'
+              )
+          WHERE id = $SYNC_RUN_ID
+            AND status <> 'SUCCESS';
+
+          UPDATE osm_catalog_regions
+          SET
+              last_error = COALESCE(
+                  (
+                      SELECT error_message
+                      FROM osm_sync_runs
+                      WHERE id = $SYNC_RUN_ID
+                  ),
+                  'GitHub Actions workflow failed before catalog publish'
+              ),
+              last_attempt_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $REGION_ID;
+          SQL
+
           echo "[osm-sync] failed"

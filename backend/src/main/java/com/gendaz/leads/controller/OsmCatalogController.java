@@ -41,15 +41,28 @@ public class OsmCatalogController {
     }
 
     @PostMapping("/sync")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("isAuthenticated()")
     public ResponseEntity<OsmSyncResponse> requestSync(@Valid @RequestBody OsmSyncRequest request) {
         String email = securityService.currentEmail();
+
         User currentUser = userRepository.findByEmail(email)
-                .orElseThrow(() -> new com.gendaz.leads.exception.ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "Não autenticado"));
-        OsmSyncRun syncRun = syncService.requestSync(request.city(), request.country(), currentUser);
-        // Dispatch in a separate transaction
+                .orElseThrow(() -> new com.gendaz.leads.exception.ApiException(
+                        HttpStatus.UNAUTHORIZED,
+                        "UNAUTHENTICATED",
+                        "Não autenticado"
+                ));
+
+        OsmSyncRun syncRun = syncService.requestSync(
+                request.city(),
+                request.country(),
+                currentUser
+        );
+
         syncService.dispatchSync(syncRun);
-        return ResponseEntity.status(HttpStatus.ACCEPTED).body(OsmSyncResponse.from(syncRun));
+
+        return ResponseEntity
+                .status(HttpStatus.ACCEPTED)
+                .body(OsmSyncResponse.from(syncRun));
     }
 
     @GetMapping("/sync/{id}")
