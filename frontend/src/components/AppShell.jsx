@@ -1,10 +1,11 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import { getUser, clearSession } from '../auth.js'
-import { IconDashboard, IconCampaigns, IconLeads, IconChat, IconLogout } from './Icons.jsx'
+import { IconDashboard, IconCampaigns, IconLeads, IconChat, IconLogout, IconDatabase } from './Icons.jsx'
 
 export function AppShell({ children }) {
   const user = getUser()
   const navigate = useNavigate()
+  const isAdmin = user?.role === 'ADMIN'
 
   function logout() {
     clearSession()
@@ -45,6 +46,15 @@ export function AppShell({ children }) {
           <IconChat />
           WhatsApp
         </NavLink>
+        {isAdmin && (
+          <NavLink
+            to="/osm"
+            className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}
+          >
+            <IconDatabase />
+            Catálogo OSM
+          </NavLink>
+        )}
       </aside>
       <div className="main">
         <header className="topbar">

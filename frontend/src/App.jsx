@@ -12,6 +12,7 @@ import { CampaignDetail } from './pages/CampaignDetail.jsx'
 import { Leads } from './pages/Leads.jsx'
 import { LeadDetail } from './pages/LeadDetail.jsx'
 import { WhatsApp } from './pages/WhatsApp.jsx'
+import { OsmCatalog } from './pages/OsmCatalog.jsx'
 
 function Verifier({ children }) {
   const [checked, setChecked] = useState(false)
@@ -101,6 +102,16 @@ export default function App() {
                 <ProtectedRoute>
                   <AppShell>
                     <WhatsApp />
+                  </AppShell>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/osm"
+              element={
+                <ProtectedRoute>
+                  <AppShell>
+                    <OsmCatalog />
                   </AppShell>
                 </ProtectedRoute>
               }

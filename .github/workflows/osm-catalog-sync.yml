@@ -1,0 +1,249 @@
+name: OSM Catalog Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_run_id:
+        description: 'ID da execução de sincronização'
+        required: true
+        type: string
+      region_id:
+        description: 'ID da região no catálogo'
+        required: true
+        type: string
+      city:
+        description: 'Nome da cidade'
+        required: true
+        type: string
+      state:
+        description: 'Estado (UF ou nome completo)'
+        required: true
+        type: string
+      country_code:
+        description: 'Código do país (ISO2)'
+        required: true
+        type: string
+      osm_type:
+        description: 'Tipo OSM (relation, way, node)'
+        required: true
+        type: string
+      osm_id:
+        description: 'ID OSM'
+        required: true
+        type: string
+      geofabrik_region:
+        description: 'Região Geofabrik (centro-oeste, nordeste, norte, sudeste, sul)'
+        required: true
+        type: string
+
+concurrency:
+  group: osm-catalog-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      OSM_SYNC_DATABASE_URL: ${{ secrets.OSM_SYNC_DATABASE_URL }}
+      SYNC_RUN_ID: ${{ github.event.inputs.sync_run_id }}
+      REGION_ID: ${{ github.event.inputs.region_id }}
+      CITY: ${{ github.event.inputs.city }}
+      STATE: ${{ github.event.inputs.state }}
+      COUNTRY_CODE: ${{ github.event.inputs.country_code }}
+      OSM_TYPE: ${{ github.event.inputs.osm_type }}
+      OSM_ID: ${{ github.event.inputs.osm_id }}
+      GEOFABRIK_REGION: ${{ github.event.inputs.geofabrik_region }}
+      GITHUB_RUN_ID: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool curl ca-certificates
+
+      - name: Install Python dependencies
+        run: |
+          pip install --no-cache-dir psycopg2-binary requests
+
+      - name: Validate environment
+        run: |
+          if [ -z "$OSM_SYNC_DATABASE_URL" ]; then
+            echo "ERROR: OSM_SYNC_DATABASE_URL secret not configured"
+            exit 1
+          fi
+          echo "[osm-sync] start sync_run_id=$SYNC_RUN_ID region_id=$REGION_ID city=$CITY state=$STATE country_code=$COUNTRY_CODE osm_type=$OSM_TYPE osm_id=$OSM_ID geofabrik_region=$GEOFABRIK_REGION"
+
+      - name: Update sync run to RUNNING
+        run: |
+          psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+            UPDATE osm_sync_runs
+            SET status = 'RUNNING', started_at = NOW()
+            WHERE id = $SYNC_RUN_ID;
+          "
+
+      - name: Download PBF extract
+        id: download
+        run: |
+          PBF_URL="https://download.geofabrik.de/south-america/brazil/${GEOFABRIK_REGION}-latest.osm.pbf"
+          CHECKSUM_URL="${PBF_URL}.md5"
+          PBF_FILE="${GEOFABRIK_REGION}-latest.osm.pbf"
+
+          echo "[osm-sync] download_start url=$PBF_URL"
+          curl -fL --retry 3 --retry-delay 5 -o "$PBF_FILE" "$PBF_URL"
+
+          echo "[osm-sync] downloading checksum"
+          curl -fL --retry 3 --retry-delay 5 -o "${PBF_FILE}.md5" "$CHECKSUM_URL"
+
+          EXPECTED=$(cat "${PBF_FILE}.md5" | awk '{print $1}')
+          ACTUAL=$(md5sum "$PBF_FILE" | awk '{print $1}')
+
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "[osm-sync] checksum_failed expected=$EXPECTED actual=$ACTUAL"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'Checksum validation failed for PBF download'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          fi
+
+          echo "[osm-sync] checksum_ok"
+
+      - name: Validate PBF with osmium
+        run: |
+          PBF_FILE="${GEOFABRIK_REGION}-latest.osm.pbf"
+          echo "[osm-sync] validating PBF with osmium"
+          osmium fileinfo "$PBF_FILE" || {
+            echo "[osm-sync] osmium fileinfo failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium fileinfo validation failed'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
+
+      - name: Fetch administrative boundary
+        run: |
+          echo "[osm-sync] fetching boundary for relation $OSM_ID"
+          # Use Nominatim to get polygon for the relation
+          NOMINATIM_URL="https://nominatim.openstreetmap.org/lookup?osm_ids=R${OSM_ID}&format=json&polygon_geojson=1"
+          curl -fL --retry 3 --retry-delay 5 -H "User-Agent: GendazLeads/1.0" -o boundary_response.json "$NOMINATIM_URL"
+
+          # Extract geometry
+          python3 -c "
+import json, sys
+with open('boundary_response.json') as f:
+    data = json.load(f)
+if not data:
+    print('Empty response from Nominatim', file=sys.stderr)
+    sys.exit(1)
+geom = data[0].get('geojson')
+if not geom:
+    print('No geojson in response', file=sys.stderr)
+    sys.exit(1)
+if geom['type'] not in ('Polygon', 'MultiPolygon'):
+    print(f'Invalid geometry type: {geom[\"type\"]}', file=sys.stderr)
+    sys.exit(1)
+with open('boundary.geojson', 'w') as f:
+    json.dump(geom, f)
+print('[osm-sync] boundary_ok type=' + geom['type'])
+          " || {
+            echo "[osm-sync] boundary failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'Failed to fetch or validate administrative boundary'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
+
+      - name: Extract city from PBF
+        run: |
+          PBF_FILE="${GEOFABRIK_REGION}-latest.osm.pbf"
+          echo "[osm-sync] extracting city with osmium"
+          osmium extract -p boundary.geojson -s complete_ways "$PBF_FILE" -o city.osm.pbf || {
+            echo "[osm-sync] osmium extract failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium extract failed for city boundary'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
+          echo "[osm-sync] city_extract_ok"
+
+      - name: Filter commercial POIs
+        run: |
+          echo "[osm-sync] filtering commercial POIs"
+          osmium tags-filter city.osm.pbf \
+            nwr/shop nwr/amenity nwr/craft nwr/healthcare nwr/leisure nwr/office nwr/tourism \
+            -o city-commercial.osm.pbf || {
+            echo "[osm-sync] commercial filter failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium tags-filter failed'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
+          echo "[osm-sync] commercial_filter_ok"
+
+      - name: Export to GeoJSONSeq
+        run: |
+          echo "[osm-sync] exporting to GeoJSONSeq"
+          osmium export city-commercial.osm.pbf -o city-commercial.geojsonseq --geometry-types=point,line,polygon || {
+            echo "[osm-sync] export to geojsonseq failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium export to geojsonseq failed'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
+          echo "[osm-sync] geojsonseq_export_ok"
+
+      - name: Run import script
+        run: |
+          echo "[osm-sync] staging_complete"
+          python3 .github/scripts/osm_catalog_sync.py \
+            --sync-run-id "$SYNC_RUN_ID" \
+            --region-id "$REGION_ID" \
+            --city "$CITY" \
+            --state "$STATE" \
+            --country-code "$COUNTRY_CODE" \
+            --input city-commercial.geojsonseq \
+            --database-url "$OSM_SYNC_DATABASE_URL"
+
+      - name: Update sync run SUCCESS
+        if: success()
+        run: |
+          psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+            UPDATE osm_sync_runs
+            SET status = 'SUCCESS', finished_at = NOW()
+            WHERE id = $SYNC_RUN_ID;
+          "
+          echo "[osm-sync] publish_success"
+
+      - name: Update sync run FAILED
+        if: failure()
+        run: |
+          psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+            UPDATE osm_sync_runs
+            SET status = 'FAILED', finished_at = NOW()
+            WHERE id = $SYNC_RUN_ID
+              AND status != 'SUCCESS';
+          "
+          echo "[osm-sync] failed"

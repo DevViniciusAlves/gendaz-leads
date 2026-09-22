@@ -13,10 +13,13 @@ import com.gendaz.leads.service.provider.AreaQueryResult;
 import com.gendaz.leads.service.provider.DiscoveryBudget;
 import com.gendaz.leads.service.provider.GeoScope;
 import com.gendaz.leads.service.provider.GeographicStrategy;
+import com.gendaz.leads.service.provider.LeadDiscoveryProvider;
 import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
+import com.gendaz.leads.service.provider.LocalOsmCatalogProvider;
 import com.gendaz.leads.service.provider.NicheMapper;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.provider.SearchRegion;
+import com.gendaz.leads.util.CountryCodeResolver;
 import com.gendaz.leads.util.Normalizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,6 +54,10 @@ public class CampaignLeadDiscoveryService {
     private final WebsiteContactEnricher websiteContactEnricher;
     private final Normalizer normalizer;
     private final OpenStreetMapProvider osm;
+    private final LocalOsmCatalogProvider localCatalogProvider;
+
+    @Value("${app.discovery.catalog.enabled:true}")
+    private boolean catalogDiscoveryEnabled;
 
     @Value("${app.discovery.osm.base-budget-ms:180000}")
     private long baseBudgetMs;
@@ -112,7 +119,8 @@ public class CampaignLeadDiscoveryService {
             CampaignLeadPersistenceService persistenceService,
             WebsiteContactEnricher websiteContactEnricher,
             Normalizer normalizer,
-            OpenStreetMapProvider osm
+            OpenStreetMapProvider osm,
+            LocalOsmCatalogProvider localCatalogProvider
     ) {
         this.campaignRepository = campaignRepository;
         this.campaignLeadRepository = campaignLeadRepository;
@@ -123,6 +131,7 @@ public class CampaignLeadDiscoveryService {
         this.websiteContactEnricher = websiteContactEnricher;
         this.normalizer = normalizer;
         this.osm = osm;
+        this.localCatalogProvider = localCatalogProvider;
     }
 
     private record LazyPlanStep(
@@ -195,6 +204,12 @@ public class CampaignLeadDiscoveryService {
         }
 
         validateCampaignLocation(campaign);
+
+        if (catalogDiscoveryEnabled) {
+            log.info("[osm-catalog] catalog_discovery_enabled campaignId={} niche={} city={} country={}",
+                    campaign.getId(), campaign.getNiche(), campaign.getCity(), campaign.getCountry());
+            return discoverFromLocalCatalog(campaign, targetToAdd);
+        }
 
         DiscoveryBudget budget =
                 DiscoveryBudget.forTarget(
@@ -1192,5 +1207,235 @@ public class CampaignLeadDiscoveryService {
 
     private boolean hasRequiredProspectingContact(LeadCandidate candidate) {
         return candidate != null && hasText(candidate.getPhone());
+    }
+
+    private DiscoveryExecutionResult discoverFromLocalCatalog(
+            Campaign campaign,
+            int targetToAdd
+    ) {
+        int initialCampaignLeadCount =
+                (int) campaignLeadRepository
+                        .countByCampaignId(campaign.getId());
+
+        log.info("[osm-catalog] catalog_query campaignId={} niche={} city={} country={} target={}",
+                campaign.getId(), campaign.getNiche(), campaign.getCity(), campaign.getCountry(), targetToAdd);
+
+        List<LeadCandidate> candidates;
+        try {
+            candidates = localCatalogProvider.discover(
+                    campaign.getNiche(),
+                    campaign.getCity(),
+                    campaign.getCountry(),
+                    targetToAdd
+            );
+        } catch (IllegalArgumentException e) {
+            String message = e.getMessage();
+            if (message != null && message.contains("OSM_CATALOG_NOT_READY")) {
+                return new DiscoveryExecutionResult(
+                        DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE,
+                        0,
+                        initialCampaignLeadCount,
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        "OSM_CATALOG_NOT_READY",
+                        "O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads."
+                );
+            }
+            throw e;
+        }
+
+        log.info("[osm-catalog] catalog_candidates campaignId={} found={}", campaign.getId(), candidates.size());
+
+        Set<String> seenSourceIds = new HashSet<>();
+        Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache = new HashMap<>();
+
+        int accepted = 0;
+
+        for (LeadCandidate candidate : candidates) {
+            if (accepted >= targetToAdd) {
+                break;
+            }
+
+            String sourceKey =
+                    normalizer.normalizeSourceId(
+                            candidate.getSource(),
+                            candidate.getSourceId()
+                    );
+
+            if (sourceKey == null) {
+                continue;
+            }
+
+            if (!seenSourceIds.add(sourceKey)) {
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=already_seen_this_run source={} sourceId={}",
+                        campaign.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+                continue;
+            }
+
+            var beforeEnrichment =
+                    deduplicationService.check(candidate);
+
+            if (beforeEnrichment.existing().isPresent()) {
+                Lead existing =
+                        beforeEnrichment.existing().get();
+
+                registerDuplicateEvent(
+                        campaign,
+                        beforeEnrichment,
+                        candidate
+                );
+
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=duplicate_global duplicateReason={} existingLeadId={} source={} sourceId={}",
+                        campaign.getId(),
+                        beforeEnrichment.reason(),
+                        existing.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+
+                continue;
+            }
+
+            enrichCandidateIfNeeded(
+                    candidate,
+                    enrichmentCache
+            );
+
+            var afterEnrichment =
+                    deduplicationService.check(candidate);
+
+            if (afterEnrichment.existing().isPresent()) {
+                Lead existing =
+                        afterEnrichment.existing().get();
+
+                registerDuplicateEvent(
+                        campaign,
+                        afterEnrichment,
+                        candidate
+                );
+
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=duplicate_global_after_enrichment duplicateReason={} existingLeadId={} source={} sourceId={}",
+                        campaign.getId(),
+                        afterEnrichment.reason(),
+                        existing.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+
+                continue;
+            }
+
+            if (!hasRequiredProspectingContact(candidate)) {
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=no_phone_for_whatsapp source={} sourceId={}",
+                        campaign.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+
+                registerSkippedNoContact(
+                        campaign,
+                        candidate
+                );
+
+                continue;
+            }
+
+            try {
+                Lead lead =
+                        persistenceService
+                                .createLeadForCampaign(
+                                        candidate,
+                                        campaign
+                                );
+
+                leadEventRepository.save(
+                        LeadEvent.builder()
+                                .leadId(lead.getId())
+                                .campaignId(campaign.getId())
+                                .eventType("lead_found")
+                                .eventMetadata(
+                                        "source="
+                                                + candidate.getSource()
+                                )
+                                .build()
+                );
+
+                log.info(
+                        "[osm-catalog] candidate_accepted campaignId={} reason=new_lead leadId={} source={} sourceId={}",
+                        campaign.getId(),
+                        lead.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+
+                accepted++;
+
+                updateProgress(
+                        campaign,
+                        initialCampaignLeadCount,
+                        accepted
+                );
+
+            } catch (DataIntegrityViolationException e) {
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=persistence_conflict source={} sourceId={}",
+                        campaign.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+            }
+        }
+
+        int totalCampaignLeads =
+                (int) campaignLeadRepository
+                        .countByCampaignId(campaign.getId());
+
+        DiscoveryExecutionResult.Outcome outcome;
+        String finalErrorCode = null;
+        String finalErrorMessage = null;
+
+        if (accepted >= targetToAdd) {
+            outcome = DiscoveryExecutionResult.Outcome.COMPLETE;
+
+        } else if (accepted > 0) {
+            outcome = DiscoveryExecutionResult.Outcome.PARTIAL;
+            finalErrorMessage = "Foram encontrados " + accepted + " novos leads válidos no catálogo atual.";
+
+        } else {
+            outcome = DiscoveryExecutionResult.Outcome.EMPTY;
+            finalErrorCode = "OSM_NO_USEFUL_LEADS";
+            finalErrorMessage = "Nenhum novo lead disponível no catálogo atual para este nicho.";
+        }
+
+        log.info(
+                "[osm-catalog] discovery_summary campaignId={} acceptedThisRun={} totalCampaignLeads={} outcome={}",
+                campaign.getId(),
+                accepted,
+                totalCampaignLeads,
+                outcome
+        );
+
+        return new DiscoveryExecutionResult(
+                outcome,
+                accepted,
+                totalCampaignLeads,
+                candidates.size(),
+                candidates.size(),
+                0,
+                0,
+                true,
+                finalErrorCode,
+                finalErrorMessage
+        );
     }
 }

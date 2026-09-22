@@ -15,6 +15,7 @@ import com.gendaz.leads.service.provider.GeoScope;
 import com.gendaz.leads.service.provider.GeographicStrategy;
 import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
 import com.gendaz.leads.service.provider.NicheMapper;
+import com.gendaz.leads.service.provider.LocalOsmCatalogProvider;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.provider.SearchRegion;
 import com.gendaz.leads.util.Normalizer;
@@ -50,6 +51,7 @@ class CampaignLeadDiscoveryServiceTest {
     @Mock WebsiteContactEnricher websiteContactEnricher;
     @Mock Normalizer normalizer;
     @Mock OpenStreetMapProvider osm;
+    @Mock LocalOsmCatalogProvider localCatalogProvider;
 
     private CampaignLeadDiscoveryService service;
     private Campaign campaign;
@@ -60,7 +62,8 @@ class CampaignLeadDiscoveryServiceTest {
     void setUp() throws Exception {
         service = new CampaignLeadDiscoveryService(
                 campaignRepository, campaignLeadRepository, leadRepository, leadEventRepository,
-                deduplicationService, persistenceService, websiteContactEnricher, normalizer, osm
+                deduplicationService, persistenceService, websiteContactEnricher, normalizer, osm,
+                localCatalogProvider
         );
 
         setField(service, "baseBudgetMs", 180000L);

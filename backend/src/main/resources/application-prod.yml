@@ -70,3 +70,15 @@ app:
     provider: ${MESSAGING_PROVIDER:whatsapp}
     send-interval-seconds: ${SEND_INTERVAL_SECONDS:60}
     max-concurrent-sends: ${MAX_CONCURRENT_SENDS:1}
+  osm-catalog:
+    enabled: ${OSM_CATALOG_ENABLED:true}
+    github:
+      repository: ${OSM_SYNC_GITHUB_REPOSITORY:DevViniciusAlves/gendaz-leads}
+      workflow: ${OSM_SYNC_GITHUB_WORKFLOW:osm-catalog-sync.yml}
+      ref: ${OSM_SYNC_GITHUB_REF:main}
+      token: ${OSM_SYNC_GITHUB_TOKEN}
+  discovery:
+    catalog:
+      enabled: ${OSM_CATALOG_DISCOVERY_ENABLED:true}
+      candidate-multiplier: ${OSM_CATALOG_CANDIDATE_MULTIPLIER:10}
+      max-candidates: ${OSM_CATALOG_MAX_CANDIDATES:300}

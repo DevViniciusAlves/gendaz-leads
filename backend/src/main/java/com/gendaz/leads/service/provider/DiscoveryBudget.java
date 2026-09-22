@@ -56,6 +56,10 @@ public final class DiscoveryBudget {
         return remainingMs() <= 0L;
     }
 
+    public static DiscoveryBudget unlimited() {
+        return new DiscoveryBudget(Long.MAX_VALUE);
+    }
+
     public int clampTimeout(int configuredTimeoutMs) {
         long remaining = remainingMs();
         if (remaining <= 0) return 0;

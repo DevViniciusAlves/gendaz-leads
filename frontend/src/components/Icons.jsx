@@ -122,3 +122,25 @@ export function IconCheck(p) {
     </svg>
   )
 }
+
+export function IconDatabase(p) {
+  return (
+    <svg {...base} {...p}>
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14" />
+      <path d="M21 5v14" />
+      <ellipse cx="12" cy="19" rx="9" ry="3" />
+    </svg>
+  )
+}
+
+export function IconSync(p) {
+  return (
+    <svg {...base} {...p}>
+      <path d="M21 12a9 9 0 11-3-6.7" />
+      <path d="M21 4v4h-4" />
+      <path d="M3 12a9 9 0 013 6.7" />
+      <path d="M3 20v-4h4" />
+    </svg>
+  )
+}
