@@ -67,4 +67,30 @@ public class CampaignLeadPersistenceService {
                 .sourceId(candidate.getSourceId()).sourceUrl(candidate.getWebsite()).build());
         return lead;
     }
+
+    @Transactional
+    public boolean linkExistingLeadToCampaign(Lead lead, Campaign campaign) {
+        if (lead == null
+                || lead.getId() == null
+                || campaign == null
+                || campaign.getId() == null) {
+            return false;
+        }
+
+        if (campaignLeadRepository.existsByCampaignIdAndLeadId(
+                campaign.getId(),
+                lead.getId()
+        )) {
+            return false;
+        }
+
+        campaignLeadRepository.save(
+                CampaignLead.builder()
+                        .campaignId(campaign.getId())
+                        .leadId(lead.getId())
+                        .build()
+        );
+
+        return true;
+    }
 }

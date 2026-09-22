@@ -292,6 +292,8 @@ public class CampaignLeadDiscoveryService {
             boolean hasStructured =
                     !strategy.tagFilters().isEmpty();
 
+            boolean shouldRunNameFallback = !hasStructured;
+
             if (hasStructured) {
                 areasAttempted++;
 
@@ -329,9 +331,14 @@ public class CampaignLeadDiscoveryService {
                     adminAreaInfraFailures = 0;
                     failedHostsThisCampaign.clear();
 
+                    List<LeadCandidate> structuredCandidates = structured.candidates();
+                    boolean structuredFoundCandidates =
+                            structuredCandidates != null
+                                    && !structuredCandidates.isEmpty();
+
                     accepted += acceptCandidates(
                             campaign,
-                            structured.candidates(),
+                            structuredCandidates,
                             targetToAdd - accepted,
                             seenSourceIds,
                             enrichmentCache
@@ -346,6 +353,8 @@ public class CampaignLeadDiscoveryService {
                     if (accepted >= targetToAdd) {
                         break;
                     }
+
+                    shouldRunNameFallback = !structuredFoundCandidates;
 
                     if (structured.saturated()) {
                         if (region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
@@ -428,7 +437,8 @@ public class CampaignLeadDiscoveryService {
             }
 
             if (
-                    accepted < targetToAdd
+                    shouldRunNameFallback
+                    && accepted < targetToAdd
                     && !budget.expired()
             ) {
                 areasAttempted++;
@@ -604,15 +614,11 @@ public class CampaignLeadDiscoveryService {
             outcome =
                     DiscoveryExecutionResult.Outcome.BUDGET_EXHAUSTED;
 
-            if (finalErrorCode == null) {
-                finalErrorCode =
-                        "OSM_DISCOVERY_BUDGET_EXHAUSTED";
-            }
+            finalErrorCode =
+                    "OSM_DISCOVERY_BUDGET_EXHAUSTED";
 
-            if (finalErrorMessage == null) {
-                finalErrorMessage =
-                        "Budget operacional terminou antes de concluir a cobertura necessária.";
-            }
+            finalErrorMessage =
+                    "A busca atingiu o tempo máximo antes de concluir. Tente novamente.";
 
         } else if (
                 anyValidQuery
@@ -724,6 +730,12 @@ public class CampaignLeadDiscoveryService {
             }
 
             if (!seenSourceIds.add(sourceKey)) {
+                log.info(
+                        "[osm] candidate_rejected campaignId={} reason=already_seen_this_run source={} sourceId={}",
+                        campaign.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
                 continue;
             }
 
@@ -731,11 +743,13 @@ public class CampaignLeadDiscoveryService {
                     deduplicationService.check(candidate);
 
             if (beforeEnrichment.existing().isPresent()) {
-                registerDuplicateEvent(
+                if (tryLinkExistingLead(
                         campaign,
-                        beforeEnrichment,
-                        candidate
-                );
+                        candidate,
+                        beforeEnrichment
+                )) {
+                    accepted++;
+                }
                 continue;
             }
 
@@ -756,11 +770,13 @@ public class CampaignLeadDiscoveryService {
                     deduplicationService.check(candidate);
 
             if (afterEnrichment.existing().isPresent()) {
-                registerDuplicateEvent(
+                if (tryLinkExistingLead(
                         campaign,
-                        afterEnrichment,
-                        candidate
-                );
+                        candidate,
+                        afterEnrichment
+                )) {
+                    accepted++;
+                }
                 continue;
             }
 
@@ -792,12 +808,21 @@ public class CampaignLeadDiscoveryService {
                                 .build()
                 );
 
+                log.info(
+                        "[osm] candidate_accepted campaignId={} reason=new_lead leadId={} source={} sourceId={}",
+                        campaign.getId(),
+                        lead.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+
                 accepted++;
 
             } catch (DataIntegrityViolationException e) {
                 log.info(
-                        "Lead ignorado por conflito de unicidade: campaignId={} sourceId={}",
+                        "[osm] candidate_rejected campaignId={} reason=persistence_conflict source={} sourceId={}",
                         campaign.getId(),
+                        candidate.getSource(),
                         candidate.getSourceId()
                 );
             }
@@ -878,6 +903,94 @@ public class CampaignLeadDiscoveryService {
 
     private boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private boolean isUseful(Lead lead) {
+        return hasText(lead.getPhone())
+                || hasText(lead.getEmail())
+                || hasText(lead.getInstagramUsername())
+                || hasText(lead.getInstagramUrl())
+                || hasText(lead.getWebsite());
+    }
+
+    private boolean tryLinkExistingLead(
+            Campaign campaign,
+            LeadCandidate candidate,
+            DeduplicationService.DuplicateCheck duplicateCheck
+    ) {
+        if (duplicateCheck.existing().isEmpty()) {
+            return false;
+        }
+
+        Lead existing = duplicateCheck.existing().get();
+
+        if (existing.isDoNotContact()) {
+            log.info(
+                    "[osm] candidate_rejected campaignId={} reason=do_not_contact_existing duplicateReason={} leadId={} source={} sourceId={}",
+                    campaign.getId(),
+                    duplicateCheck.reason(),
+                    existing.getId(),
+                    candidate.getSource(),
+                    candidate.getSourceId()
+            );
+            return false;
+        }
+
+        if (!isUseful(existing)) {
+            log.info(
+                    "[osm] candidate_rejected campaignId={} reason=existing_without_useful_contact duplicateReason={} leadId={} source={} sourceId={}",
+                    campaign.getId(),
+                    duplicateCheck.reason(),
+                    existing.getId(),
+                    candidate.getSource(),
+                    candidate.getSourceId()
+            );
+            return false;
+        }
+
+        boolean linked =
+                persistenceService.linkExistingLeadToCampaign(
+                        existing,
+                        campaign
+                );
+
+        if (!linked) {
+            log.info(
+                    "[osm] candidate_rejected campaignId={} reason=already_linked_to_campaign duplicateReason={} leadId={} source={} sourceId={}",
+                    campaign.getId(),
+                    duplicateCheck.reason(),
+                    existing.getId(),
+                    candidate.getSource(),
+                    candidate.getSourceId()
+            );
+            return false;
+        }
+
+        leadEventRepository.save(
+                LeadEvent.builder()
+                        .leadId(existing.getId())
+                        .campaignId(campaign.getId())
+                        .eventType("lead_found")
+                        .eventMetadata(
+                                "source="
+                                        + candidate.getSource()
+                                        + ";reused_existing=true"
+                                        + ";duplicate_reason="
+                                        + duplicateCheck.reason()
+                        )
+                        .build()
+        );
+
+        log.info(
+                "[osm] candidate_accepted campaignId={} reason=reused_existing duplicateReason={} leadId={} source={} sourceId={}",
+                campaign.getId(),
+                duplicateCheck.reason(),
+                existing.getId(),
+                candidate.getSource(),
+                candidate.getSourceId()
+        );
+
+        return true;
     }
 
     private void registerDuplicateEvent(
