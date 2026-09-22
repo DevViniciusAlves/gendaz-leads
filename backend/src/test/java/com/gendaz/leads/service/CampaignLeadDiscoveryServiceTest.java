@@ -75,9 +75,11 @@ class CampaignLeadDiscoveryServiceTest {
         setField(service, "infraSplitThresholdKm", 2.0);
         setField(service, "maxConsecutiveInfraFailures", 6);
         setField(service, "adminAreaInfraFailuresBeforeBbox", 2);
-        setField(service, "regionBudgetMs", 30000L);
-        setField(service, "fallbackRegionBudgetMs", 20000L);
+        setField(service, "regionBudgetMs", 15000L);
+        setField(service, "fallbackRegionBudgetMs", 12000L);
         setField(service, "maxRegionDeferrals", 1);
+        setField(service, "structuredBatchSize", 2);
+        setField(service, "fallbackBatchSize", 2);
 
         campaign = Campaign.builder()
                 .id(1L)
@@ -384,14 +386,38 @@ class CampaignLeadDiscoveryServiceTest {
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
-        var result = service.discoverAndPersist(campaign, 3);
+        // With target=1, we exit after first acceptance, so no fallback should be called
+        var result = service.discoverAndPersist(campaign, 1);
 
         assertEquals(1, result.acceptedThisRun());
         verify(osm, never()).queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong());
+    }
+
+    @Test
+    void structuredWithCandidatesButNoneAcceptedQueuesFallback() {
+        // Candidate without phone - will be rejected
+        LeadCandidate candidate = new LeadCandidate("Barbearia", "openstreetmap", "node/1");
+        candidate.setCategory("shop=barber");
+        // No phone set
+
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
+
+        var result = service.discoverAndPersist(campaign, 3);
+
+        assertEquals(0, result.acceptedThisRun());
+        // When STRUCTURED returns candidates but NONE are accepted (no phone), fallback SHOULD be queued
+        verify(osm, atLeastOnce()).queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong());
     }
 
     @Test
@@ -448,14 +474,15 @@ class CampaignLeadDiscoveryServiceTest {
     }
 
 @Test
-    void structuredComesBeforeNameFallbackTwoPhaseOrder() {
-        LeadCandidate candidate1 = new LeadCandidate("Barbearia A", "openstreetmap", "node/1");
-        candidate1.setCategory("shop=barber");
-        candidate1.setPhone("+55 65 9999-1111");
+    void structuredBatchYieldsToFallbackBeforeNextStructuredBatch() {
+        // Test the batching behavior: 2 STRUCTURED -> 2 FALLBACK -> 2 STRUCTURED -> 2 FALLBACK...
+        LeadCandidate structuredCandidate1 = new LeadCandidate("Barbearia A", "openstreetmap", "node/1");
+        structuredCandidate1.setCategory("shop=barber");
+        structuredCandidate1.setPhone("+55 65 9999-1111");
 
-        LeadCandidate candidate2 = new LeadCandidate("Barbearia B", "openstreetmap", "node/2");
-        candidate2.setCategory("shop=barber");
-        candidate2.setPhone("+55 65 9999-2222");
+        LeadCandidate structuredCandidate2 = new LeadCandidate("Barbearia B", "openstreetmap", "node/2");
+        structuredCandidate2.setCategory("shop=barber");
+        structuredCandidate2.setPhone("+55 65 9999-2222");
 
         LeadCandidate fallbackCandidate = new LeadCandidate("Barbearia Fallback", "openstreetmap", "node/3");
         fallbackCandidate.setCategory("shop=barber");
@@ -463,14 +490,19 @@ class CampaignLeadDiscoveryServiceTest {
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(
-                        AreaQueryResult.success(List.of(candidate1), false, "overpass-api.de", 100),
+                        // Round 1 batch: 2 empty structured (both queue fallback)
                         AreaQueryResult.success(List.of(), false, "overpass-api.de", 100),
-                        AreaQueryResult.success(List.of(candidate2), false, "overpass-api.de", 100),
                         AreaQueryResult.success(List.of(), false, "overpass-api.de", 100),
-                        AreaQueryResult.success(List.of(), false, "overpass-api.de", 100)
+                        // Round 2 batch: 2 structured with candidates
+                        AreaQueryResult.success(List.of(structuredCandidate1), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(structuredCandidate2), false, "overpass-api.de", 100)
                 );
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
-                .thenReturn(AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100));
+                .thenReturn(
+                        // Round 1 fallback batch: 2 fallback calls
+                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(), false, "overpass-api.de", 100)
+                );
 
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
         when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4", "openstreetmap_node/5");
@@ -480,24 +512,83 @@ class CampaignLeadDiscoveryServiceTest {
 
         assertEquals(3, result.acceptedThisRun());
 
-        InOrder inOrder = inOrder(osm);
-        inOrder.verify(osm, atLeast(3)).queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong());
-        inOrder.verify(osm, atLeastOnce()).queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong());
+        ArgumentCaptor<AreaQueryPhase> phaseCaptor = ArgumentCaptor.forClass(AreaQueryPhase.class);
+        verify(osm, atLeast(5)).queryRegionWithStrategy(any(), any(), any(), any(), phaseCaptor.capture(), anyInt(), any(), anyLong());
+
+        List<AreaQueryPhase> phases = phaseCaptor.getAllValues();
+
+        // Expected sequence: STRUCTURED, STRUCTURED, NAME_FALLBACK, NAME_FALLBACK, STRUCTURED, STRUCTURED
+        assertEquals(AreaQueryPhase.STRUCTURED, phases.get(0), "First call should be STRUCTURED");
+        assertEquals(AreaQueryPhase.STRUCTURED, phases.get(1), "Second call should be STRUCTURED");
+        assertEquals(AreaQueryPhase.NAME_FALLBACK, phases.get(2), "Third call should be NAME_FALLBACK (batch yields to fallback)");
+        assertEquals(AreaQueryPhase.NAME_FALLBACK, phases.get(3), "Fourth call should be NAME_FALLBACK");
+        assertEquals(AreaQueryPhase.STRUCTURED, phases.get(4), "Fifth call should be STRUCTURED (next batch)");
+    }
+
+    @Test
+    void structuredBatchThenFallbackBatchInSameRound() {
+        // Test that within a round, we process up to 2 structured, then up to 2 fallback
+        // before moving to next round
+        LeadCandidate fallbackCandidate = new LeadCandidate("Barbearia Fallback", "openstreetmap", "node/3");
+        fallbackCandidate.setCategory("shop=barber");
+        fallbackCandidate.setPhone("+55 65 9999-3333");
+
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
+                .thenReturn(
+                        AreaQueryResult.success(List.of(), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(), false, "overpass-api.de", 100)
+                );
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
+                .thenReturn(
+                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100)
+                );
+
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4", "openstreetmap_node/5");
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+
+        // target=2 so we exit after round 1 (2 fallback accepted)
+        var result = service.discoverAndPersist(campaign, 2);
+
+        assertEquals(2, result.acceptedThisRun());
+
+        ArgumentCaptor<AreaQueryPhase> phaseCaptor = ArgumentCaptor.forClass(AreaQueryPhase.class);
+        verify(osm, atLeast(4)).queryRegionWithStrategy(any(), any(), any(), any(), phaseCaptor.capture(), anyInt(), any(), anyLong());
+
+        List<AreaQueryPhase> phases = phaseCaptor.getAllValues();
+
+        long structuredCount = phases.stream().filter(p -> p == AreaQueryPhase.STRUCTURED).count();
+        long fallbackCount = phases.stream().filter(p -> p == AreaQueryPhase.NAME_FALLBACK).count();
+
+        // In round 1: 2 structured (both empty, queue fallback), then 2 fallback (both return candidates, 2 accepted)
+        assertEquals(2, structuredCount, "Should run 2 STRUCTURED in round 1");
+        assertEquals(2, fallbackCount, "Should run 2 NAME_FALLBACK in round 1");
     }
 
     @Test
     void structuredWithCandidateDoesNotQueueFallback() {
+        // This test is now covered by structuredWithCandidatesSkipsNameFallback
+        // With batching: first region in batch accepts a lead, so no fallback queued for that region
+        // But second region in batch might queue fallback if it returns empty
+        // For target=1, we only need 1 lead, so loop exits after first acceptance
         LeadCandidate candidate = new LeadCandidate("Barbearia", "openstreetmap", "node/1");
         candidate.setCategory("shop=barber");
         candidate.setPhone("+55 65 9999-8888");
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
         when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
-        var result = service.discoverAndPersist(campaign, 3);
+        var result = service.discoverAndPersist(campaign, 1); // target = 1, so exits after first acceptance
 
         assertEquals(1, result.acceptedThisRun());
         verify(osm, never()).queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong());
@@ -505,29 +596,63 @@ class CampaignLeadDiscoveryServiceTest {
 
     @Test
     void regionWithTimeoutIsDeferred() {
+        // Use a region that won't split (small enough)
         LeadCandidate candidate = new LeadCandidate("Barbearia", "openstreetmap", "node/1");
         candidate.setCategory("shop=barber");
         candidate.setPhone("+55 65 9999-8888");
+
+        // Create a campaign with a small scope to avoid splitting
+        Campaign smallCampaign = Campaign.builder()
+                .id(1L)
+                .niche("barbearia")
+                .city("Cuiabá")
+                .country("Brazil")
+                .requestedQuantity(1)
+                .build();
+
+        // Small scope that won't split
+        GeoScope smallScope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.61, -56.11, -15.59, -56.09, true, "relation", 333734L);
+        lenient().when(osm.resolveScope(any(), any())).thenReturn(smallScope);
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(
                         AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Timeout na região A", 5000),
                         AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100)
                 );
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
         when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
-        var result = service.discoverAndPersist(campaign, 3);
+        var result = service.discoverAndPersist(smallCampaign, 1);
 
         assertEquals(1, result.acceptedThisRun());
+
+        ArgumentCaptor<SearchRegion> regionCaptor = ArgumentCaptor.forClass(SearchRegion.class);
+        verify(osm, times(2)).queryRegionWithStrategy(any(), any(), any(), regionCaptor.capture(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong());
+
+        List<SearchRegion> regions = regionCaptor.getAllValues();
+        assertEquals(2, regions.size(), "Region should be queried twice (initial + retry)");
     }
 
     @Test
     void maxDeferralPreventsInfiniteLoop() {
+        // Use a region that won't split
         LeadCandidate candidate = new LeadCandidate("Barbearia", "openstreetmap", "node/1");
         candidate.setCategory("shop=barber");
         candidate.setPhone("+55 65 9999-8888");
+
+        Campaign smallCampaign = Campaign.builder()
+                .id(1L)
+                .niche("barbearia")
+                .city("Cuiabá")
+                .country("Brazil")
+                .requestedQuantity(1)
+                .build();
+
+        GeoScope smallScope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.61, -56.11, -15.59, -56.09, true, "relation", 333734L);
+        lenient().when(osm.resolveScope(any(), any())).thenReturn(smallScope);
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(
@@ -535,13 +660,85 @@ class CampaignLeadDiscoveryServiceTest {
                         AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Timeout 2", 5000),
                         AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100)
                 );
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
         when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+
+        var result = service.discoverAndPersist(smallCampaign, 1);
+
+        assertEquals(1, result.acceptedThisRun());
+
+        ArgumentCaptor<SearchRegion> regionCaptor = ArgumentCaptor.forClass(SearchRegion.class);
+        verify(osm, times(3)).queryRegionWithStrategy(any(), any(), any(), regionCaptor.capture(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong());
+
+        List<SearchRegion> regions = regionCaptor.getAllValues();
+        // First call: ADMIN_AREA timeout -> deferred
+        // Second call: BBOX_FALLBACK (strategy changed) timeout -> deferred (new key)
+        // Third call: BBOX_FALLBACK retry -> success
+        assertEquals(3, regions.size(), "Region queried 3 times: initial ADMIN_AREA, retry BBOX_FALLBACK, retry BBOX_FALLBACK success");
+    }
+
+    @Test
+    void candidateWithoutPhoneButWithWebsiteCanBeEnrichedAndAccepted() {
+        LeadCandidate candidate = new LeadCandidate("Barbearia X", "openstreetmap", "node/1");
+        candidate.setCategory("shop=barber");
+        candidate.setWebsite("https://barbeariax.com");
+
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
+        when(normalizer.normalizeWebsite(anyString())).thenReturn("https://barbeariax.com");
+        when(websiteContactEnricher.enrich(anyString()))
+                .thenReturn(new WebsiteContactEnricher.WebsiteContactData("+55 65 99999-9999", "email@test.com", "insta"));
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
 
         assertEquals(1, result.acceptedThisRun());
+        verify(persistenceService).createLeadForCampaign(any(), any());
+    }
+
+    @Test
+    void deterministicThreeLeadsComplete() {
+        LeadCandidate candidateA = new LeadCandidate("Barbearia A", "openstreetmap", "node/1");
+        candidateA.setCategory("shop=barber");
+        candidateA.setPhone("+55 65 9999-1111");
+
+        LeadCandidate candidateB = new LeadCandidate("Barbearia B", "openstreetmap", "node/2");
+        candidateB.setCategory("shop=barber");
+        candidateB.setWebsite("https://barbeariab.com");
+
+        LeadCandidate candidateC = new LeadCandidate("Barbearia C", "openstreetmap", "node/3");
+        candidateC.setCategory("shop=barber");
+        candidateC.setPhone("+55 65 9999-3333");
+
+        LeadCandidate fallbackCandidateB = new LeadCandidate("Barbearia B Fallback", "openstreetmap", "node/4");
+        fallbackCandidateB.setCategory("shop=barber");
+        fallbackCandidateB.setPhone("+55 65 9999-4444");
+
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
+                .thenReturn(
+                        AreaQueryResult.success(List.of(candidateA), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(candidateC), false, "overpass-api.de", 100)
+                );
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
+                .thenReturn(AreaQueryResult.success(List.of(fallbackCandidateB), false, "overpass-api.de", 100));
+
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4");
+        when(normalizer.normalizeWebsite(anyString())).thenReturn("https://barbeariab.com");
+        when(websiteContactEnricher.enrich("https://barbeariab.com"))
+                .thenReturn(new WebsiteContactEnricher.WebsiteContactData("+55 65 9999-2222", "email@test.com", "insta"));
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+
+        var result = service.discoverAndPersist(campaign, 3);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+        assertEquals(3, result.acceptedThisRun());
     }
 
     @Test
@@ -562,7 +759,7 @@ class CampaignLeadDiscoveryServiceTest {
         verify(osm, atLeastOnce()).queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), budgetCaptor.capture(), anyLong());
 
         DiscoveryBudget captured = budgetCaptor.getValue();
-        assertTrue(captured.totalMs() <= 30000L, "Region budget for STRUCTURED should be <= 30000ms, was " + captured.totalMs());
+        assertTrue(captured.totalMs() <= 15000L, "Region budget for STRUCTURED should be <= 15000ms, was " + captured.totalMs());
         assertTrue(captured.totalMs() > 0L, "Region budget should be > 0");
     }
 
@@ -586,7 +783,7 @@ class CampaignLeadDiscoveryServiceTest {
         verify(osm, atLeastOnce()).queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), budgetCaptor.capture(), anyLong());
 
         DiscoveryBudget captured = budgetCaptor.getValue();
-        assertTrue(captured.totalMs() <= 20000L, "Fallback budget for NAME_FALLBACK should be <= 20000ms, was " + captured.totalMs());
+        assertTrue(captured.totalMs() <= 12000L, "Fallback budget for NAME_FALLBACK should be <= 12000ms, was " + captured.totalMs());
         assertTrue(captured.totalMs() > 0L, "Fallback budget should be > 0");
     }
 

@@ -21,9 +21,6 @@ class OpenStreetMapProviderQueryTest {
     private SsrfGuard ssrfGuard;
     private OpenStreetMapProvider provider;
 
-    private static final String EXPECTED_CONTACT_FILTER =
-            "[~\"^(phone|contact:phone|mobile|contact:mobile|website|contact:website|url|email|contact:email|instagram|contact:instagram)$\"~\".+\"]";
-
     @BeforeEach
     void setUp() {
         restClientBuilder = mock(RestClient.Builder.class);
@@ -34,7 +31,7 @@ class OpenStreetMapProviderQueryTest {
     }
 
     @Test
-    void buildStructuredQueryForBarbeariaUsesValidCompactContactFilter() {
+    void buildStructuredQueryForBarbeariaDoesNotRequireContactTag() {
         GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
         SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
 
@@ -45,15 +42,16 @@ class OpenStreetMapProviderQueryTest {
         assertTrue(query.contains("[\"shop\"=\"barber\"]"));
         assertTrue(query.contains("[\"shop\"=\"hairdresser\"][\"hairdresser\"=\"barber\"]"));
 
-        assertEquals(2, countOccurrences(query, EXPECTED_CONTACT_FILTER));
-
-        assertFalse(query.contains("[\"~\""));
+        assertFalse(query.contains("contact:phone"));
+        assertFalse(query.contains("contact:website"));
+        assertFalse(query.contains("contact:instagram"));
 
         assertTrue(query.contains("out center tags"));
+        assertTrue(query.contains("area("));
     }
 
     @Test
-    void buildNameFallbackQueryUsesValidCompactContactFilter() {
+    void buildNameFallbackQueryDoesNotRequireContactTag() {
         GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
         SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
 
@@ -63,9 +61,11 @@ class OpenStreetMapProviderQueryTest {
 
         assertTrue(query.contains("[\"name\"~\"barbearia|barber|barbershop\",i]"));
 
-        assertEquals(1, countOccurrences(query, EXPECTED_CONTACT_FILTER));
+        assertFalse(query.contains("contact:phone"));
+        assertFalse(query.contains("contact:website"));
 
-        assertFalse(query.contains("[\"~\""));
+        assertTrue(query.contains("out center tags"));
+        assertTrue(query.contains("area("));
     }
 
     @Test
@@ -79,20 +79,9 @@ class OpenStreetMapProviderQueryTest {
 
         assertTrue(query.contains("[\"amenity\"=\"dentist\"]"));
 
-        assertEquals(1, countOccurrences(query, EXPECTED_CONTACT_FILTER));
+        assertFalse(query.contains("contact:phone"));
 
+        assertTrue(query.contains("out center tags"));
         assertFalse(query.contains("area("));
-    }
-
-    private static int countOccurrences(String text, String fragment) {
-        int count = 0;
-        int from = 0;
-
-        while ((from = text.indexOf(fragment, from)) >= 0) {
-            count++;
-            from += fragment.length();
-        }
-
-        return count;
     }
 }

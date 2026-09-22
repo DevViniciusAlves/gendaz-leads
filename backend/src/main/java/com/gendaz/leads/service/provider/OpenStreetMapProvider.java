@@ -245,41 +245,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 + ")";
     }
 
-    private static final List<String> CONTACT_KEYS = List.of(
-            "phone",
-            "contact:phone",
-            "mobile",
-            "contact:mobile",
-            "website",
-            "contact:website",
-            "url",
-            "email",
-            "contact:email",
-            "instagram",
-            "contact:instagram"
-    );
-
-    private static final String CONTACT_KEYS_REGEX = "^(" +
-            "phone|" +
-            "contact:phone|" +
-            "mobile|" +
-            "contact:mobile|" +
-            "website|" +
-            "contact:website|" +
-            "url|" +
-            "email|" +
-            "contact:email|" +
-            "instagram|" +
-            "contact:instagram" +
-            ")$";
-
-    private String buildContactKeyRegexFilter() {
-        return "[~\""
-                + escapeTag(CONTACT_KEYS_REGEX)
-                + "\"~\".+\"]";
-    }
-
-    private String buildStructuredTagFilter(String rawFilter) {
+private String buildStructuredTagFilter(String rawFilter) {
         StringBuilder filterBuilder = new StringBuilder();
 
         for (String part : rawFilter.split(",")) {
@@ -494,7 +460,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                         return AreaQueryResult.success(List.of(), false, null, elapsedMs(startNs));
                     }
 
-                    log.info("[osm] area_query_start campaignId={} depth={} phase={} geographicStrategy={} maxEdgeKm={} bbox={} rawLimit={} endpointHost={} remainingBudgetMs={} contactFirst=true",
+                    log.info("[osm] area_query_start campaignId={} depth={} phase={} geographicStrategy={} maxEdgeKm={} bbox={} rawLimit={} endpointHost={} remainingBudgetMs={} discoveryFirst=true",
                             campaignId, region.depth(), phase, geographicStrategy, region.maxEdgeKm(), region.bbox(), rawLimit, host, budget.remainingMs());
 
                     requestSent = true;
@@ -534,6 +500,15 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                     }
 
                     if (leadElements.isEmpty()) {
+                        log.info(
+                                "[osm] area_query_success campaignId={} depth={} phase={} geographicStrategy={} endpointHost={} rawElements=0 mapped=0 saturated=false elapsedMs={}",
+                                campaignId,
+                                region.depth(),
+                                phase,
+                                geographicStrategy,
+                                host,
+                                elapsedMs
+                        );
                         circuitBreaker.recordSuccess(host);
                         return AreaQueryResult.success(List.of(), false, host, elapsedMs);
                     }
@@ -856,7 +831,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
             sb.append("nwr")
                     .append(tagFilter)
-                    .append(buildContactKeyRegexFilter())
                     .append(locationFilter)
                     .append(";");
         }
@@ -901,7 +875,6 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         sb.append("nwr[\"name\"~\"")
                 .append(fallbackRegex)
                 .append("\",i]")
-                .append(buildContactKeyRegexFilter())
                 .append(locationFilter)
                 .append(";");
 

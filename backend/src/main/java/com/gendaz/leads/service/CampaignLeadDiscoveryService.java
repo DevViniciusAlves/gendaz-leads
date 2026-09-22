@@ -97,6 +97,12 @@ public class CampaignLeadDiscoveryService {
     @Value("${app.discovery.osm.max-region-deferrals:1}")
     private int maxRegionDeferrals;
 
+    @Value("${app.discovery.osm.structured-batch-size:2}")
+    private int structuredBatchSize;
+
+    @Value("${app.discovery.osm.fallback-batch-size:2}")
+    private int fallbackBatchSize;
+
     public CampaignLeadDiscoveryService(
             CampaignRepository campaignRepository,
             CampaignLeadRepository campaignLeadRepository,
@@ -291,113 +297,184 @@ public class CampaignLeadDiscoveryService {
         String finalErrorCode = null;
         String finalErrorMessage = null;
 
-        boolean deferredStructuredPassStarted = false;
+        int batchRound = 0;
 
         while (
-                !structuredQueue.isEmpty()
-                && accepted < targetToAdd
+                accepted < targetToAdd
                 && !budget.expired()
         ) {
-            LazyPlanStep planStep = pollNextQueryableRegion(structuredQueue, scope, campaign.getId());
+            batchRound++;
 
-            if (planStep == null) {
-                break;
+            boolean didWorkThisRound = false;
+
+            if (structuredQueue.isEmpty()
+                    && !deferredStructuredRegions.isEmpty()
+                    && accepted < targetToAdd
+                    && !budget.expired()) {
+
+                log.info(
+                        "[osm] structured_deferred_pass_start campaignId={} regions={} remainingBudgetMs={} round={}",
+                        campaign.getId(),
+                        deferredStructuredRegions.size(),
+                        budget.remainingMs(),
+                        batchRound
+                );
+
+                structuredQueue.addAll(deferredStructuredRegions);
+                deferredStructuredRegions.clear();
             }
-
-            SearchRegion region = planStep.region();
-            areasSplit += planStep.splitsPerformed();
 
             log.info(
-                    "[osm] planner_http_leaf campaignId={} depth={} maxEdgeKm={} bbox={} queueRemaining={} geographicStrategy={}",
+                    "[osm] discovery_batch_start campaignId={} round={} accepted={} target={} structuredQueue={} fallbackQueue={} deferredQueue={} remainingBudgetMs={}",
                     campaign.getId(),
-                    region.depth(),
-                    region.maxEdgeKm(),
-                    region.bbox(),
+                    batchRound,
+                    accepted,
+                    targetToAdd,
                     structuredQueue.size(),
-                    geographicStrategy
+                    fallbackQueue.size(),
+                    deferredStructuredRegions.size(),
+                    budget.remainingMs()
             );
 
-            int remainingUseful = targetToAdd - accepted;
+            int structuredProcessedThisBatch = 0;
 
-            int rawLimit = calculateRawLimit(remainingUseful);
+            while (
+                    !structuredQueue.isEmpty()
+                    && structuredProcessedThisBatch < structuredBatchSize
+                    && accepted < targetToAdd
+                    && !budget.expired()
+            ) {
+                didWorkThisRound = true;
+                structuredProcessedThisBatch++;
 
-            DiscoveryBudget regionBudget = budget.slice(regionBudgetMs);
+                LazyPlanStep planStep = pollNextQueryableRegion(structuredQueue, scope, campaign.getId());
 
-            areasAttempted++;
-
-            AreaQueryResult structured =
-                    osm.queryRegionWithStrategy(
-                            scope,
-                            geographicStrategy,
-                            campaign.getNiche(),
-                            region,
-                            AreaQueryPhase.STRUCTURED,
-                            rawLimit,
-                            regionBudget,
-                            campaign.getId()
-                    );
-
-            if (structured.outcome()
-                    == AreaQueryResult.Outcome.ADMIN_AREA_UNAVAILABLE
-                    && geographicStrategy == GeographicStrategy.ADMIN_AREA) {
-
-                geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
-                structuredQueue.add(region);
-
-                log.warn("[osm] geographic_strategy_fallback campaignId={} from=ADMIN_AREA to=BBOX_FALLBACK osmType={} osmId={} regionDepth={}",
-                        campaign.getId(), scope.osmType(), scope.osmId(), region.depth());
-
-                continue;
-            }
-
-            if (structured.outcome()
-                    == AreaQueryResult.Outcome.SUCCESS) {
-
-                anyValidQuery = true;
-                areasSucceeded++;
-                consecutiveInfraFailures = 0;
-                adminAreaInfraFailures = 0;
-                failedHostsThisCampaign.clear();
-
-                List<LeadCandidate> structuredCandidates = structured.candidates();
-                boolean structuredFoundCandidates =
-                        structuredCandidates != null
-                                && !structuredCandidates.isEmpty();
-
-                accepted += acceptCandidates(
-                        campaign,
-                        structuredCandidates,
-                        targetToAdd - accepted,
-                        seenSourceIds,
-                        enrichmentCache
-                );
-
-                updateProgress(
-                        campaign,
-                        initialCampaignLeadCount,
-                        accepted
-                );
-
-                if (accepted >= targetToAdd) {
+                if (planStep == null) {
                     break;
                 }
 
-                if (!structuredFoundCandidates) {
-                    String fallbackKey = regionKey(region, geographicStrategy);
-                    if (fallbackQueuedKeys.add(fallbackKey)) {
-                        fallbackQueue.add(region);
+                SearchRegion region = planStep.region();
+                areasSplit += planStep.splitsPerformed();
 
-                        log.info(
-                                "[osm] fallback_region_queued campaignId={} depth={} bbox={} remainingBudgetMs={}",
-                                campaign.getId(),
-                                region.depth(),
-                                region.bbox(),
-                                budget.remainingMs()
+                log.info(
+                        "[osm] planner_http_leaf campaignId={} depth={} maxEdgeKm={} bbox={} queueRemaining={} geographicStrategy={}",
+                        campaign.getId(),
+                        region.depth(),
+                        region.maxEdgeKm(),
+                        region.bbox(),
+                        structuredQueue.size(),
+                        geographicStrategy
+                );
+
+                int remainingUseful = targetToAdd - accepted;
+
+                int rawLimit = calculateRawLimit(remainingUseful);
+
+                DiscoveryBudget regionBudget = budget.slice(regionBudgetMs);
+
+                areasAttempted++;
+
+                AreaQueryResult structured =
+                        osm.queryRegionWithStrategy(
+                                scope,
+                                geographicStrategy,
+                                campaign.getNiche(),
+                                region,
+                                AreaQueryPhase.STRUCTURED,
+                                rawLimit,
+                                regionBudget,
+                                campaign.getId()
                         );
-                    }
+
+                if (structured == null) {
+                    continue;
                 }
 
-                if (structured.saturated()) {
+                if (structured.outcome()
+                        == AreaQueryResult.Outcome.ADMIN_AREA_UNAVAILABLE
+                        && geographicStrategy == GeographicStrategy.ADMIN_AREA) {
+
+                    geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
+                    structuredQueue.add(region);
+
+                    log.warn("[osm] geographic_strategy_fallback campaignId={} from=ADMIN_AREA to=BBOX_FALLBACK osmType={} osmId={} regionDepth={}",
+                            campaign.getId(), scope.osmType(), scope.osmId(), region.depth());
+
+                    continue;
+                }
+
+                if (structured.outcome()
+                        == AreaQueryResult.Outcome.SUCCESS) {
+
+                    anyValidQuery = true;
+                    areasSucceeded++;
+                    consecutiveInfraFailures = 0;
+                    adminAreaInfraFailures = 0;
+                    failedHostsThisCampaign.clear();
+
+                    List<LeadCandidate> structuredCandidates = structured.candidates();
+
+                    int acceptedBeforeRegion = accepted;
+
+                    accepted += acceptCandidates(
+                            campaign,
+                            structuredCandidates,
+                            targetToAdd - accepted,
+                            seenSourceIds,
+                            enrichmentCache
+                    );
+
+                    int acceptedFromRegion = accepted - acceptedBeforeRegion;
+
+                    updateProgress(
+                            campaign,
+                            initialCampaignLeadCount,
+                            accepted
+                    );
+
+                    if (accepted >= targetToAdd) {
+                        break;
+                    }
+
+                    boolean shouldQueueFallback =
+                            accepted < targetToAdd
+                                    && acceptedFromRegion == 0;
+
+                    if (shouldQueueFallback) {
+                        String fallbackKey = regionKey(region, geographicStrategy);
+                        if (fallbackQueuedKeys.add(fallbackKey)) {
+                            fallbackQueue.add(region);
+
+                            log.info(
+                                    "[osm] fallback_region_queued campaignId={} depth={} bbox={} reason=no_accepted_lead_from_structured structuredCandidates={} remainingBudgetMs={} round={}",
+                                    campaign.getId(),
+                                    region.depth(),
+                                    region.bbox(),
+                                    structuredCandidates != null
+                                            ? structuredCandidates.size()
+                                            : 0,
+                                    budget.remainingMs(),
+                                    batchRound
+                            );
+                        }
+                    }
+
+                    if (structured.saturated()) {
+                        if (region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
+                            structuredQueue.addAll(region.split(scope.lat(), scope.lon()));
+                            areasSplit++;
+                            continue;
+                        }
+
+                        infraDegraded = true;
+                        finalErrorCode = "OSM_REGION_SATURATED";
+                        finalErrorMessage = "Região atingiu o limite de resultados e não pode ser subdividida novamente.";
+                        continue;
+                    }
+
+                } else if (structured.outcome()
+                        == AreaQueryResult.Outcome.SPLIT_REQUIRED) {
+
                     if (region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
                         structuredQueue.addAll(region.split(scope.lat(), scope.lon()));
                         areasSplit++;
@@ -405,145 +482,112 @@ public class CampaignLeadDiscoveryService {
                     }
 
                     infraDegraded = true;
-                    finalErrorCode = "OSM_REGION_SATURATED";
-                    finalErrorMessage = "Região atingiu o limite de resultados e não pode ser subdividida novamente.";
+                    finalErrorCode = structured.errorCode();
+                    finalErrorMessage = structured.errorMessage();
                     continue;
-                }
 
-            } else if (structured.outcome()
-                    == AreaQueryResult.Outcome.SPLIT_REQUIRED) {
+                } else if (structured.outcome()
+                        == AreaQueryResult.Outcome.INFRA_UNAVAILABLE) {
 
-                if (region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)) {
-                    structuredQueue.addAll(region.split(scope.lat(), scope.lon()));
-                    areasSplit++;
-                    continue;
-                }
-
-                infraDegraded = true;
-                finalErrorCode = structured.errorCode();
-                finalErrorMessage = structured.errorMessage();
-                continue;
-
-            } else if (structured.outcome()
-                    == AreaQueryResult.Outcome.INFRA_UNAVAILABLE) {
-
-                if (structured.httpAttemptMade()) {
-                    consecutiveInfraFailures++;
-                }
-                infraDegraded = true;
-                finalErrorCode = structured.errorCode();
-                finalErrorMessage = structured.errorMessage();
-
-                if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
                     if (structured.httpAttemptMade()) {
-                        adminAreaInfraFailures++;
+                        consecutiveInfraFailures++;
                     }
-                    log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={} httpAttempt={}",
-                            campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth(), structured.httpAttemptMade());
-                    if (adminAreaInfraFailures >= adminAreaInfraFailuresBeforeBbox && scope.bboxValid()) {
-                        geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
-                        structuredQueue.add(region);
-                        log.warn("[osm] switching_to_bbox_fallback campaignId={} reason=admin_area_infra_unstable adminAreaInfraFailures={} threshold={}",
-                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox);
+                    infraDegraded = true;
+                    finalErrorCode = structured.errorCode();
+                    finalErrorMessage = structured.errorMessage();
+
+                    if (geographicStrategy == GeographicStrategy.ADMIN_AREA) {
+                        if (structured.httpAttemptMade()) {
+                            adminAreaInfraFailures++;
+                        }
+                        log.warn("[osm] admin_area_infra_failure campaignId={} count={} threshold={} regionDepth={} httpAttempt={}",
+                                campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox, region.depth(), structured.httpAttemptMade());
+                        if (adminAreaInfraFailures >= adminAreaInfraFailuresBeforeBbox && scope.bboxValid()) {
+                            geographicStrategy = GeographicStrategy.BBOX_FALLBACK;
+                            structuredQueue.add(region);
+                            log.warn("[osm] switching_to_bbox_fallback campaignId={} reason=admin_area_infra_unstable adminAreaInfraFailures={} threshold={}",
+                                    campaign.getId(), adminAreaInfraFailures, adminAreaInfraFailuresBeforeBbox);
+                            continue;
+                        }
+                    }
+
+                    if (isRegionalBudgetExhausted(structured, budget)) {
+                        String key = regionKey(region, geographicStrategy);
+
+                        int currentDeferrals = regionDeferralCounts.getOrDefault(key, 0);
+
+                        if (currentDeferrals < maxRegionDeferrals) {
+                            regionDeferralCounts.put(key, currentDeferrals + 1);
+
+                            deferredStructuredRegions.addLast(region);
+
+                            log.info(
+                                    "[osm] region_deferred campaignId={} phase=STRUCTURED depth={} bbox={} deferral={} maxDeferrals={} globalRemainingMs={}",
+                                    campaign.getId(),
+                                    region.depth(),
+                                    region.bbox(),
+                                    currentDeferrals + 1,
+                                    maxRegionDeferrals,
+                                    budget.remainingMs()
+                            );
+                        } else {
+                            areasSkipped++;
+
+                            log.info(
+                                    "[osm] region_skipped_after_deferral campaignId={} phase=STRUCTURED depth={} bbox={} globalRemainingMs={}",
+                                    campaign.getId(),
+                                    region.depth(),
+                                    region.bbox(),
+                                    budget.remainingMs()
+                            );
+                        }
                         continue;
                     }
-                }
 
-                if (isRegionalBudgetExhausted(structured, regionBudget, budget)) {
-                    String key = regionKey(region, geographicStrategy);
-
-                    int currentDeferrals = regionDeferralCounts.getOrDefault(key, 0);
-
-                    if (currentDeferrals < maxRegionDeferrals) {
-                        regionDeferralCounts.put(key, currentDeferrals + 1);
-
-                        deferredStructuredRegions.addLast(region);
-
-                        log.info(
-                                "[osm] region_deferred campaignId={} phase=STRUCTURED depth={} bbox={} deferral={} maxDeferrals={} globalRemainingMs={}",
-                                campaign.getId(),
-                                region.depth(),
-                                region.bbox(),
-                                currentDeferrals + 1,
-                                maxRegionDeferrals,
-                                budget.remainingMs()
-                        );
-                    } else {
-                        areasSkipped++;
-
-                        log.info(
-                                "[osm] region_skipped_after_deferral campaignId={} phase=STRUCTURED depth={} bbox={} globalRemainingMs={}",
-                                campaign.getId(),
-                                region.depth(),
-                                region.bbox(),
-                                budget.remainingMs()
-                        );
+                    if (consecutiveInfraFailures >= maxConsecutiveInfraFailures) {
+                        break;
                     }
+
+                    if (region.maxEdgeKm() <= infraSplitThresholdKm
+                            && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)
+                            && budget.remainingMs() > 0) {
+
+                        log.info("[osm] infra_split_small_region campaignId={} maxEdgeKm={} thresholdKm={} depth={} queueRemaining={}",
+                                campaign.getId(), region.maxEdgeKm(), infraSplitThresholdKm, region.depth(), structuredQueue.size());
+                        structuredQueue.addAll(region.split(scope.lat(), scope.lon()));
+                        areasSplit++;
+                        continue;
+                    }
+
+                    log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={} httpAttempt={}",
+                            campaign.getId(), structuredQueue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures, structured.httpAttemptMade());
                     continue;
+
+                } else {
+                    throw new ApiException(
+                            HttpStatus.BAD_GATEWAY,
+                            structured.errorCode(),
+                            structured.errorMessage()
+                    );
                 }
-
-                if (structuredQueue.isEmpty() || consecutiveInfraFailures >= maxConsecutiveInfraFailures) {
-                    break;
-                }
-
-                if (region.maxEdgeKm() <= infraSplitThresholdKm
-                        && region.canSplit(adaptiveMaxDepth, adaptiveMinEdgeKm)
-                        && budget.remainingMs() > 0) {
-
-                    log.info("[osm] infra_split_small_region campaignId={} maxEdgeKm={} thresholdKm={} depth={} queueRemaining={}",
-                            campaign.getId(), region.maxEdgeKm(), infraSplitThresholdKm, region.depth(), structuredQueue.size());
-                    structuredQueue.addAll(region.split(scope.lat(), scope.lon()));
-                    areasSplit++;
-                    continue;
-                }
-
-                log.info("[osm] infra_failure_continue_queue campaignId={} queueRemaining={} consecutiveFailures={} maxConsecutive={} httpAttempt={}",
-                        campaign.getId(), structuredQueue.size(), consecutiveInfraFailures, maxConsecutiveInfraFailures, structured.httpAttemptMade());
-                continue;
-
-            } else {
-                throw new ApiException(
-                        HttpStatus.BAD_GATEWAY,
-                        structured.errorCode(),
-                        structured.errorMessage()
-                );
             }
 
-            if (structuredQueue.isEmpty() && !deferredStructuredPassStarted && !deferredStructuredRegions.isEmpty()
-                    && accepted < targetToAdd && !budget.expired()) {
-
-                deferredStructuredPassStarted = true;
-
-                log.info(
-                        "[osm] structured_deferred_pass_start campaignId={} regions={} remainingBudgetMs={}",
-                        campaign.getId(),
-                        deferredStructuredRegions.size(),
-                        budget.remainingMs()
-                );
-
-                structuredQueue.addAll(deferredStructuredRegions);
-                deferredStructuredRegions.clear();
-
-                continue;
+            if (accepted >= targetToAdd
+                    || budget.expired()) {
+                break;
             }
-        }
 
-        if (accepted < targetToAdd
-                && !budget.expired()
-                && !fallbackQueue.isEmpty()) {
-
-            log.info(
-                    "[osm] name_fallback_pass_start campaignId={} regions={} remainingBudgetMs={}",
-                    campaign.getId(),
-                    fallbackQueue.size(),
-                    budget.remainingMs()
-            );
+            int fallbackProcessedThisBatch = 0;
 
             while (
                     !fallbackQueue.isEmpty()
+                    && fallbackProcessedThisBatch < fallbackBatchSize
                     && accepted < targetToAdd
                     && !budget.expired()
             ) {
+                didWorkThisRound = true;
+                fallbackProcessedThisBatch++;
+
                 LazyPlanStep planStep = pollNextQueryableRegion(fallbackQueue, scope, campaign.getId());
 
                 if (planStep == null) {
@@ -582,6 +626,10 @@ public class CampaignLeadDiscoveryService {
                                 fallbackBudget,
                                 campaign.getId()
                         );
+
+                if (fallback == null) {
+                    continue;
+                }
 
                 if (fallback.outcome()
                         == AreaQueryResult.Outcome.ADMIN_AREA_UNAVAILABLE
@@ -675,7 +723,7 @@ public class CampaignLeadDiscoveryService {
                         }
                     }
 
-                    if (isRegionalBudgetExhausted(fallback, fallbackBudget, budget)) {
+                    if (isRegionalBudgetExhausted(fallback, budget)) {
                         areasSkipped++;
 
                         log.info(
@@ -689,7 +737,7 @@ public class CampaignLeadDiscoveryService {
                         continue;
                     }
 
-                    if (fallbackQueue.isEmpty() || consecutiveInfraFailures >= maxConsecutiveInfraFailures) {
+                    if (consecutiveInfraFailures >= maxConsecutiveInfraFailures) {
                         break;
                     }
 
@@ -715,6 +763,15 @@ public class CampaignLeadDiscoveryService {
                             fallback.errorMessage()
                     );
                 }
+            }
+
+            boolean hasPendingWork =
+                    !structuredQueue.isEmpty()
+                            || !deferredStructuredRegions.isEmpty()
+                            || !fallbackQueue.isEmpty();
+
+            if (!didWorkThisRound || !hasPendingWork) {
+                break;
             }
         }
 
@@ -1091,7 +1148,7 @@ public class CampaignLeadDiscoveryService {
             LeadCandidate candidate
     ) {
         log.info(
-                "[osm] candidate_skipped campaignId={} reason=no_contact source={} sourceId={} businessName={}",
+                "[osm] candidate_skipped campaignId={} reason=no_phone_for_whatsapp source={} sourceId={} businessName={}",
                 campaign.getId(),
                 candidate.getSource(),
                 candidate.getSourceId(),
@@ -1125,13 +1182,11 @@ public class CampaignLeadDiscoveryService {
 
     private boolean isRegionalBudgetExhausted(
             AreaQueryResult result,
-            DiscoveryBudget regionBudget,
             DiscoveryBudget globalBudget
     ) {
         return result != null
                 && result.outcome() == AreaQueryResult.Outcome.INFRA_UNAVAILABLE
                 && "OSM_DISCOVERY_TIMEOUT".equals(result.errorCode())
-                && regionBudget.expired()
                 && !globalBudget.expired();
     }
 

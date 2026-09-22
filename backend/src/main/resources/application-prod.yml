@@ -37,9 +37,11 @@ app:
       per-lead-budget-ms: ${OSM_DISCOVERY_PER_LEAD_BUDGET_MS:15000}
       max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:300000}
 
-      region-budget-ms: ${OSM_DISCOVERY_REGION_BUDGET_MS:30000}
-      fallback-region-budget-ms: ${OSM_DISCOVERY_FALLBACK_REGION_BUDGET_MS:20000}
+      region-budget-ms: ${OSM_DISCOVERY_REGION_BUDGET_MS:15000}
+      fallback-region-budget-ms: ${OSM_DISCOVERY_FALLBACK_REGION_BUDGET_MS:12000}
       max-region-deferrals: ${OSM_DISCOVERY_MAX_REGION_DEFERRALS:1}
+      structured-batch-size: ${OSM_DISCOVERY_STRUCTURED_BATCH_SIZE:2}
+      fallback-batch-size: ${OSM_DISCOVERY_FALLBACK_BATCH_SIZE:2}
 
       query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:20}
       query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:6}
