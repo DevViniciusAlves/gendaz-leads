@@ -171,57 +171,24 @@ jobs:
       - name: Fetch administrative boundary
         run: |
           echo "[osm-sync] fetching boundary for relation $OSM_ID"
-          # Use Nominatim to get polygon for the relation
-          NOMINATIM_URL="https://nominatim.openstreetmap.org/lookup?osm_ids=R${OSM_ID}&format=json&polygon_geojson=1"
-          curl -fL --retry 3 --retry-delay 5 -H "User-Agent: GendazLeads/1.0" -o boundary_response.json "$NOMINATIM_URL"
 
-          # Extract geometry and convert to Feature
-          python3 -c "
-import json, sys
-with open('boundary_response.json') as f:
-    data = json.load(f)
-if not data:
-    print('Empty response from Nominatim', file=sys.stderr)
-    sys.exit(1)
-geom = data[0].get('geojson')
-if not geom:
-    print('No geojson in response', file=sys.stderr)
-    sys.exit(1)
-if geom['type'] not in ('Polygon', 'MultiPolygon'):
-    print(f'Invalid geometry type: {geom[\"type\"]}', file=sys.stderr)
-    sys.exit(1)
-# Wrap in Feature for osmium
-feature = {
-    'type': 'Feature',
-    'properties': {},
-    'geometry': geom
-}
-with open('boundary.geojson', 'w') as f:
-    json.dump(feature, f)
-print('[osm-sync] boundary_ok type=' + geom['type'])
-          " || {
-            echo "[osm-sync] boundary failed"
-            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
-              UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'Failed to fetch or validate administrative boundary'
-              WHERE id = $SYNC_RUN_ID;
-            "
-            exit 1
-          }
+          python3 .github/scripts/fetch_osm_boundary.py \
+            --osm-id "$OSM_ID" \
+            --output boundary.geojson
 
       - name: Extract city from PBF
         run: |
           PBF_FILE="${GEOFABRIK_REGION}-latest.osm.pbf"
+
           echo "[osm-sync] extracting city with osmium"
-          osmium extract -p boundary.geojson "$PBF_FILE" -o city.osm.pbf || {
-            echo "[osm-sync] osmium extract failed"
-            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
-              UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium extract failed for city boundary'
-              WHERE id = $SYNC_RUN_ID;
-            "
-            exit 1
-          }
+
+          osmium extract \
+            -p boundary.geojson \
+            -s smart \
+            -S types=multipolygon,boundary \
+            "$PBF_FILE" \
+            -o city.osm.pbf
+
           echo "[osm-sync] city_extract_ok"
 
       - name: Filter commercial POIs
@@ -243,20 +210,14 @@ print('[osm-sync] boundary_ok type=' + geom['type'])
       - name: Export to GeoJSONSeq
         run: |
           echo "[osm-sync] exporting to GeoJSONSeq"
+
           osmium export city-commercial.osm.pbf \
             --geometry-types=point,linestring,polygon \
             --attributes=type,id,timestamp \
             --format-option=print_record_separator=false \
             -f geojsonseq \
-            -o city-commercial.geojsonseq || {
-            echo "[osm-sync] export to geojsonseq failed"
-            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
-              UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium export to geojsonseq failed'
-              WHERE id = $SYNC_RUN_ID;
-            "
-            exit 1
-          }
+            -o city-commercial.geojsonseq
+
           echo "[osm-sync] geojsonseq_export_ok"
 
       - name: Run import script

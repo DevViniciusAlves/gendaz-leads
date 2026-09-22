@@ -39,6 +39,8 @@ class OsmCatalogSyncServiceTest {
     private BrazilGeofabrikRegionResolver geofabrikResolver;
     @Mock
     private GitHubOsmSyncDispatcher githubDispatcher;
+    @Mock
+    private OsmCatalogSyncStatusService syncStatusService;
 
     private OsmCatalogSyncService service;
 
@@ -49,7 +51,8 @@ class OsmCatalogSyncServiceTest {
                 syncRunRepository,
                 osmProvider,
                 geofabrikResolver,
-                githubDispatcher
+                githubDispatcher,
+                syncStatusService
         );
         // Enable catalog for tests
         var field = OsmCatalogSyncService.class.getDeclaredField("catalogEnabled");

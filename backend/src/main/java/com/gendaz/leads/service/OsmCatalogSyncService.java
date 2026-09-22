@@ -34,6 +34,7 @@ public class OsmCatalogSyncService {
     private final OpenStreetMapProvider osmProvider;
     private final BrazilGeofabrikRegionResolver geofabrikResolver;
     private final GitHubOsmSyncDispatcher githubDispatcher;
+    private final OsmCatalogSyncStatusService syncStatusService;
 
     @Value("${app.osm-catalog.enabled:true}")
     private boolean catalogEnabled;
@@ -43,13 +44,15 @@ public class OsmCatalogSyncService {
             OsmSyncRunRepository syncRunRepository,
             OpenStreetMapProvider osmProvider,
             BrazilGeofabrikRegionResolver geofabrikResolver,
-            GitHubOsmSyncDispatcher githubDispatcher
+            GitHubOsmSyncDispatcher githubDispatcher,
+            OsmCatalogSyncStatusService syncStatusService
     ) {
         this.regionRepository = regionRepository;
         this.syncRunRepository = syncRunRepository;
         this.osmProvider = osmProvider;
         this.geofabrikResolver = geofabrikResolver;
         this.githubDispatcher = githubDispatcher;
+        this.syncStatusService = syncStatusService;
     }
 
     @Transactional
@@ -135,23 +138,72 @@ public class OsmCatalogSyncService {
         return syncRun;
     }
 
-    @Transactional
     public void dispatchSync(OsmSyncRun syncRun) {
         try {
             GeoScope scope = buildScopeFromSyncRun(syncRun);
-            String geofabrikRegion = syncRun.getRegion().getGeofabrikRegion();
-            githubDispatcher.dispatch(syncRun, scope, geofabrikRegion);
-            syncRun.setStatus("QUEUED");
-            syncRunRepository.save(syncRun);
+
+            String geofabrikRegion =
+                    syncRun.getRegion().getGeofabrikRegion();
+
+            githubDispatcher.dispatch(
+                    syncRun,
+                    scope,
+                    geofabrikRegion
+            );
+
+            log.info(
+                    "[osm-catalog] sync_dispatched syncRunId={}",
+                    syncRun.getId()
+            );
+
+        } catch (IllegalStateException e) {
+            if ("OSM_SYNC_GITHUB_NOT_CONFIGURED".equals(e.getMessage())) {
+                String message =
+                        "Token do GitHub Actions não configurado.";
+
+                syncStatusService.markDispatchFailed(
+                        syncRun.getId(),
+                        message
+                );
+
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "OSM_SYNC_GITHUB_NOT_CONFIGURED",
+                        "Configure OSM_SYNC_GITHUB_TOKEN antes de sincronizar."
+                );
+            }
+
+            handleDispatchFailure(syncRun, e);
+
         } catch (Exception e) {
-            log.error("[osm-catalog] sync_dispatch_failed syncRunId={} error={}", syncRun.getId(), e.getMessage());
-            syncRun.setStatus("FAILED");
-            syncRun.setErrorMessage("Falha ao disparar workflow: " + sanitizeError(e.getMessage()));
-            syncRun.setFinishedAt(Instant.now());
-            syncRunRepository.save(syncRun);
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_SYNC_DISPATCH_FAILED",
-                    "Não foi possível iniciar a sincronização. Tente novamente.");
+            handleDispatchFailure(syncRun, e);
         }
+    }
+
+    private void handleDispatchFailure(
+            OsmSyncRun syncRun,
+            Exception exception
+    ) {
+        String safeMessage =
+                "Falha ao disparar workflow: "
+                        + sanitizeError(exception.getMessage());
+
+        log.error(
+                "[osm-catalog] sync_dispatch_failed syncRunId={} error={}",
+                syncRun.getId(),
+                safeMessage
+        );
+
+        syncStatusService.markDispatchFailed(
+                syncRun.getId(),
+                safeMessage
+        );
+
+        throw new ApiException(
+                HttpStatus.BAD_GATEWAY,
+                "OSM_SYNC_DISPATCH_FAILED",
+                "Não foi possível iniciar a sincronização. Tente novamente."
+        );
     }
 
     private GeoScope buildScopeFromSyncRun(OsmSyncRun syncRun) {

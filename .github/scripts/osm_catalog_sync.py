@@ -81,13 +81,39 @@ def mark_running(conn, sync_run_id: int):
     conn.commit()
 
 
-def mark_failed(conn, sync_run_id: int, error_message: str):
+def mark_failed(
+    conn,
+    sync_run_id: int,
+    region_id: int,
+    error_message: str,
+):
+    safe_error = error_message[:1000]
+
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             UPDATE osm_sync_runs
-            SET status = 'FAILED', finished_at = NOW(), error_message = %s
+            SET
+                status = 'FAILED',
+                finished_at = NOW(),
+                error_message = %s
             WHERE id = %s
-        """, (error_message[:1000], sync_run_id))
+              AND status <> 'SUCCESS'
+            """,
+            (safe_error, sync_run_id),
+        )
+
+        cur.execute(
+            """
+            UPDATE osm_catalog_regions
+            SET
+                last_error = %s,
+                last_attempt_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (safe_error, region_id),
+        )
     conn.commit()
 
 
@@ -323,91 +349,179 @@ def sanity_check(conn, sync_run_id: int, region_id: int, staged_count: int) -> b
     return True
 
 
-def publish_staging(conn, sync_run_id: int, region_id: int) -> Tuple[int, int, int]:
-    """
-    Atomically upsert from staging to osm_places.
-    Returns (inserted, updated, deactivated).
-    """
-    with conn.cursor() as cur:
-        # Upsert new/updated places
-        cur.execute("""
-            WITH upserted AS (
-                INSERT INTO osm_places (
-                    region_id, osm_type, osm_id,
-                    business_name, normalized_name,
-                    latitude, longitude,
-                    address, city, state, country, country_code,
-                    phone, email, website, instagram,
-                    tags, active, last_seen_at, source_timestamp
+def publish_staging(
+    conn,
+    sync_run_id: int,
+    region_id: int,
+    stats: Dict[str, int],
+):
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM osm_place_staging s
+                    LEFT JOIN osm_places p
+                      ON p.osm_type = s.osm_type
+                     AND p.osm_id = s.osm_id
+                    WHERE s.sync_run_id = %s
+                      AND p.id IS NULL
+                    """,
+                    (sync_run_id,),
                 )
-                SELECT
-                    s.region_id, s.osm_type, s.osm_id,
-                    s.business_name, s.normalized_name,
-                    s.latitude, s.longitude,
-                    s.address, s.city, s.state, s.country, s.country_code,
-                    s.phone, s.email, s.website, s.instagram,
-                    s.tags, true, NOW(), s.source_timestamp
-                FROM osm_place_staging s
-                WHERE s.sync_run_id = %s
-                ON CONFLICT (osm_type, osm_id) DO UPDATE SET
-                    region_id = EXCLUDED.region_id,
-                    business_name = EXCLUDED.business_name,
-                    normalized_name = EXCLUDED.normalized_name,
-                    latitude = EXCLUDED.latitude,
-                    longitude = EXCLUDED.longitude,
-                    address = EXCLUDED.address,
-                    city = EXCLUDED.city,
-                    state = EXCLUDED.state,
-                    country = EXCLUDED.country,
-                    country_code = EXCLUDED.country_code,
-                    phone = EXCLUDED.phone,
-                    email = EXCLUDED.email,
-                    website = EXCLUDED.website,
-                    instagram = EXCLUDED.instagram,
-                    tags = EXCLUDED.tags,
-                    active = true,
-                    last_seen_at = NOW(),
-                    source_timestamp = EXCLUDED.source_timestamp,
-                    updated_at = NOW()
-                RETURNING (xmax = 0) AS inserted
-            )
-            SELECT
-                COUNT(*) FILTER (WHERE inserted) AS inserted,
-                COUNT(*) FILTER (WHERE NOT inserted) AS updated
-            FROM upserted
-        """, (sync_run_id,))
-        result = cur.fetchone()
-        inserted = result[0] if result else 0
-        updated = result[1] if result else 0
 
-        # Deactivate places from this region not seen in this sync
-        cur.execute("""
-            UPDATE osm_places
-            SET active = false, updated_at = NOW()
-            WHERE region_id = %s
-              AND active = true
-              AND (osm_type, osm_id) NOT IN (
-                  SELECT osm_type, osm_id FROM osm_place_staging WHERE sync_run_id = %s
-              )
-        """, (region_id, sync_run_id))
-        deactivated = cur.rowcount
+                inserted = cur.fetchone()[0]
 
-        # Update region stats
-        cur.execute("""
-            UPDATE osm_catalog_regions
-            SET catalog_status = 'READY',
-                last_success_at = NOW(),
-                last_error = NULL,
-                place_count = (
-                    SELECT COUNT(*) FROM osm_places WHERE region_id = %s AND active = true
-                ),
-                updated_at = NOW()
-            WHERE id = %s
-        """, (region_id, region_id))
+                staged = stats["staged"]
+                updated = max(0, staged - inserted)
 
-        conn.commit()
+                cur.execute(
+                    """
+                    INSERT INTO osm_places (
+                        region_id,
+                        osm_type,
+                        osm_id,
+                        business_name,
+                        normalized_name,
+                        latitude,
+                        longitude,
+                        address,
+                        city,
+                        state,
+                        country,
+                        country_code,
+                        phone,
+                        email,
+                        website,
+                        instagram,
+                        tags,
+                        active,
+                        last_seen_at,
+                        source_timestamp
+                    )
+                    SELECT
+                        s.region_id,
+                        s.osm_type,
+                        s.osm_id,
+                        s.business_name,
+                        s.normalized_name,
+                        s.latitude,
+                        s.longitude,
+                        s.address,
+                        s.city,
+                        s.state,
+                        s.country,
+                        s.country_code,
+                        s.phone,
+                        s.email,
+                        s.website,
+                        s.instagram,
+                        s.tags,
+                        true,
+                        NOW(),
+                        s.source_timestamp
+                    FROM osm_place_staging s
+                    WHERE s.sync_run_id = %s
+                    ON CONFLICT (osm_type, osm_id)
+                    DO UPDATE SET
+                        region_id = EXCLUDED.region_id,
+                        business_name = EXCLUDED.business_name,
+                        normalized_name = EXCLUDED.normalized_name,
+                        latitude = EXCLUDED.latitude,
+                        longitude = EXCLUDED.longitude,
+                        address = EXCLUDED.address,
+                        city = EXCLUDED.city,
+                        state = EXCLUDED.state,
+                        country = EXCLUDED.country,
+                        country_code = EXCLUDED.country_code,
+                        phone = EXCLUDED.phone,
+                        email = EXCLUDED.email,
+                        website = EXCLUDED.website,
+                        instagram = EXCLUDED.instagram,
+                        tags = EXCLUDED.tags,
+                        active = true,
+                        last_seen_at = NOW(),
+                        source_timestamp = EXCLUDED.source_timestamp,
+                        updated_at = NOW()
+                    """,
+                    (sync_run_id,),
+                )
 
-    return inserted, updated, deactivated
+                cur.execute(
+                    """
+                    UPDATE osm_places
+                    SET
+                        active = false,
+                        updated_at = NOW()
+                    WHERE region_id = %s
+                      AND active = true
+                      AND (osm_type, osm_id) NOT IN (
+                          SELECT osm_type, osm_id
+                          FROM osm_place_staging
+                          WHERE sync_run_id = %s
+                      )
+                    """,
+                    (region_id, sync_run_id),
+                )
+
+                deactivated = cur.rowcount
+
+                cur.execute(
+                    """
+                    UPDATE osm_catalog_regions
+                    SET
+                        catalog_status = 'READY',
+                        last_success_at = NOW(),
+                        last_error = NULL,
+                        place_count = (
+                            SELECT COUNT(*)
+                            FROM osm_places
+                            WHERE region_id = %s
+                              AND active = true
+                        ),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (region_id, region_id),
+                )
+
+                cur.execute(
+                    """
+                    UPDATE osm_sync_runs
+                    SET
+                        status = 'SUCCESS',
+                        finished_at = NOW(),
+                        places_read = %s,
+                        places_staged = %s,
+                        places_inserted = %s,
+                        places_updated = %s,
+                        places_deactivated = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        stats["read"],
+                        stats["staged"],
+                        inserted,
+                        updated,
+                        deactivated,
+                        sync_run_id,
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    DELETE FROM osm_place_staging
+                    WHERE sync_run_id = %s
+                    """,
+                    (sync_run_id,),
+                )
+
+        return inserted, updated, deactivated
+
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def clean_staging(conn, sync_run_id: int):
@@ -488,26 +602,33 @@ def main():
         if not sanity_check(conn, args.sync_run_id, args.region_id, staged_count):
             raise ValueError('Sanity check failed: extreme drop in place count')
 
-        # Publish atomically (single transaction)
+        # Publish atomically (single transaction - includes SUCCESS marking and staging cleanup)
         log('info', 'publish_start', sync_run_id=args.sync_run_id)
-        inserted, updated, deactivated = publish_staging(conn, args.sync_run_id, args.region_id)
-        stats['inserted'] = inserted
-        stats['updated'] = updated
-        stats['deactivated'] = deactivated
-        log('info', 'publish_success', inserted=inserted, updated=updated, deactivated=deactivated)
+        inserted, updated, deactivated = publish_staging(
+            conn,
+            args.sync_run_id,
+            args.region_id,
+            stats,
+        )
 
-        # Clean up staging
-        clean_staging(conn, args.sync_run_id)
+        stats["inserted"] = inserted
+        stats["updated"] = updated
+        stats["deactivated"] = deactivated
 
-        mark_success(conn, args.sync_run_id, stats)
+        log(
+            "info",
+            "publish_success",
+            inserted=inserted,
+            updated=updated,
+            deactivated=deactivated,
+        )
 
     except Exception as e:
         log('error', 'sync_failed', error=str(e))
         if conn:
             try:
                 conn.rollback()
-                mark_failed(conn, args.sync_run_id, str(e)[:1000])
-                update_region_error(conn, args.region_id, str(e)[:1000])
+                mark_failed(conn, args.sync_run_id, args.region_id, str(e))
             except Exception:
                 pass
         sys.exit(1)

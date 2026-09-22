@@ -109,7 +109,7 @@ export default function App() {
             <Route
               path="/osm"
               element={
-                <ProtectedRoute>
+                <ProtectedRoute requiredRole="ADMIN">
                   <AppShell>
                     <OsmCatalog />
                   </AppShell>

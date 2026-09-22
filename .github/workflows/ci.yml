@@ -7,21 +7,30 @@ on:
     branches: [ main ]
 
 jobs:
-  backend-test:
+  backend-build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+
+      - uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'temurin'
+          distribution: temurin
           cache: maven
-      - name: Test and Package Backend
-        run: |
-          cd backend
-          mvn -B clean test
-          mvn -B clean package -DskipTests
+
+      - name: Build backend
+        working-directory: backend
+        run: mvn -B -DskipTests clean package
+
+  backend-startup-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run backend startup smoke
+        run: .github/scripts/backend_smoke.sh
 
   frontend-build:
     runs-on: ubuntu-latest
@@ -86,82 +95,63 @@ jobs:
 
   workflow-lint:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - name: Install actionlint
+
+      - name: Install actionlint v1.7.12
         run: |
-          curl -sfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download_actionlint.bash | bash -s -- -b /usr/local/bin
+          curl -fsSL \
+            -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" \
+            | sha256sum -c -
+
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp
+
+          sudo install /tmp/actionlint /usr/local/bin/actionlint
+
       - name: Lint workflows
-        run: |
-          actionlint -color
+        run: actionlint -color
 
   osm-fixture-pipeline:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install system dependencies
+
+      - name: Install osmium
         run: |
           sudo apt-get update
           sudo apt-get install -y osmium-tool
-      - name: Install Python dependencies
+
+      - name: Run osmium fixture pipeline
         run: |
-          pip install --no-cache-dir psycopg2-binary
-      - name: Create test fixture
-        run: |
-          mkdir -p .github/fixtures
-          cat > .github/fixtures/small-businesses.osm << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<osm version="0.6" generator="test">
-  <node id="1" lat="-15.6" lon="-56.1" version="1" timestamp="2026-01-01T00:00:00Z">
-    <tag k="name" v="Barbearia Teste"/>
-    <tag k="shop" v="barber"/>
-    <tag k="phone" v="+5565999999999"/>
-  </node>
-  <way id="2" version="1" timestamp="2026-01-01T00:00:00Z">
-    <nd ref="10"/>
-    <nd ref="11"/>
-    <nd ref="12"/>
-    <nd ref="10"/>
-    <tag k="name" v="Salão Teste"/>
-    <tag k="shop" v="hairdresser"/>
-    <tag k="hairdresser" v="barber"/>
-  </way>
-  <relation id="3" version="1" timestamp="2026-01-01T00:00:00Z">
-    <member type="way" ref="2" role="outer"/>
-    <tag k="name" v="Centro Comercial Teste"/>
-    <tag k="shop" v="mall"/>
-  </relation>
-</osm>
-EOF
-      - name: Test osmium pipeline
-        run: |
-          cd .github/fixtures
-          osmium tags-filter small-businesses.osm nwr/shop nwr/amenity -o filtered.osm.pbf
-          osmium export filtered.osm.pbf \
+          osmium tags-filter \
+            .github/fixtures/small-businesses.osm \
+            nwr/shop \
+            nwr/amenity \
+            nwr/craft \
+            nwr/healthcare \
+            nwr/leisure \
+            nwr/office \
+            nwr/tourism \
+            -o /tmp/filtered.osm.pbf
+
+          osmium export \
+            /tmp/filtered.osm.pbf \
             --geometry-types=point,linestring,polygon \
             --attributes=type,id,timestamp \
             --format-option=print_record_separator=false \
             -f geojsonseq \
-            -o exported.geojsonseq
-          python3 -c "
-import json
-count = 0
-with open('exported.geojsonseq') as f:
-    for line in f:
-        line = line.lstrip('\x1e').strip()
-        if not line:
-            continue
-        feature = json.loads(line)
-        props = feature.get('properties', {})
-        osm_type = props.get('@type')
-        osm_id = props.get('@id')
-        tags = {k: v for k, v in props.items() if not k.startswith('@')}
-        print(f'Parsed: {osm_type}/{osm_id} tags={tags}')
-        count += 1
-assert count >= 1, 'Expected at least 1 feature'
-print('Pipeline test passed!')
-          "
+            -o /tmp/exported.geojsonseq
+
+          python3 \
+            .github/scripts/verify_osmium_fixture.py \
+            /tmp/exported.geojsonseq

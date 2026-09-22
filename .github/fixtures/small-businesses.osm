@@ -19,6 +19,7 @@
   </way>
   <relation id="3" version="1" timestamp="2026-01-01T00:00:00Z">
     <member type="way" ref="2" role="outer"/>
+    <tag k="type" v="multipolygon"/>
     <tag k="name" v="Centro Comercial Teste"/>
     <tag k="shop" v="mall"/>
   </relation>

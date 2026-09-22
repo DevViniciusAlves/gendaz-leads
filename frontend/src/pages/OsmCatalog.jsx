@@ -38,6 +38,7 @@ export function OsmCatalog() {
   const { push } = useToast()
 
   const pollingIntervals = useRef({})
+  const checkedActiveRuns = useRef(new Set())
 
   function loadRegions() {
     setLoading(true)
@@ -68,27 +69,39 @@ export function OsmCatalog() {
 
   // Load sync runs for regions that have active syncs on initial load
   useEffect(() => {
-    if (regions.length > 0) {
-      regions.forEach(region => {
-        if (region.catalogStatus === 'READY' || region.catalogStatus === 'EMPTY') {
-          // Check if there's an active sync run
-          api.get(`/api/osm-catalog/regions/${region.id}/sync-runs`)
-            .then((data) => {
-              const latestRun = data?.[0]
-              if (latestRun && (latestRun.status === 'QUEUED' || latestRun.status === 'RUNNING')) {
-                setRegions(prev => prev.map(r => {
-                  if (r.id === region.id) {
-                    return { ...r, syncRuns: data }
-                  }
-                  return r
-                }))
-                startPolling(region.id)
-              }
-            })
-            .catch(() => {})
-        }
-      })
-    }
+    if (regions.length === 0) return
+
+    regions.forEach((region) => {
+      if (checkedActiveRuns.current.has(region.id)) {
+        return
+      }
+
+      checkedActiveRuns.current.add(region.id)
+
+      api
+        .get(`/api/osm-catalog/regions/${region.id}/sync-runs`)
+        .then((data) => {
+          const latestRun = data?.[0]
+
+          if (!latestRun) return
+
+          setRegions((prev) =>
+            prev.map((item) =>
+              item.id === region.id
+                ? { ...item, syncRuns: data }
+                : item
+            )
+          )
+
+          if (
+            latestRun.status === 'QUEUED'
+            || latestRun.status === 'RUNNING'
+          ) {
+            startPolling(latestRun.id)
+          }
+        })
+        .catch(() => {})
+    })
   }, [regions])
 
   async function requestSync(city, country) {

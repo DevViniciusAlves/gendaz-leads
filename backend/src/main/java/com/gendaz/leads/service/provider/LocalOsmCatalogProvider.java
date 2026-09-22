@@ -18,7 +18,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 
 @Component
@@ -80,24 +79,30 @@ public class LocalOsmCatalogProvider {
         OsmCatalogRegion region = readyRegions.get(0);
 
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
-        int limit = Math.min(target * candidateMultiplier, maxCandidates);
+        int limit = Math.min(Math.max(target * candidateMultiplier, 30), maxCandidates);
 
         log.info("[osm-catalog] catalog_query regionId={} city={} niche={} target={} limit={} tagFilters={}",
                 region.getId(), city, niche, target, limit, strategy.tagFilters());
 
         List<OsmPlace> places;
         if (strategy.tagFilters().isEmpty()) {
-            places = placeRepository.findByRegionIdAndNormalizedNameContainingIgnoreCaseAndActiveTrue(
-                    region.getId(), "");
+            places = findByNameFallback(region.getId(), strategy.fallbackNameRegex(), limit);
         } else {
             places = findByStructuredTags(region.getId(), strategy.tagFilters(), limit);
         }
 
-        // If we still have room, add name fallback candidates
-        if (!strategy.tagFilters().isEmpty() && places.size() < limit && strategy.fallbackNameRegex() != null && !strategy.fallbackNameRegex().isBlank()) {
-            List<OsmPlace> fallbackPlaces = placeRepository.findByRegionIdAndNormalizedNameRegexAndActiveTrue(
-                    region.getId(), strategy.fallbackNameRegex(), limit - places.size());
-            // Deduplicate by osm_type + osm_id
+        // If we still have room and have tag filters, add name fallback candidates
+        if (!strategy.tagFilters().isEmpty()
+                && places.size() < limit
+                && strategy.fallbackNameRegex() != null
+                && !strategy.fallbackNameRegex().isBlank()) {
+
+            List<OsmPlace> fallbackPlaces = findByNameFallback(
+                    region.getId(),
+                    strategy.fallbackNameRegex(),
+                    limit - places.size()
+            );
+
             Set<String> seen = new HashSet<>();
             for (OsmPlace p : places) {
                 seen.add(p.getOsmType() + "/" + p.getOsmId());
@@ -171,28 +176,78 @@ public class LocalOsmCatalogProvider {
         sql.append(" ORDER BY normalized_name LIMIT :limit");
         params.addValue("limit", limit);
 
-        return jdbcTemplate.query(sql.toString(), params, (rs, rowNum) -> {
-            OsmPlace p = new OsmPlace();
-            p.setId(rs.getLong("id"));
-            p.setOsmType(rs.getString("osm_type"));
-            p.setOsmId(rs.getLong("osm_id"));
-            p.setBusinessName(rs.getString("business_name"));
-            p.setNormalizedName(rs.getString("normalized_name"));
-            p.setLatitude(rs.getDouble("latitude"));
-            p.setLongitude(rs.getDouble("longitude"));
-            p.setAddress(rs.getString("address"));
-            p.setCity(rs.getString("city"));
-            p.setState(rs.getString("state"));
-            p.setCountry(rs.getString("country"));
-            p.setCountryCode(rs.getString("country_code"));
-            p.setPhone(rs.getString("phone"));
-            p.setEmail(rs.getString("email"));
-            p.setWebsite(rs.getString("website"));
-            p.setInstagram(rs.getString("instagram"));
-            p.setTags(rs.getString("tags"));
-            p.setActive(rs.getBoolean("active"));
-            return p;
-        });
+        return jdbcTemplate.query(sql.toString(), params, this::mapRow);
+    }
+
+    private List<OsmPlace> findByNameFallback(Long regionId, String fallbackRegex, int limit) {
+        String sql = """
+                SELECT *
+                FROM osm_places
+                WHERE region_id = :regionId
+                  AND active = true
+                  AND normalized_name ~* :regex
+                ORDER BY normalized_name, id
+                LIMIT :limit
+                """;
+
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("regionId", regionId)
+                .addValue("regex", normalizeFallbackRegex(fallbackRegex))
+                .addValue("limit", limit);
+
+        return jdbcTemplate.query(sql, params, this::mapRow);
+    }
+
+    private String normalizeFallbackRegex(String regex) {
+        if (regex == null || regex.isBlank()) {
+            return "";
+        }
+
+        String[] parts = regex.split("\\|");
+        List<String> normalized = new ArrayList<>();
+
+        for (String part : parts) {
+            String value = normalizeForCompare(part);
+            if (!value.isBlank()) {
+                normalized.add(java.util.regex.Pattern.quote(value));
+            }
+        }
+
+        return String.join("|", normalized);
+    }
+
+    private OsmPlace mapRow(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        OsmPlace p = new OsmPlace();
+
+        p.setId(rs.getLong("id"));
+        p.setOsmType(rs.getString("osm_type"));
+        p.setOsmId(rs.getLong("osm_id"));
+        p.setBusinessName(rs.getString("business_name"));
+        p.setNormalizedName(rs.getString("normalized_name"));
+
+        double latitude = rs.getDouble("latitude");
+        if (!rs.wasNull()) {
+            p.setLatitude(latitude);
+        }
+
+        double longitude = rs.getDouble("longitude");
+        if (!rs.wasNull()) {
+            p.setLongitude(longitude);
+        }
+
+        p.setAddress(rs.getString("address"));
+        p.setCity(rs.getString("city"));
+        p.setState(rs.getString("state"));
+        p.setCountry(rs.getString("country"));
+        p.setCountryCode(rs.getString("country_code"));
+        p.setPhone(rs.getString("phone"));
+        p.setEmail(rs.getString("email"));
+        p.setWebsite(rs.getString("website"));
+        p.setInstagram(rs.getString("instagram"));
+        p.setTags(rs.getString("tags"));
+        p.setActive(rs.getBoolean("active"));
+
+        return p;
     }
 
     private LeadCandidate mapToCandidate(OsmPlace place) {
