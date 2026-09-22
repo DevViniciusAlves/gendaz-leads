@@ -27,6 +27,8 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
+import java.util.Objects;
 
 @Component
 public class OpenStreetMapProvider implements LeadDiscoveryProvider {
@@ -71,35 +73,42 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     private int maxConcurrency;
 
     @Value("${app.discovery.osm.circuit-open-seconds:30}")
-    private long circuitOpenSeconds;
+    long circuitOpenSeconds;
 
     @Value("${app.discovery.osm.adaptive-max-depth:12}")
-    private int adaptiveMaxDepth;
+    int adaptiveMaxDepth;
 
     @Value("${app.discovery.osm.adaptive-min-edge-km:1.0}")
-    private double adaptiveMinEdgeKm;
+    double adaptiveMinEdgeKm;
 
     @Value("${app.discovery.osm.query-max-edge-km:12.0}")
-    private double queryMaxEdgeKm;
+    double queryMaxEdgeKm;
 
     @Value("${app.discovery.osm.failure-split-threshold-km:6.0}")
-    private double failureSplitThresholdKm;
+    double failureSplitThresholdKm;
 
     @Value("${app.discovery.osm.rate-limit-cooldown-seconds:60}")
-    private long rateLimitCooldownSeconds;
+    long rateLimitCooldownSeconds;
 
     @Value("${app.discovery.osm.connection-refused-cooldown-seconds:30}")
-    private long connectionRefusedCooldownSeconds;
+    long connectionRefusedCooldownSeconds;
 
     @Value("${app.discovery.osm.timeout-cooldown-seconds:15}")
-    private long timeoutCooldownSeconds;
+    long timeoutCooldownSeconds;
+
+    @FunctionalInterface
+    interface CooldownSleeper {
+        void sleep(long millis) throws InterruptedException;
+    }
+
+    private CooldownSleeper cooldownSleeper = Thread::sleep;
 
     private final RestClient.Builder builder;
     private final ObjectMapper objectMapper;
     private final Normalizer normalizer;
     private final SsrfGuard ssrfGuard;
-    private OverpassCircuitBreaker circuitBreaker;
-    private Semaphore overpassSemaphore;
+    OverpassCircuitBreaker circuitBreaker;
+    Semaphore overpassSemaphore;
 
     private final Map<String, TimedValue<GeoScope>> geoCache = new ConcurrentHashMap<>();
 
@@ -132,6 +141,10 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         List<String> endpoints = buildEndpointList();
         log.info("[osm] config enabled={} timeoutMs={} nominatimTimeoutMs={} nominatimMaxAttempts={} nominatimCacheSeconds={} nominatimMinIntervalMs={} nominatimBaseUrl={} nominatim429BackoffMs={} endpoints={} maxConcurrency={} circuitOpenSeconds={} queryMaxEdgeKm={} failureSplitThresholdKm={} adaptiveMaxDepth={} adaptiveMinEdgeKm={} rateLimitCooldownSeconds={} connectionRefusedCooldownSeconds={} timeoutCooldownSeconds={}",
                 enabled, timeoutMs, nominatimTimeoutMs, nominatimMaxAttempts, nominatimCacheSeconds, nominatimMinIntervalMs, nominatimBaseUrl, nominatim429BackoffMs, endpoints.size(), maxConcurrency, circuitOpenSeconds, queryMaxEdgeKm, failureSplitThresholdKm, adaptiveMaxDepth, adaptiveMinEdgeKm, rateLimitCooldownSeconds, connectionRefusedCooldownSeconds, timeoutCooldownSeconds);
+    }
+
+    void setCooldownSleeper(CooldownSleeper cooldownSleeper) {
+        this.cooldownSleeper = Objects.requireNonNull(cooldownSleeper);
     }
 
     private RestClient client(int effectiveTimeoutMs) {
@@ -259,6 +272,12 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             "instagram|" +
             "contact:instagram" +
             ")$";
+
+    private String buildContactKeyRegexFilter() {
+        return "[~\""
+                + escapeTag(CONTACT_KEYS_REGEX)
+                + "\"~\".+\"]";
+    }
 
     private String buildStructuredTagFilter(String rawFilter) {
         StringBuilder filterBuilder = new StringBuilder();
@@ -480,12 +499,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
                     requestSent = true;
                     anyHttpAttemptMade = true;
-                    String response = client(effectiveTimeoutMs).post()
-                            .uri(url)
-                            .header("Content-Type", "application/x-www-form-urlencoded")
-                            .body("data=" + java.net.URLEncoder.encode(query, java.nio.charset.StandardCharsets.UTF_8))
-                            .retrieve()
-                            .body(String.class);
+                    String response = executeOverpassRequest(url, query, effectiveTimeoutMs);
 
                     long elapsedMs = elapsedMs(startNs);
 
@@ -632,47 +646,101 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 }
             }
 
-            // All endpoints were skipped (circuit open) or all failed with continue
-            if (!anyEndpointTried) {
-                long minWaitMs = circuitBreaker.getMinWaitMsForAvailableEndpoint();
-                if (minWaitMs > 0 && minWaitMs != Long.MAX_VALUE) {
-                    long remainingBudgetMs = budget.remainingMs();
-                    if (remainingBudgetMs <= 0) {
-                        if (anyHttpAttemptMade) {
-                            return AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Budget esgotado aguardando endpoint disponível", elapsedMs(startNs));
-                        } else {
-                            return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget esgotado aguardando endpoint disponível", elapsedMs(startNs));
-                        }
-                    }
+            // Collect the hosts that were used in this query cycle
+            List<String> endpointHosts = endpoints.stream()
+                    .map(this::hostOf)
+                    .distinct()
+                    .toList();
 
-                    long waitMs = Math.min(minWaitMs, remainingBudgetMs);
+            // Check if we should wait for cooldown (all endpoints OPEN)
+            long minWaitMs = circuitBreaker.getMinWaitMsForAvailableEndpoint(endpointHosts);
 
-                    log.info("[osm] overpass_waiting_for_endpoint campaignId={} depth={} phase={} waitMs={} remainingBudgetMs={} nextEndpointCheckMs={}",
-                            campaignId, region.depth(), phase, waitMs, remainingBudgetMs, minWaitMs);
+            if (minWaitMs == 0L) {
+                // There's an endpoint available (CLOSED or HALF_OPEN without probe)
+                // Continue the while loop to try again immediately
+                continue;
+            }
 
-                    try {
-                        Thread.sleep(waitMs);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        if (anyHttpAttemptMade) {
-                            return AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida aguardando endpoint Overpass", elapsedMs(startNs));
-                        } else {
-                            return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_INTERRUPTED", "Busca interrompida aguardando endpoint Overpass", elapsedMs(startNs));
-                        }
-                    }
-                    // Loop continues, re-evaluate endpoints
-                    continue;
+            if (minWaitMs != Long.MAX_VALUE) {
+                long remainingBudgetMs = budget.remainingMs();
+
+                if (remainingBudgetMs <= 0L) {
+                    return anyHttpAttemptMade
+                            ? AreaQueryResult.infraUnavailableWithAttempt(
+                                    "OSM_DISCOVERY_TIMEOUT",
+                                    "Budget esgotado aguardando endpoint Overpass.",
+                                    elapsedMs(startNs)
+                            )
+                            : AreaQueryResult.infraUnavailable(
+                                    "OSM_DISCOVERY_TIMEOUT",
+                                    "Budget esgotado aguardando endpoint Overpass.",
+                                    elapsedMs(startNs)
+                            );
                 }
+
+                // Don't sleep until budget is exactly zero.
+                // Leave a small margin for the next attempt.
+                long retrySafetyMarginMs = Math.min(500L, remainingBudgetMs);
+
+                if (remainingBudgetMs <= minWaitMs + retrySafetyMarginMs) {
+                    return anyHttpAttemptMade
+                            ? AreaQueryResult.infraUnavailableWithAttempt(
+                                    "OSM_DISCOVERY_TIMEOUT",
+                                    "Budget insuficiente para aguardar novo endpoint e executar nova tentativa.",
+                                    elapsedMs(startNs)
+                            )
+                            : AreaQueryResult.infraUnavailable(
+                                    "OSM_DISCOVERY_TIMEOUT",
+                                    "Budget insuficiente para aguardar novo endpoint e executar nova tentativa.",
+                                    elapsedMs(startNs)
+                            );
+                }
+
+                log.info(
+                        "[osm] all_endpoints_circuit_open campaignId={} depth={} phase={} waitMs={} remainingBudgetMs={}",
+                        campaignId,
+                        region.depth(),
+                        phase,
+                        minWaitMs,
+                        remainingBudgetMs
+                );
+
+                try {
+                    cooldownSleeper.sleep(minWaitMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+
+                    return anyHttpAttemptMade
+                            ? AreaQueryResult.infraUnavailableWithAttempt(
+                                    "OSM_DISCOVERY_INTERRUPTED",
+                                    "Busca interrompida aguardando endpoint Overpass.",
+                                    elapsedMs(startNs)
+                            )
+                            : AreaQueryResult.infraUnavailable(
+                                    "OSM_DISCOVERY_INTERRUPTED",
+                                    "Busca interrompida aguardando endpoint Overpass.",
+                                    elapsedMs(startNs)
+                            );
+                }
+
+                // Loop continues, re-evaluate endpoints
+                continue;
             }
 
-            // If we got here, either some endpoint was tried (and all failed with non-retryable errors)
-            // or no endpoints are known. Return the failure.
+            // No recoverable endpoint available
             long elapsedMs = elapsedMs(startNs);
-            if (anyHttpAttemptMade) {
-                return AreaQueryResult.infraUnavailableWithAttempt("OSM_ALL_ENDPOINTS_FAILED", "Todos os endpoints Overpass indisponíveis", elapsedMs);
-            } else {
-                return AreaQueryResult.infraUnavailable("OSM_ALL_ENDPOINTS_FAILED", "Todos os endpoints Overpass indisponíveis", elapsedMs);
-            }
+
+            return anyHttpAttemptMade
+                    ? AreaQueryResult.infraUnavailableWithAttempt(
+                            "OSM_ALL_ENDPOINTS_FAILED",
+                            "Todos os endpoints Overpass indisponíveis.",
+                            elapsedMs
+                    )
+                    : AreaQueryResult.infraUnavailable(
+                            "OSM_ALL_ENDPOINTS_FAILED",
+                            "Todos os endpoints Overpass indisponíveis.",
+                            elapsedMs
+                    );
         }
 
         long elapsedMs = elapsedMs(startNs);
@@ -681,6 +749,20 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         } else {
             return AreaQueryResult.infraUnavailable("OSM_DISCOVERY_TIMEOUT", "Budget de descoberta esgotado", elapsedMs);
         }
+    }
+
+    String executeOverpassRequest(
+            String url,
+            String query,
+            int effectiveTimeoutMs
+    ) {
+        return client(effectiveTimeoutMs)
+                .post()
+                .uri(url)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body("data=" + java.net.URLEncoder.encode(query, java.nio.charset.StandardCharsets.UTF_8))
+                .retrieve()
+                .body(String.class);
     }
 
     // Compatibilidade temporária com assinatura antiga
@@ -774,9 +856,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
             sb.append("nwr")
                     .append(tagFilter)
-                    .append("[\"~\"")
-                    .append(escapeTag(CONTACT_KEYS_REGEX))
-                    .append("\"]")
+                    .append(buildContactKeyRegexFilter())
                     .append(locationFilter)
                     .append(";");
         }
@@ -820,9 +900,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
 
         sb.append("nwr[\"name\"~\"")
                 .append(fallbackRegex)
-                .append("\",i][\"~\"")
-                .append(escapeTag(CONTACT_KEYS_REGEX))
-                .append("\"]")
+                .append("\",i]")
+                .append(buildContactKeyRegexFilter())
                 .append(locationFilter)
                 .append(";");
 
@@ -1114,6 +1193,8 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
     }
 
     static class OverpassCircuitBreaker {
+        private final LongSupplier clockMs;
+
         private static final class EndpointState {
             volatile State state = State.CLOSED;
             volatile long openSince = 0L;
@@ -1131,7 +1212,16 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         private final long openSeconds;
 
         OverpassCircuitBreaker(long openSeconds) {
+            this(openSeconds, System::currentTimeMillis);
+        }
+
+        OverpassCircuitBreaker(long openSeconds, LongSupplier clockMs) {
             this.openSeconds = openSeconds;
+            this.clockMs = Objects.requireNonNull(clockMs);
+        }
+
+        private long nowMs() {
+            return clockMs.getAsLong();
         }
 
         boolean tryAcquire(String host) {
@@ -1143,7 +1233,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 }
 
                 if (es.state == EndpointState.State.OPEN) {
-                    long now = System.currentTimeMillis();
+                    long now = nowMs();
                     long until = es.openUntilEpochMs > 0L
                             ? es.openUntilEpochMs
                             : es.openSince + openSeconds * 1000L;
@@ -1184,7 +1274,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
 
             synchronized (es) {
-                long now = System.currentTimeMillis();
+                long now = nowMs();
                 es.state = EndpointState.State.OPEN;
                 es.openSince = now;
                 es.openUntilEpochMs = now + openSeconds * 1000L;
@@ -1196,7 +1286,7 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
             EndpointState es = states.computeIfAbsent(host, k -> new EndpointState());
 
             synchronized (es) {
-                long now = System.currentTimeMillis();
+                long now = nowMs();
                 es.state = EndpointState.State.OPEN;
                 es.openSince = now;
                 es.openUntilEpochMs = now + Math.max(1L, cooldownSeconds) * 1000L;
@@ -1222,41 +1312,57 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
         }
 
         /**
-         * Returns the minimum milliseconds until any known endpoint becomes available for a probe (HALF_OPEN).
+         * Returns the minimum milliseconds until any of the given endpoints becomes available for a probe (HALF_OPEN).
          * Returns 0 if any endpoint is currently CLOSED or HALF_OPEN (no probe in flight).
          * Returns Long.MAX_VALUE if no endpoints are known.
          */
-        long getMinWaitMsForAvailableEndpoint() {
-            long now = System.currentTimeMillis();
-            long minWait = Long.MAX_VALUE;
-            boolean anyKnown = false;
+        long getMinWaitMsForAvailableEndpoint(Collection<String> hosts) {
+            if (hosts == null || hosts.isEmpty()) {
+                return Long.MAX_VALUE;
+            }
 
-            for (EndpointState es : states.values()) {
-                anyKnown = true;
+            long now = nowMs();
+            long minWait = Long.MAX_VALUE;
+
+            for (String host : hosts) {
+                EndpointState es = states.get(host);
+
+                // Host not yet known => available
+                if (es == null) {
+                    return 0L;
+                }
+
                 synchronized (es) {
                     if (es.state == EndpointState.State.CLOSED) {
                         return 0L;
                     }
+
+                    if (es.state == EndpointState.State.OPEN) {
+                        long until = es.openUntilEpochMs > 0L
+                                ? es.openUntilEpochMs
+                                : es.openSince + openSeconds * 1000L;
+
+                        long waitMs = Math.max(0L, until - now);
+
+                        if (waitMs == 0L) {
+                            return 0L;
+                        }
+
+                        minWait = Math.min(minWait, waitMs);
+                        continue;
+                    }
+
                     if (es.state == EndpointState.State.HALF_OPEN) {
                         if (!es.halfOpenInFlight) {
                             return 0L;
                         }
-                        // Half-open but probe in flight, wait for it to complete (conservative: assume openSeconds)
-                        minWait = Math.min(minWait, openSeconds * 1000L);
-                    } else if (es.state == EndpointState.State.OPEN) {
-                        long until = es.openUntilEpochMs > 0L
-                                ? es.openUntilEpochMs
-                                : es.openSince + openSeconds * 1000L;
-                        long wait = until - now;
-                        if (wait < 0) wait = 0;
-                        minWait = Math.min(minWait, wait);
+
+                        // Probe in flight, wait briefly
+                        minWait = Math.min(minWait, 100L);
                     }
                 }
             }
 
-            if (!anyKnown) {
-                return 0L;
-            }
             return minWait;
         }
     }
