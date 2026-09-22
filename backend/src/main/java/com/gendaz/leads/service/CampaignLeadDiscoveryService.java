@@ -26,7 +26,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import com.gendaz.leads.exception.ApiException;
 
+import java.util.ArrayDeque;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -85,6 +87,15 @@ public class CampaignLeadDiscoveryService {
 
     @Value("${app.discovery.osm.admin-area-infra-failures-before-bbox:2}")
     private int adminAreaInfraFailuresBeforeBbox;
+
+    @Value("${app.discovery.osm.region-budget-ms:30000}")
+    private long regionBudgetMs;
+
+    @Value("${app.discovery.osm.fallback-region-budget-ms:20000}")
+    private long fallbackRegionBudgetMs;
+
+    @Value("${app.discovery.osm.max-region-deferrals:1}")
+    private int maxRegionDeferrals;
 
     public CampaignLeadDiscoveryService(
             CampaignRepository campaignRepository,
@@ -1033,5 +1044,32 @@ public class CampaignLeadDiscoveryService {
         campaign.setProgressTotal(total);
         campaign.setProgressStage("Buscando leads (" + Math.min(current, total) + "/" + total + ")");
         campaignRepository.save(campaign);
+    }
+
+    private String regionKey(
+            SearchRegion region,
+            GeographicStrategy strategy
+    ) {
+        return strategy.name()
+                + "|"
+                + region.depth()
+                + "|"
+                + region.bbox();
+    }
+
+    private boolean isRegionalBudgetExhausted(
+            AreaQueryResult result,
+            DiscoveryBudget regionBudget,
+            DiscoveryBudget globalBudget
+    ) {
+        return result != null
+                && result.outcome() == AreaQueryResult.Outcome.INFRA_UNAVAILABLE
+                && "OSM_DISCOVERY_TIMEOUT".equals(result.errorCode())
+                && regionBudget.expired()
+                && !globalBudget.expired();
+    }
+
+    private boolean hasRequiredProspectingContact(LeadCandidate candidate) {
+        return candidate != null && hasText(candidate.getPhone());
     }
 }

@@ -24,6 +24,22 @@ public final class DiscoveryBudget {
         return new DiscoveryBudget(total);
     }
 
+    public DiscoveryBudget slice(long maxSliceMs) {
+        if (maxSliceMs <= 0L) {
+            throw new IllegalArgumentException("maxSliceMs deve ser > 0");
+        }
+
+        long parentRemainingMs = remainingMs();
+
+        if (parentRemainingMs <= 0L) {
+            throw new IllegalStateException("Budget global esgotado");
+        }
+
+        return new DiscoveryBudget(
+                Math.min(maxSliceMs, parentRemainingMs)
+        );
+    }
+
     public long totalMs() {
         return totalMs;
     }
