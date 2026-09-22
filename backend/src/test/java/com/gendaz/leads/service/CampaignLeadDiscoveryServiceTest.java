@@ -62,9 +62,9 @@ class CampaignLeadDiscoveryServiceTest {
         );
 
         // Set @Value fields via reflection
-        setField(service, "baseBudgetMs", 90000L);
-        setField(service, "perLeadBudgetMs", 3000L);
-        setField(service, "maxBudgetMs", 180000L);
+        setField(service, "baseBudgetMs", 180000L);
+        setField(service, "perLeadBudgetMs", 15000L);
+        setField(service, "maxBudgetMs", 300000L);
         setField(service, "queryMinRawLimit", 20);
         setField(service, "queryRawPerLead", 6);
         setField(service, "adaptiveMaxDepth", 12);
@@ -528,6 +528,58 @@ class CampaignLeadDiscoveryServiceTest {
         var result = service.discoverAndPersist(campaign, 3);
 
         // Should be PARTIAL since we got 1 lead but target was 3
+        assertEquals(DiscoveryExecutionResult.Outcome.PARTIAL, result.outcome());
+        assertEquals(1, result.acceptedThisRun());
+    }
+
+    @Test
+    void discoveryBudgetForThreeLeadsUsesNewPolicy() {
+        DiscoveryBudget budget =
+                DiscoveryBudget.forTarget(
+                        3,
+                        180000L,
+                        15000L,
+                        300000L
+                );
+
+        assertEquals(225000L, budget.totalMs());
+    }
+
+    @Test
+    void discoveryBudgetIsCappedAtFiveMinutes() {
+        DiscoveryBudget budget =
+                DiscoveryBudget.forTarget(
+                        30,
+                        180000L,
+                        15000L,
+                        300000L
+                );
+
+        assertEquals(300000L, budget.totalMs());
+    }
+
+    @Test
+    void acceptedLeadWithExpiredBudgetRemainsPartial() {
+        // accepted = 1
+        // target = 3
+        // budget esgota depois
+        // resultado obrigatório: PARTIAL
+        LeadCandidate candidate = new LeadCandidate("Barbearia", "openstreetmap", "node/1");
+        candidate.setCategory("shop=barber");
+        candidate.setPhone("+55 65 9999-8888");
+
+        // Return success with 1 candidate, then budget expires
+        lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), any(), anyInt(), any(), anyLong()))
+                .thenReturn(
+                        AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100),
+                        AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Budget de descoberta esgotado", 50000)
+                );
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+
+        var result = service.discoverAndPersist(campaign, 3);
+
         assertEquals(DiscoveryExecutionResult.Outcome.PARTIAL, result.outcome());
         assertEquals(1, result.acceptedThisRun());
     }

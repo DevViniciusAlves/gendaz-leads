@@ -50,13 +50,13 @@ public class CampaignLeadDiscoveryService {
     private final Normalizer normalizer;
     private final OpenStreetMapProvider osm;
 
-    @Value("${app.discovery.osm.base-budget-ms:90000}")
+    @Value("${app.discovery.osm.base-budget-ms:180000}")
     private long baseBudgetMs;
 
-    @Value("${app.discovery.osm.per-lead-budget-ms:3000}")
+    @Value("${app.discovery.osm.per-lead-budget-ms:15000}")
     private long perLeadBudgetMs;
 
-    @Value("${app.discovery.osm.max-budget-ms:180000}")
+    @Value("${app.discovery.osm.max-budget-ms:300000}")
     private long maxBudgetMs;
 
     @Value("${app.discovery.osm.query-min-raw-limit:20}")

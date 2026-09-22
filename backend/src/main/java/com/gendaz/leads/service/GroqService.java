@@ -23,9 +23,9 @@ public class GroqService {
 
     private static final Logger log = LoggerFactory.getLogger(GroqService.class);
     private static final String ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+    private static final String MODEL = "openai/gpt-oss-120b";
 
     private final String apiKey;
-    private final String model;
     private final boolean enabled;
     private final int timeoutMs;
     private final int maxRetries;
@@ -36,14 +36,12 @@ public class GroqService {
             RestClient.Builder builder,
             ObjectMapper objectMapper,
             @Value("${app.groq.api-key:}") String apiKey,
-            @Value("${app.groq.model:openai/gpt-oss-120b}") String model,
             @Value("${app.groq.enabled:true}") boolean enabled,
             @Value("${app.groq.timeout-ms:30000}") int timeoutMs,
             @Value("${app.groq.max-retries:2}") int maxRetries
     ) {
         this.objectMapper = objectMapper;
         this.apiKey = apiKey;
-        this.model = model;
         this.enabled = enabled;
         this.timeoutMs = timeoutMs;
         this.maxRetries = maxRetries;
@@ -54,18 +52,16 @@ public class GroqService {
         this.restClient = builder.requestFactory(factory).build();
 
         log.info(
-                "[groq] config model={} enabled={} timeoutMs={} maxRetries={} envOverridePresent={} springApplicationJsonPresent={}",
-                this.model,
+                "[groq] config model={} enabled={} timeoutMs={} maxRetries={}",
+                MODEL,
                 this.enabled,
                 this.timeoutMs,
-                this.maxRetries,
-                System.getenv("GROQ_MODEL") != null,
-                System.getenv("SPRING_APPLICATION_JSON") != null
+                this.maxRetries
         );
     }
 
     public String getModel() {
-        return model;
+        return MODEL;
     }
 
     public boolean isEnabled() {
@@ -92,7 +88,7 @@ public class GroqService {
         String user = buildAnalysisUser(candidate, booking);
 
         Map<String, Object> request = Map.of(
-                "model", model,
+                "model", MODEL,
                 "temperature", 0.3,
                 "max_tokens", 800,
                 "response_format", Map.of("type", "json_object"),
@@ -133,7 +129,7 @@ public class GroqService {
                 analysis.opportunityScore() != null ? analysis.opportunityScore() : "?");
 
         Map<String, Object> request = Map.of(
-                "model", model,
+                "model", MODEL,
                 "temperature", 0.7,
                 "max_tokens", 400,
                 "messages", List.of(

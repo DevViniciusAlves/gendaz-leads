@@ -86,9 +86,9 @@ app:
       nominatim-base-url: ${OSM_NOMINATIM_BASE_URL:https://nominatim.openstreetmap.org}
       nominatim-429-backoff-ms: ${OSM_NOMINATIM_429_BACKOFF_MS:3000}
 
-      base-budget-ms: ${OSM_DISCOVERY_BASE_BUDGET_MS:90000}
-      per-lead-budget-ms: ${OSM_DISCOVERY_PER_LEAD_BUDGET_MS:3000}
-      max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:180000}
+      base-budget-ms: ${OSM_DISCOVERY_BASE_BUDGET_MS:180000}
+      per-lead-budget-ms: ${OSM_DISCOVERY_PER_LEAD_BUDGET_MS:15000}
+      max-budget-ms: ${OSM_DISCOVERY_MAX_BUDGET_MS:300000}
 
       query-min-raw-limit: ${OSM_QUERY_MIN_RAW_LIMIT:20}
       query-raw-per-lead: ${OSM_QUERY_RAW_PER_LEAD:6}
@@ -114,7 +114,6 @@ app:
     max-bytes: ${LEAD_ENRICHMENT_MAX_BYTES:500000}
   groq:
     api-key: ${GROQ_API_KEY:}
-    model: ${GROQ_MODEL:openai/gpt-oss-120b}
     enabled: ${GROQ_ENABLED:true}
     timeout-ms: ${GROQ_TIMEOUT_MS:30000}
     max-retries: ${GROQ_MAX_RETRIES:2}
