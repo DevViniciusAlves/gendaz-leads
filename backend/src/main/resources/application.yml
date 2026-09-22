@@ -114,6 +114,10 @@ app:
       admin-area-infra-failures-before-bbox: ${OSM_ADMIN_AREA_INFRA_FAILURES_BEFORE_BBOX:2}
       connection-refused-cooldown-seconds: ${OSM_CONNECTION_REFUSED_COOLDOWN_SECONDS:30}
       timeout-cooldown-seconds: ${OSM_TIMEOUT_COOLDOWN_SECONDS:15}
+    catalog:
+      enabled: ${OSM_CATALOG_DISCOVERY_ENABLED:true}
+      candidate-multiplier: ${OSM_CATALOG_CANDIDATE_MULTIPLIER:10}
+      max-candidates: ${OSM_CATALOG_MAX_CANDIDATES:300}
   enrichment:
     connect-timeout-ms: ${LEAD_ENRICHMENT_CONNECT_TIMEOUT_MS:2000}
     read-timeout-ms: ${LEAD_ENRICHMENT_READ_TIMEOUT_MS:3000}
@@ -139,11 +143,6 @@ app:
       workflow: ${OSM_SYNC_GITHUB_WORKFLOW:osm-catalog-sync.yml}
       ref: ${OSM_SYNC_GITHUB_REF:main}
       token: ${OSM_SYNC_GITHUB_TOKEN:}
-  discovery:
-    catalog:
-      enabled: ${OSM_CATALOG_DISCOVERY_ENABLED:true}
-      candidate-multiplier: ${OSM_CATALOG_CANDIDATE_MULTIPLIER:10}
-      max-candidates: ${OSM_CATALOG_MAX_CANDIDATES:300}
 
 logging:
   level:

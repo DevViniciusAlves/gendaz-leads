@@ -95,10 +95,10 @@ public class CampaignLeadDiscoveryService {
     @Value("${app.discovery.osm.admin-area-infra-failures-before-bbox:2}")
     private int adminAreaInfraFailuresBeforeBbox;
 
-    @Value("${app.discovery.osm.region-budget-ms:30000}")
+    @Value("${app.discovery.osm.region-budget-ms:15000}")
     private long regionBudgetMs;
 
-    @Value("${app.discovery.osm.fallback-region-budget-ms:20000}")
+    @Value("${app.discovery.osm.fallback-region-budget-ms:12000}")
     private long fallbackRegionBudgetMs;
 
     @Value("${app.discovery.osm.max-region-deferrals:1}")
@@ -1244,157 +1244,39 @@ public class CampaignLeadDiscoveryService {
                         "O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads."
                 );
             }
+            if (message != null && message.contains("OSM_CATALOG_LOCATION_AMBIGUOUS")) {
+                return new DiscoveryExecutionResult(
+                        DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE,
+                        0,
+                        initialCampaignLeadCount,
+                        0,
+                        0,
+                        0,
+                        0,
+                        false,
+                        "OSM_CATALOG_LOCATION_AMBIGUOUS",
+                        "Há mais de uma cidade sincronizada com este nome. Informe uma localização mais específica."
+                );
+            }
             throw e;
         }
 
         log.info("[osm-catalog] catalog_candidates campaignId={} found={}", campaign.getId(), candidates.size());
 
+        // Use the same acceptance pipeline as Overpass discovery
+        // Create an unlimited budget for local catalog (no time limit)
+        DiscoveryBudget budget = DiscoveryBudget.unlimited();
+
         Set<String> seenSourceIds = new HashSet<>();
         Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache = new HashMap<>();
 
-        int accepted = 0;
-
-        for (LeadCandidate candidate : candidates) {
-            if (accepted >= targetToAdd) {
-                break;
-            }
-
-            String sourceKey =
-                    normalizer.normalizeSourceId(
-                            candidate.getSource(),
-                            candidate.getSourceId()
-                    );
-
-            if (sourceKey == null) {
-                continue;
-            }
-
-            if (!seenSourceIds.add(sourceKey)) {
-                log.info(
-                        "[osm-catalog] candidate_rejected campaignId={} reason=already_seen_this_run source={} sourceId={}",
-                        campaign.getId(),
-                        candidate.getSource(),
-                        candidate.getSourceId()
-                );
-                continue;
-            }
-
-            var beforeEnrichment =
-                    deduplicationService.check(candidate);
-
-            if (beforeEnrichment.existing().isPresent()) {
-                Lead existing =
-                        beforeEnrichment.existing().get();
-
-                registerDuplicateEvent(
-                        campaign,
-                        beforeEnrichment,
-                        candidate
-                );
-
-                log.info(
-                        "[osm-catalog] candidate_rejected campaignId={} reason=duplicate_global duplicateReason={} existingLeadId={} source={} sourceId={}",
-                        campaign.getId(),
-                        beforeEnrichment.reason(),
-                        existing.getId(),
-                        candidate.getSource(),
-                        candidate.getSourceId()
-                );
-
-                continue;
-            }
-
-            enrichCandidateIfNeeded(
-                    candidate,
-                    enrichmentCache
-            );
-
-            var afterEnrichment =
-                    deduplicationService.check(candidate);
-
-            if (afterEnrichment.existing().isPresent()) {
-                Lead existing =
-                        afterEnrichment.existing().get();
-
-                registerDuplicateEvent(
-                        campaign,
-                        afterEnrichment,
-                        candidate
-                );
-
-                log.info(
-                        "[osm-catalog] candidate_rejected campaignId={} reason=duplicate_global_after_enrichment duplicateReason={} existingLeadId={} source={} sourceId={}",
-                        campaign.getId(),
-                        afterEnrichment.reason(),
-                        existing.getId(),
-                        candidate.getSource(),
-                        candidate.getSourceId()
-                );
-
-                continue;
-            }
-
-            if (!hasRequiredProspectingContact(candidate)) {
-                log.info(
-                        "[osm-catalog] candidate_rejected campaignId={} reason=no_phone_for_whatsapp source={} sourceId={}",
-                        campaign.getId(),
-                        candidate.getSource(),
-                        candidate.getSourceId()
-                );
-
-                registerSkippedNoContact(
-                        campaign,
-                        candidate
-                );
-
-                continue;
-            }
-
-            try {
-                Lead lead =
-                        persistenceService
-                                .createLeadForCampaign(
-                                        candidate,
-                                        campaign
-                                );
-
-                leadEventRepository.save(
-                        LeadEvent.builder()
-                                .leadId(lead.getId())
-                                .campaignId(campaign.getId())
-                                .eventType("lead_found")
-                                .eventMetadata(
-                                        "source="
-                                                + candidate.getSource()
-                                )
-                                .build()
-                );
-
-                log.info(
-                        "[osm-catalog] candidate_accepted campaignId={} reason=new_lead leadId={} source={} sourceId={}",
-                        campaign.getId(),
-                        lead.getId(),
-                        candidate.getSource(),
-                        candidate.getSourceId()
-                );
-
-                accepted++;
-
-                updateProgress(
-                        campaign,
-                        initialCampaignLeadCount,
-                        accepted
-                );
-
-            } catch (DataIntegrityViolationException e) {
-                log.info(
-                        "[osm-catalog] candidate_rejected campaignId={} reason=persistence_conflict source={} sourceId={}",
-                        campaign.getId(),
-                        candidate.getSource(),
-                        candidate.getSourceId()
-                );
-            }
-        }
+        int accepted = acceptCandidates(
+                campaign,
+                candidates,
+                targetToAdd,
+                seenSourceIds,
+                enrichmentCache
+        );
 
         int totalCampaignLeads =
                 (int) campaignLeadRepository

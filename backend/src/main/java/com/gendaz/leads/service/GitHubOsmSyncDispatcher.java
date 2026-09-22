@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
@@ -44,7 +45,7 @@ public class GitHubOsmSyncDispatcher {
 
     public void dispatch(OsmSyncRun syncRun, GeoScope scope, String geofabrikRegion) {
         if (token == null || token.isBlank()) {
-            throw new IllegalStateException("OSM_SYNC_GITHUB_TOKEN não configurado");
+            throw new IllegalStateException("OSM_SYNC_GITHUB_NOT_CONFIGURED");
         }
 
         Map<String, Object> inputs = Map.of(
@@ -68,14 +69,18 @@ public class GitHubOsmSyncDispatcher {
         log.info("[osm-catalog] sync_dispatching syncRunId={} url={}", syncRun.getId(), url);
 
         try {
-            String response = restClient.post()
+            restClient.post()
                     .uri(url)
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)
                     .retrieve()
-                    .body(String.class);
+                    .onStatus(HttpStatusCode::isError, (req, res) -> {
+                        String errorBody = new String(res.getBody().readAllBytes());
+                        throw new RestClientException("GitHub API error: " + res.getStatusCode() + " - " + errorBody);
+                    })
+                    .toBodilessEntity();
 
             log.info("[osm-catalog] sync_dispatched syncRunId={}", syncRun.getId());
         } catch (RestClientException e) {

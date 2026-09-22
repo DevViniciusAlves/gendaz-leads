@@ -23,4 +23,10 @@ public interface OsmCatalogRegionRepository extends JpaRepository<OsmCatalogRegi
 
     @Query("SELECT r FROM OsmCatalogRegion r WHERE r.catalogStatus = 'READY' AND r.countryCode = :countryCode")
     List<OsmCatalogRegion> findReadyByCountryCode(@Param("countryCode") String countryCode);
+
+    @Query("SELECT r FROM OsmCatalogRegion r WHERE r.normalizedCity = :normalizedCity AND r.countryCode = :countryCode AND r.catalogStatus = 'READY'")
+    List<OsmCatalogRegion> findByNormalizedCityAndCountryCodeAndCatalogStatus(
+            @Param("normalizedCity") String normalizedCity,
+            @Param("countryCode") String countryCode,
+            @Param("catalogStatus") String catalogStatus);
 }

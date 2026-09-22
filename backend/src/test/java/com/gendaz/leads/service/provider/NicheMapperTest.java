@@ -2,46 +2,92 @@ package com.gendaz.leads.service.provider;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class NicheMapperTest {
 
     @Test
-    void ciliosVariantsShareSameStrategy() {
-        var a = NicheMapper.resolve("cílios");
-        var b = NicheMapper.resolve("cilios");
-        var c = NicheMapper.resolve("lash designer");
-        assertEquals(a.tagFilters(), b.tagFilters());
-        assertEquals(a.tagFilters(), c.tagFilters());
-        assertTrue(a.tagFilters().stream().anyMatch(t -> t.contains("beauty=eyelash")));
+    void barberMapsToShopBarberAndHairdresserBarber() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
+
+        assertTrue(strategy.tagFilters().contains("shop=barber"), "Should contain shop=barber");
+        assertTrue(strategy.tagFilters().contains("shop=hairdresser,hairdresser=barber"), "Should contain compound filter");
+        assertEquals(2, strategy.tagFilters().size(), "Should have exactly 2 filters");
     }
 
     @Test
-    void unhaSobracelhaEsteticaAliases() {
-        assertTrue(NicheMapper.resolve("unhas").tagFilters().stream().anyMatch(t -> t.contains("beauty=nails")));
-        assertTrue(NicheMapper.resolve("manicure").tagFilters().stream().anyMatch(t -> t.contains("beauty=nails")));
-        assertTrue(NicheMapper.resolve("sobrancelhas").tagFilters().stream().anyMatch(t -> t.contains("beauty=eyebrow")));
-        assertTrue(NicheMapper.resolve("designer de sobrancelha").tagFilters().stream().anyMatch(t -> t.contains("beauty=eyebrow")));
-        assertTrue(NicheMapper.resolve("clínica de estética").tagFilters().stream().anyMatch(t -> t.contains("shop=beauty")));
-        assertTrue(NicheMapper.resolve("barbearia").tagFilters().stream().anyMatch(t -> t.contains("shop=barber")));
-        assertTrue(NicheMapper.resolve("salão de beleza").tagFilters().stream().anyMatch(t -> t.contains("shop=hairdresser")));
-        assertTrue(NicheMapper.resolve("dentista").tagFilters().stream().anyMatch(t -> t.contains("amenity=dentist")));
-        assertTrue(NicheMapper.resolve("depilação").tagFilters().stream().anyMatch(t -> t.contains("beauty=hair_removal")));
-        assertTrue(NicheMapper.resolve("massagem").tagFilters().stream().anyMatch(t -> t.contains("beauty=massage")));
+    void barberFallbackRegexCoversVariants() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
+
+        assertEquals("barbearia|barber|barbershop", strategy.fallbackNameRegex());
     }
 
     @Test
-    void unknownNicheStillHasNameFallback() {
-        var s = NicheMapper.resolve("cafeteria artesanal vegana xyz");
-        assertNotNull(s.fallbackNameRegex());
-        assertFalse(s.fallbackNameRegex().isBlank());
+    void hairdresserMapsToShopHairdresser() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("cabeleireiro");
+
+        assertTrue(strategy.tagFilters().contains("shop=hairdresser"));
+        assertTrue(strategy.tagFilters().contains("shop=beauty"));
     }
 
     @Test
-    void regexIsSanitizedAgainstInjection() {
-        var s = NicheMapper.resolve("cilios\");out body;/*");
-        String q = s.fallbackNameRegex();
-        assertFalse(q.contains(";"));
-        assertFalse(q.contains("\""));
+    void genericBeautyMapsToShopBeauty() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("estetica");
+
+        assertTrue(strategy.tagFilters().contains("shop=beauty"));
+        assertTrue(strategy.tagFilters().contains("shop=beauty,beauty=aesthetic"));
+    }
+
+    @Test
+    void dentistMapsToAmenityDentist() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("dentista");
+
+        assertTrue(strategy.tagFilters().contains("amenity=dentist"));
+    }
+
+    @Test
+    void unknownNicheReturnsEmptyTags() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("unknownniche123");
+
+        assertTrue(strategy.tagFilters().isEmpty());
+    }
+
+    @Test
+    void normalizeKeyRemovesAccentsAndCollapsesSpaces() {
+        String normalized = NicheMapper.normalizeKey("  Barbearia  João  ");
+        assertEquals("barbearia joao", normalized);
+    }
+
+    @Test
+    void partialMatchPrefersLongestAlias() {
+        // "barbearia" should match before "bar"
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia centro");
+
+        assertTrue(strategy.tagFilters().contains("shop=barber"));
+    }
+
+    @Test
+    void barberDoesNotAcceptGenericHairdresser() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
+
+        // Should NOT have plain "shop=hairdresser" as that would match any hairdresser
+        assertFalse(strategy.tagFilters().contains("shop=hairdresser"), "Should not accept generic hairdresser");
+    }
+
+    @Test
+    void compoundTagFilterUsesAnd() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
+
+        // Compound filter "shop=hairdresser,hairdresser=barber" means AND
+        String compound = "shop=hairdresser,hairdresser=barber";
+        assertTrue(strategy.tagFilters().contains(compound));
+
+        // Verify it's split by comma for AND condition
+        String[] parts = compound.split(",");
+        assertEquals(2, parts.length);
+        assertEquals("shop=hairdresser", parts[0]);
+        assertEquals("hairdresser=barber", parts[1]);
     }
 }

@@ -24,17 +24,11 @@ public interface OsmPlaceRepository extends JpaRepository<OsmPlace, Long> {
             Long regionId, String normalizedName);
 
     @Query("SELECT p FROM OsmPlace p WHERE p.region.id = :regionId AND p.active = true " +
-           "AND (p.tags::jsonb ? :key OR p.normalizedName ILIKE %:name%)")
-    List<OsmPlace> findByRegionIdAndTagKeyOrName(
+           "AND p.normalizedName ~* :regex")
+    List<OsmPlace> findByRegionIdAndNormalizedNameRegexAndActiveTrue(
             @Param("regionId") Long regionId,
-            @Param("key") String key,
-            @Param("name") String name);
+            @Param("regex") String regex,
+            @Param("limit") int limit);
 
     long countByRegionIdAndActiveTrue(Long regionId);
-
-    @Query("SELECT p FROM OsmPlace p WHERE p.region.id = :regionId AND p.active = true " +
-           "AND p.tags::jsonb @> :tags")
-    List<OsmPlace> findByRegionIdAndTags(
-            @Param("regionId") Long regionId,
-            @Param("tags") String tagsJson);
 }

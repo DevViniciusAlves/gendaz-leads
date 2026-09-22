@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+  <node id="1" lat="-15.6" lon="-56.1" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Barbearia Teste"/>
+    <tag k="shop" v="barber"/>
+    <tag k="phone" v="+5565999999999"/>
+  </node>
+  <node id="10" lat="-15.61" lon="-56.11" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="11" lat="-15.61" lon="-56.12" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="12" lat="-15.62" lon="-56.12" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <way id="2" version="1" timestamp="2026-01-01T00:00:00Z">
+    <nd ref="10"/>
+    <nd ref="11"/>
+    <nd ref="12"/>
+    <nd ref="10"/>
+    <tag k="name" v="Salão Teste"/>
+    <tag k="shop" v="hairdresser"/>
+    <tag k="hairdresser" v="barber"/>
+  </way>
+  <relation id="3" version="1" timestamp="2026-01-01T00:00:00Z">
+    <member type="way" ref="2" role="outer"/>
+    <tag k="name" v="Centro Comercial Teste"/>
+    <tag k="shop" v="mall"/>
+  </relation>
+</osm>

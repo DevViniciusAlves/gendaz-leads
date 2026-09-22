@@ -60,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build Backend Docker Image
-        run: docker build -f Dockerfile . -t gendaz-leads-backend-ci
+        run: docker build -f backend/Dockerfile backend -t gendaz-leads-backend-ci
 
   wpp-docker:
     runs-on: ubuntu-latest
@@ -68,3 +68,100 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build WPP Docker Image
         run: docker build -f whatsapp-service/Dockerfile whatsapp-service -t gendaz-leads-whatsapp-ci
+
+  osm-python-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install --no-cache-dir psycopg2-binary
+      - name: Run Python tests
+        run: |
+          python3 -m unittest discover -s .github/scripts -p "test_*.py"
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          curl -sfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download_actionlint.bash | bash -s -- -b /usr/local/bin
+      - name: Lint workflows
+        run: |
+          actionlint -color
+
+  osm-fixture-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool
+      - name: Install Python dependencies
+        run: |
+          pip install --no-cache-dir psycopg2-binary
+      - name: Create test fixture
+        run: |
+          mkdir -p .github/fixtures
+          cat > .github/fixtures/small-businesses.osm << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+  <node id="1" lat="-15.6" lon="-56.1" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Barbearia Teste"/>
+    <tag k="shop" v="barber"/>
+    <tag k="phone" v="+5565999999999"/>
+  </node>
+  <way id="2" version="1" timestamp="2026-01-01T00:00:00Z">
+    <nd ref="10"/>
+    <nd ref="11"/>
+    <nd ref="12"/>
+    <nd ref="10"/>
+    <tag k="name" v="Salão Teste"/>
+    <tag k="shop" v="hairdresser"/>
+    <tag k="hairdresser" v="barber"/>
+  </way>
+  <relation id="3" version="1" timestamp="2026-01-01T00:00:00Z">
+    <member type="way" ref="2" role="outer"/>
+    <tag k="name" v="Centro Comercial Teste"/>
+    <tag k="shop" v="mall"/>
+  </relation>
+</osm>
+EOF
+      - name: Test osmium pipeline
+        run: |
+          cd .github/fixtures
+          osmium tags-filter small-businesses.osm nwr/shop nwr/amenity -o filtered.osm.pbf
+          osmium export filtered.osm.pbf \
+            --geometry-types=point,linestring,polygon \
+            --attributes=type,id,timestamp \
+            --format-option=print_record_separator=false \
+            -f geojsonseq \
+            -o exported.geojsonseq
+          python3 -c "
+import json
+count = 0
+with open('exported.geojsonseq') as f:
+    for line in f:
+        line = line.lstrip('\x1e').strip()
+        if not line:
+            continue
+        feature = json.loads(line)
+        props = feature.get('properties', {})
+        osm_type = props.get('@type')
+        osm_id = props.get('@id')
+        tags = {k: v for k, v in props.items() if not k.startswith('@')}
+        print(f'Parsed: {osm_type}/{osm_id} tags={tags}')
+        count += 1
+assert count >= 1, 'Expected at least 1 feature'
+print('Pipeline test passed!')
+          "

@@ -13,27 +13,18 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 @Component
-public class LocalOsmCatalogProvider implements LeadDiscoveryProvider {
+public class LocalOsmCatalogProvider {
 
     private static final Logger log = LoggerFactory.getLogger(LocalOsmCatalogProvider.class);
-
-    @Override
-    public GeoScope resolveScope(LeadDiscoveryRequest request, DiscoveryBudget budget) {
-        throw new UnsupportedOperationException("LocalOsmCatalogProvider does not support resolveScope");
-    }
-
-    @Override
-    public AreaQueryResult queryRegion(GeoScope scope, String niche, SearchRegion region, AreaQueryPhase phase, int rawLimit, String preferredEndpointHost, DiscoveryBudget budget, Long campaignId) {
-        throw new UnsupportedOperationException("LocalOsmCatalogProvider does not support queryRegion");
-    }
 
     private final OsmCatalogRegionRepository regionRepository;
     private final OsmPlaceRepository placeRepository;
@@ -58,12 +49,10 @@ public class LocalOsmCatalogProvider implements LeadDiscoveryProvider {
         this.maxCandidates = maxCandidates;
     }
 
-    @Override
     public String getName() {
         return "osm-local-catalog";
     }
 
-    @Override
     public boolean isEnabled() {
         return true;
     }
@@ -76,15 +65,19 @@ public class LocalOsmCatalogProvider implements LeadDiscoveryProvider {
     ) {
         String countryCode = CountryCodeResolver.resolveToIso2(country);
         String normalizedCity = normalizeForCompare(city);
-        String normalizedState = ""; // We'll get state from the region
 
-        OsmCatalogRegion region = regionRepository
-                .findByNormalizedCityAndNormalizedStateAndCountryCode(normalizedCity, normalizedState, countryCode)
-                .orElseThrow(() -> new IllegalArgumentException("OSM_CATALOG_NOT_READY: O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads."));
+        List<OsmCatalogRegion> readyRegions = regionRepository
+                .findByNormalizedCityAndCountryCodeAndCatalogStatus(normalizedCity, countryCode, "READY");
 
-        if (!"READY".equals(region.getCatalogStatus())) {
+        if (readyRegions.isEmpty()) {
             throw new IllegalArgumentException("OSM_CATALOG_NOT_READY: O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads.");
         }
+
+        if (readyRegions.size() > 1) {
+            throw new IllegalArgumentException("OSM_CATALOG_LOCATION_AMBIGUOUS: Há mais de uma cidade sincronizada com este nome. Informe uma localização mais específica.");
+        }
+
+        OsmCatalogRegion region = readyRegions.get(0);
 
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
         int limit = Math.min(target * candidateMultiplier, maxCandidates);
@@ -95,9 +88,25 @@ public class LocalOsmCatalogProvider implements LeadDiscoveryProvider {
         List<OsmPlace> places;
         if (strategy.tagFilters().isEmpty()) {
             places = placeRepository.findByRegionIdAndNormalizedNameContainingIgnoreCaseAndActiveTrue(
-                    region.getId(), strategy.fallbackNameRegex().isBlank() ? "" : strategy.fallbackNameRegex());
+                    region.getId(), "");
         } else {
             places = findByStructuredTags(region.getId(), strategy.tagFilters(), limit);
+        }
+
+        // If we still have room, add name fallback candidates
+        if (!strategy.tagFilters().isEmpty() && places.size() < limit && strategy.fallbackNameRegex() != null && !strategy.fallbackNameRegex().isBlank()) {
+            List<OsmPlace> fallbackPlaces = placeRepository.findByRegionIdAndNormalizedNameRegexAndActiveTrue(
+                    region.getId(), strategy.fallbackNameRegex(), limit - places.size());
+            // Deduplicate by osm_type + osm_id
+            Set<String> seen = new HashSet<>();
+            for (OsmPlace p : places) {
+                seen.add(p.getOsmType() + "/" + p.getOsmId());
+            }
+            for (OsmPlace p : fallbackPlaces) {
+                if (seen.add(p.getOsmType() + "/" + p.getOsmId())) {
+                    places.add(p);
+                }
+            }
         }
 
         log.info("[osm-catalog] catalog_candidates regionId={} found={}", region.getId(), places.size());
@@ -138,18 +147,22 @@ public class LocalOsmCatalogProvider implements LeadDiscoveryProvider {
                         String[] kv = parts[j].split("=", 2);
                         String key = kv[0];
                         String value = kv[1];
-                        sql.append("tags->>").append(":key").append(i).append("_").append(j).append(" = :val").append(i).append("_").append(j);
-                        params.addValue("key" + i + "_" + j, key);
-                        params.addValue("val" + i + "_" + j, value);
+                        String paramKey = "key" + i + "_" + j;
+                        String paramVal = "val" + i + "_" + j;
+                        sql.append("tags->> :").append(paramKey).append(" = :").append(paramVal);
+                        params.addValue(paramKey, key);
+                        params.addValue(paramVal, value);
                     }
                     sql.append(")");
                 } else {
                     String[] kv = filter.split("=", 2);
                     String key = kv[0];
                     String value = kv[1];
-                    sql.append("tags->>").append(":key").append(i).append(" = :val").append(i);
-                    params.addValue("key" + i, key);
-                    params.addValue("val" + i, value);
+                    String paramKey = "key" + i;
+                    String paramVal = "val" + i;
+                    sql.append("tags->> :").append(paramKey).append(" = :").append(paramVal);
+                    params.addValue(paramKey, key);
+                    params.addValue(paramVal, value);
                 }
             }
             sql.append(")");

@@ -47,6 +47,8 @@ public class OsmCatalogController {
         User currentUser = userRepository.findByEmail(email)
                 .orElseThrow(() -> new com.gendaz.leads.exception.ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "Não autenticado"));
         OsmSyncRun syncRun = syncService.requestSync(request.city(), request.country(), currentUser);
+        // Dispatch in a separate transaction
+        syncService.dispatchSync(syncRun);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(OsmSyncResponse.from(syncRun));
     }
 

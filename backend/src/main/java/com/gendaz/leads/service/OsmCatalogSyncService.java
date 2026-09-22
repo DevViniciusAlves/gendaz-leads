@@ -14,6 +14,8 @@ import com.gendaz.leads.service.provider.DiscoveryBudget;
 import com.gendaz.leads.util.CountryCodeResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,6 +35,9 @@ public class OsmCatalogSyncService {
     private final BrazilGeofabrikRegionResolver geofabrikResolver;
     private final GitHubOsmSyncDispatcher githubDispatcher;
 
+    @Value("${app.osm-catalog.enabled:true}")
+    private boolean catalogEnabled;
+
     public OsmCatalogSyncService(
             OsmCatalogRegionRepository regionRepository,
             OsmSyncRunRepository syncRunRepository,
@@ -49,11 +54,19 @@ public class OsmCatalogSyncService {
 
     @Transactional
     public OsmSyncRun requestSync(String city, String country, User requestedBy) {
+        if (!catalogEnabled) {
+            throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_DISABLED",
+                    "A sincronização do catálogo OSM está desabilitada.");
+        }
+
         String countryCode = CountryCodeResolver.resolveToIso2(country);
         if (!"br".equalsIgnoreCase(countryCode)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "OSM_CATALOG_COUNTRY_NOT_SUPPORTED",
                     "A sincronização local V1 suporta apenas Brasil. País informado: " + country);
         }
+
+        // Check if catalog sync is enabled
+        // This will be validated by the configuration
 
         DiscoveryBudget budget = DiscoveryBudget.unlimited();
         LeadDiscoveryRequest request = new LeadDiscoveryRequest(
@@ -119,7 +132,14 @@ public class OsmCatalogSyncService {
         log.info("[osm-catalog] sync_requested syncRunId={} regionId={} city={} state={} countryCode={} osmType={} osmId={} geofabrikRegion={}",
                 syncRun.getId(), region.getId(), city, scope.state(), countryCode, scope.osmType(), scope.osmId(), geofabrikRegion);
 
+        return syncRun;
+    }
+
+    @Transactional
+    public void dispatchSync(OsmSyncRun syncRun) {
         try {
+            GeoScope scope = buildScopeFromSyncRun(syncRun);
+            String geofabrikRegion = syncRun.getRegion().getGeofabrikRegion();
             githubDispatcher.dispatch(syncRun, scope, geofabrikRegion);
             syncRun.setStatus("QUEUED");
             syncRunRepository.save(syncRun);
@@ -132,8 +152,26 @@ public class OsmCatalogSyncService {
             throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_SYNC_DISPATCH_FAILED",
                     "Não foi possível iniciar a sincronização. Tente novamente.");
         }
+    }
 
-        return syncRun;
+    private GeoScope buildScopeFromSyncRun(OsmSyncRun syncRun) {
+        OsmCatalogRegion region = syncRun.getRegion();
+        // Build a minimal GeoScope for dispatch using bbox fallback
+        return new GeoScope(
+                0.0,
+                0.0,
+                region.getCity(),
+                region.getState(),
+                region.getCountry(),
+                region.getCountryCode(),
+                -0.18,
+                -0.18,
+                0.18,
+                0.18,
+                false,
+                region.getOsmType(),
+                region.getOsmId() != null ? region.getOsmId() : -1L
+        );
     }
 
     public List<OsmCatalogRegion> listRegions() {

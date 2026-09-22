@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Unit tests for osm_catalog_sync.py
+Extended unit tests for osm_catalog_sync.py
 """
 
 import unittest
 import json
-import tempfile
 import os
+import sys
 from unittest.mock import Mock, patch, MagicMock
 
-# Import the functions we want to test
-import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 from osm_catalog_sync import (
@@ -115,16 +113,16 @@ class TestIsCommercial(unittest.TestCase):
 
 
 class TestParseFeature(unittest.TestCase):
-    def test_valid_node(self):
+    def test_valid_node_flat_properties(self):
+        """Test parsing node with flat properties from osmium export"""
         feature = {
             'properties': {
                 '@type': 'node',
                 '@id': 12345,
-                'tags': {
-                    'name': 'Barbearia Teste',
-                    'shop': 'barber',
-                    'phone': '+5565999999999'
-                }
+                '@timestamp': '2026-01-01T00:00:00Z',
+                'name': 'Barbearia Teste',
+                'shop': 'barber',
+                'phone': '+5565999999999'
             },
             'geometry': {'type': 'Point', 'coordinates': [-56.1, -15.6]}
         }
@@ -134,22 +132,38 @@ class TestParseFeature(unittest.TestCase):
         self.assertEqual(result['osm_id'], 12345)
         self.assertEqual(result['business_name'], 'Barbearia Teste')
         self.assertEqual(result['phone'], '+5565999999999')
+        self.assertEqual(result['tags'], '{"name": "Barbearia Teste", "shop": "barber", "phone": "+5565999999999"}')
+        self.assertIsNotNone(result['source_timestamp'])
 
-    def test_valid_way(self):
+    def test_valid_way_flat_properties(self):
+        """Test parsing way with flat properties"""
         feature = {
             'properties': {
                 '@type': 'way',
                 '@id': 67890,
-                'tags': {
-                    'name': 'Restaurante Teste',
-                    'amenity': 'restaurant'
-                }
+                'name': 'Restaurante Teste',
+                'amenity': 'restaurant'
             },
             'geometry': {'type': 'Polygon', 'coordinates': [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]}
         }
         result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
         self.assertIsNotNone(result)
         self.assertEqual(result['osm_type'], 'way')
+
+    def test_valid_relation_flat_properties(self):
+        """Test parsing relation with flat properties"""
+        feature = {
+            'properties': {
+                '@type': 'relation',
+                '@id': 11111,
+                'name': 'Shopping Teste',
+                'shop': 'mall'
+            },
+            'geometry': {'type': 'Polygon', 'coordinates': [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]}
+        }
+        result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['osm_type'], 'relation')
 
     def test_missing_name(self):
         feature = {
@@ -186,6 +200,79 @@ class TestParseFeature(unittest.TestCase):
         }
         result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
         self.assertIsNone(result)
+
+    def test_timestamp_epoch_seconds(self):
+        """Test parsing epoch timestamp"""
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 12345,
+                '@timestamp': '1704067200',  # 2024-01-01T00:00:00Z
+                'name': 'Teste',
+                'shop': 'barber'
+            },
+            'geometry': {'type': 'Point', 'coordinates': [-56.1, -15.6]}
+        }
+        result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result['source_timestamp'])
+
+    def test_timestamp_invalid_fallback_to_none(self):
+        """Test invalid timestamp falls back to None"""
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 12345,
+                '@timestamp': 'invalid-timestamp',
+                'name': 'Teste',
+                'shop': 'barber'
+            },
+            'geometry': {'type': 'Point', 'coordinates': [-56.1, -15.6]}
+        }
+        result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
+        self.assertIsNotNone(result)
+        self.assertIsNone(result['source_timestamp'])
+
+    def test_contact_phone_precedence(self):
+        """Test contact:phone takes precedence over phone"""
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 12345,
+                'name': 'Teste',
+                'shop': 'barber',
+                'phone': '+5565999999999',
+                'contact:phone': '+5565888888888'
+            },
+            'geometry': {'type': 'Point', 'coordinates': [-56.1, -15.6]}
+        }
+        result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
+        self.assertEqual(result['phone'], '+5565888888888')
+
+    def test_contact_website_precedence(self):
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 12345,
+                'name': 'Teste',
+                'shop': 'barber',
+                'website': 'http://example.com',
+                'contact:website': 'http://contact.example.com'
+            },
+            'geometry': {'type': 'Point', 'coordinates': [-56.1, -15.6]}
+        }
+        result = parse_feature(feature, 1, 1, 'Cuiabá', 'Mato Grosso', 'br')
+        self.assertEqual(result['website'], 'http://contact.example.com')
+
+
+class TestRecordSeparatorHandling(unittest.TestCase):
+    def test_line_with_record_separator(self):
+        """Test that lines with 0x1e prefix are handled"""
+        # This test verifies the parsing logic handles record separators
+        line = '\x1e{"type": "Feature", "properties": {"@type": "node", "@id": 1, "name": "Test", "shop": "barber"}, "geometry": {"type": "Point", "coordinates": [0, 0]}}'
+        stripped = line.lstrip('\x1e').strip()
+        feature = json.loads(stripped)
+        self.assertEqual(feature['properties']['@type'], 'node')
 
 
 if __name__ == '__main__':

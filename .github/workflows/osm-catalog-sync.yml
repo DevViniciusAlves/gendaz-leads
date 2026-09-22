@@ -71,11 +71,43 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y osmium-tool curl ca-certificates
+          sudo apt-get install -y osmium-tool postgresql-client curl ca-certificates
 
       - name: Install Python dependencies
         run: |
           pip install --no-cache-dir psycopg2-binary requests
+
+      - name: Validate inputs
+        run: |
+          # Validate numeric inputs
+          if ! [[ "$SYNC_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: SYNC_RUN_ID must be numeric"
+            exit 1
+          fi
+          if ! [[ "$REGION_ID" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: REGION_ID must be numeric"
+            exit 1
+          fi
+          if ! [[ "$OSM_ID" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: OSM_ID must be numeric"
+            exit 1
+          fi
+          # Validate country code
+          if [[ "$COUNTRY_CODE" != "br" ]]; then
+            echo "ERROR: COUNTRY_CODE must be 'br'"
+            exit 1
+          fi
+          # Validate geofabrik region
+          case "$GEOFABRIK_REGION" in
+            centro-oeste|nordeste|norte|sudeste|sul) ;;
+            *) echo "ERROR: Invalid GEOFABRIK_REGION"; exit 1 ;;
+          esac
+          # Validate OSM type
+          case "$OSM_TYPE" in
+            relation|way|node) ;;
+            *) echo "ERROR: OSM_TYPE must be relation, way, or node"; exit 1 ;;
+          esac
+          echo "[osm-sync] inputs_validated"
 
       - name: Validate environment
         run: |
@@ -89,7 +121,7 @@ jobs:
         run: |
           psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
             UPDATE osm_sync_runs
-            SET status = 'RUNNING', started_at = NOW()
+            SET status = 'RUNNING', started_at = NOW(), github_run_id = $GITHUB_RUN_ID
             WHERE id = $SYNC_RUN_ID;
           "
 
@@ -125,6 +157,7 @@ jobs:
         run: |
           PBF_FILE="${GEOFABRIK_REGION}-latest.osm.pbf"
           echo "[osm-sync] validating PBF with osmium"
+          osmium --version
           osmium fileinfo "$PBF_FILE" || {
             echo "[osm-sync] osmium fileinfo failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
@@ -142,7 +175,7 @@ jobs:
           NOMINATIM_URL="https://nominatim.openstreetmap.org/lookup?osm_ids=R${OSM_ID}&format=json&polygon_geojson=1"
           curl -fL --retry 3 --retry-delay 5 -H "User-Agent: GendazLeads/1.0" -o boundary_response.json "$NOMINATIM_URL"
 
-          # Extract geometry
+          # Extract geometry and convert to Feature
           python3 -c "
 import json, sys
 with open('boundary_response.json') as f:
@@ -157,8 +190,14 @@ if not geom:
 if geom['type'] not in ('Polygon', 'MultiPolygon'):
     print(f'Invalid geometry type: {geom[\"type\"]}', file=sys.stderr)
     sys.exit(1)
+# Wrap in Feature for osmium
+feature = {
+    'type': 'Feature',
+    'properties': {},
+    'geometry': geom
+}
 with open('boundary.geojson', 'w') as f:
-    json.dump(geom, f)
+    json.dump(feature, f)
 print('[osm-sync] boundary_ok type=' + geom['type'])
           " || {
             echo "[osm-sync] boundary failed"
@@ -174,7 +213,7 @@ print('[osm-sync] boundary_ok type=' + geom['type'])
         run: |
           PBF_FILE="${GEOFABRIK_REGION}-latest.osm.pbf"
           echo "[osm-sync] extracting city with osmium"
-          osmium extract -p boundary.geojson -s complete_ways "$PBF_FILE" -o city.osm.pbf || {
+          osmium extract -p boundary.geojson "$PBF_FILE" -o city.osm.pbf || {
             echo "[osm-sync] osmium extract failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
@@ -204,7 +243,12 @@ print('[osm-sync] boundary_ok type=' + geom['type'])
       - name: Export to GeoJSONSeq
         run: |
           echo "[osm-sync] exporting to GeoJSONSeq"
-          osmium export city-commercial.osm.pbf -o city-commercial.geojsonseq --geometry-types=point,line,polygon || {
+          osmium export city-commercial.osm.pbf \
+            --geometry-types=point,linestring,polygon \
+            --attributes=type,id,timestamp \
+            --format-option=print_record_separator=false \
+            -f geojsonseq \
+            -o city-commercial.geojsonseq || {
             echo "[osm-sync] export to geojsonseq failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
@@ -224,18 +268,12 @@ print('[osm-sync] boundary_ok type=' + geom['type'])
             --city "$CITY" \
             --state "$STATE" \
             --country-code "$COUNTRY_CODE" \
-            --input city-commercial.geojsonseq \
-            --database-url "$OSM_SYNC_DATABASE_URL"
+            --input city-commercial.geojsonseq
 
       - name: Update sync run SUCCESS
         if: success()
         run: |
-          psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
-            UPDATE osm_sync_runs
-            SET status = 'SUCCESS', finished_at = NOW()
-            WHERE id = $SYNC_RUN_ID;
-          "
-          echo "[osm-sync] publish_success"
+          echo "[osm-sync] publish_success (handled by Python script)"
 
       - name: Update sync run FAILED
         if: failure()

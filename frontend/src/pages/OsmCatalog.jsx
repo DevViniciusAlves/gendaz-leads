@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '../api.js'
 import { useToast } from '../components/Toast.jsx'
 import { Modal } from '../components/Modal.jsx'
@@ -37,6 +37,8 @@ export function OsmCatalog() {
   const [formSubmitting, setFormSubmitting] = useState(false)
   const { push } = useToast()
 
+  const pollingIntervals = useRef({})
+
   function loadRegions() {
     setLoading(true)
     api.get('/api/osm-catalog/regions')
@@ -48,7 +50,9 @@ export function OsmCatalog() {
       .finally(() => setLoading(false))
   }
 
-  useEffect(loadRegions, [push])
+  useEffect(() => {
+    loadRegions()
+  }, [])
 
   useEffect(() => {
     api.get('/api/meta/countries')
@@ -62,10 +66,32 @@ export function OsmCatalog() {
       })
   }, [])
 
-  async function requestSync(e) {
-    e.preventDefault()
-    const city = e.target.city.value.trim()
-    const country = e.target.country.value
+  // Load sync runs for regions that have active syncs on initial load
+  useEffect(() => {
+    if (regions.length > 0) {
+      regions.forEach(region => {
+        if (region.catalogStatus === 'READY' || region.catalogStatus === 'EMPTY') {
+          // Check if there's an active sync run
+          api.get(`/api/osm-catalog/regions/${region.id}/sync-runs`)
+            .then((data) => {
+              const latestRun = data?.[0]
+              if (latestRun && (latestRun.status === 'QUEUED' || latestRun.status === 'RUNNING')) {
+                setRegions(prev => prev.map(r => {
+                  if (r.id === region.id) {
+                    return { ...r, syncRuns: data }
+                  }
+                  return r
+                }))
+                startPolling(region.id)
+              }
+            })
+            .catch(() => {})
+        }
+      })
+    }
+  }, [regions])
+
+  async function requestSync(city, country) {
     if (!city || !country) {
       push('Preencha cidade e país.', 'error')
       return
@@ -76,10 +102,13 @@ export function OsmCatalog() {
     }
     setFormSubmitting(true)
     try {
-      await api.post('/api/osm-catalog/sync', { city, country })
+      const response = await api.post('/api/osm-catalog/sync', { city, country })
       push('Sincronização iniciada. Verifique o status na tabela.', 'success')
       setShowForm(false)
-      setTimeout(loadRegions, 2000)
+      // Start polling for this new sync run
+      if (response.syncRunId) {
+        startPolling(response.syncRunId)
+      }
     } catch (err) {
       push(err.message, 'error')
     } finally {
@@ -87,31 +116,53 @@ export function OsmCatalog() {
     }
   }
 
-  function getSyncRuns(regionId) {
-    api.get(`/api/osm-catalog/regions/${regionId}/sync-runs`)
-      .then((data) => {
-        const region = regions.find(r => r.id === regionId)
-        if (region) {
-          region.syncRuns = data
-          setRegions([...regions])
-        }
-      })
-      .catch((err) => push(err.message, 'error'))
-  }
-
-  function startPolling(regionId) {
-    const interval = setInterval(() => {
-      getSyncRuns(regionId)
-      const region = regions.find(r => r.id === regionId)
-      if (region?.syncRuns?.[0]) {
-        const status = region.syncRuns[0].status
-        if (status === 'SUCCESS' || status === 'FAILED') {
-          clearInterval(interval)
+  function startPolling(syncRunId) {
+    if (pollingIntervals.current[syncRunId]) {
+      return // Already polling
+    }
+    const interval = setInterval(async () => {
+      try {
+        const data = await api.get(`/api/osm-catalog/sync/${syncRunId}`)
+        if (data.status === 'SUCCESS' || data.status === 'FAILED') {
+          clearInterval(pollingIntervals.current[syncRunId])
+          delete pollingIntervals.current[syncRunId]
           loadRegions()
         }
+        // Update region with latest sync run
+        setRegions(prev => prev.map(r => {
+          if (r.syncRuns && r.syncRuns[0] && r.syncRuns[0].id === syncRunId) {
+            return { ...r, syncRuns: [data] }
+          }
+          return r
+        }))
+      } catch (err) {
+        push(err.message, 'error')
+        clearInterval(pollingIntervals.current[syncRunId])
+        delete pollingIntervals.current[syncRunId]
       }
     }, 5000)
-    return interval
+    pollingIntervals.current[syncRunId] = interval
+  }
+
+  function stopPolling(syncRunId) {
+    if (pollingIntervals.current[syncRunId]) {
+      clearInterval(pollingIntervals.current[syncRunId])
+      delete pollingIntervals.current[syncRunId]
+    }
+  }
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(pollingIntervals.current).forEach(clearInterval)
+      pollingIntervals.current = {}
+    }
+  }, [])
+
+  function handleSyncClick(region, isResync) {
+    const city = region.city
+    const country = region.countryCode || 'br'
+    requestSync(city, country)
   }
 
   return (
@@ -159,7 +210,8 @@ export function OsmCatalog() {
               {regions.map((region) => {
                 const currentRun = region.syncRuns?.[0]
                 const isRunning = currentRun && (currentRun.status === 'QUEUED' || currentRun.status === 'RUNNING')
-                const statusColor = currentRun ? STATUS_COLORS[currentRun.status] : STATUS_COLORS[region.catalogStatus]
+                const displayStatus = currentRun ? currentRun.status : region.catalogStatus
+                const statusColor = STATUS_COLORS[displayStatus] || 'muted'
 
                 return (
                   <tr key={region.id}>
@@ -192,35 +244,25 @@ export function OsmCatalog() {
                     </td>
                     <td>
                       <div style={{ display: 'flex', gap: 8 }}>
-                        {!isRunning && region.catalogStatus === 'READY' && (
-                          <button
-                            className="btn btn-sm"
-                            onClick={() => {
-                              const interval = startPolling(region.id)
-                              getSyncRuns(region.id)
-                              region.pollingInterval = interval
-                              setRegions([...regions])
-                            }}
-                          >
-                            <IconSync width={14} height={14} />
-                            Sincronizar Novamente
-                          </button>
-                        )}
                         {isRunning && (
                           <button className="btn btn-sm" disabled>
                             <IconSync width={14} height={14} style={{ animation: 'spin 1s linear infinite' }} />
                             Aguardando...
                           </button>
                         )}
+                        {!isRunning && region.catalogStatus === 'READY' && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => handleSyncClick(region, true)}
+                          >
+                            <IconSync width={14} height={14} />
+                            Sincronizar Novamente
+                          </button>
+                        )}
                         {region.catalogStatus === 'EMPTY' && !isRunning && (
                           <button
                             className="btn btn-sm btn-primary"
-                            onClick={() => {
-                              const interval = startPolling(region.id)
-                              getSyncRuns(region.id)
-                              region.pollingInterval = interval
-                              setRegions([...regions])
-                            }}
+                            onClick={() => handleSyncClick(region, false)}
                           >
                             <IconSync width={14} height={14} />
                             Iniciar Sync
@@ -230,6 +272,11 @@ export function OsmCatalog() {
                       {region.lastError && (
                         <div className="error-state" style={{ fontSize: 11, marginTop: 4 }}>
                           Erro: {region.lastError}
+                        </div>
+                      )}
+                      {currentRun && currentRun.status === 'FAILED' && region.catalogStatus === 'READY' && (
+                        <div className="hint" style={{ fontSize: 11, marginTop: 4, color: 'var(--warning)' }}>
+                          Catálogo: READY (última sincronização falhou)
                         </div>
                       )}
                     </td>
@@ -259,7 +306,12 @@ export function OsmCatalog() {
           {countriesError && (
             <div className="error-state">Erro ao carregar países: {countriesError}</div>
           )}
-          <form id="osm-sync-form" onSubmit={requestSync}>
+          <form id="osm-sync-form" onSubmit={(e) => {
+            e.preventDefault()
+            const city = e.target.city.value.trim()
+            const country = e.target.country.value
+            requestSync(city, country)
+          }}>
             <div className="field">
               <label htmlFor="city">Cidade</label>
               <input id="city" name="city" placeholder="Ex: Cuiabá" required />

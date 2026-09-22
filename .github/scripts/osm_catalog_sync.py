@@ -45,7 +45,6 @@ def parse_args():
     parser.add_argument('--state', required=True)
     parser.add_argument('--country-code', required=True)
     parser.add_argument('--input', required=True, help='Input GeoJSONSeq file')
-    parser.add_argument('--database-url', required=True)
     return parser.parse_args()
 
 
@@ -193,9 +192,17 @@ def is_commercial(tags: Dict[str, Any]) -> bool:
 def parse_feature(feature: Dict[str, Any], sync_run_id: int, region_id: int,
                   city: str, state: str, country_code: str) -> Optional[Dict[str, Any]]:
     props = feature.get('properties', {})
+
+    # Osmium exports tags as flat properties with @type, @id, @timestamp
     osm_type = props.get('@type', '').lower()
     osm_id = props.get('@id')
-    tags = props.get('tags', {})
+
+    # Extract tags (all properties except @-prefixed ones)
+    tags = {
+        key: value
+        for key, value in props.items()
+        if not key.startswith('@')
+    }
 
     if osm_type not in ('node', 'way', 'relation'):
         return None
@@ -231,9 +238,14 @@ def parse_feature(feature: Dict[str, Any], sync_run_id: int, region_id: int,
     source_timestamp = None
     if timestamp_str:
         try:
+            # Try ISO format first
             source_timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
         except Exception:
-            pass
+            try:
+                # Try epoch seconds
+                source_timestamp = datetime.fromtimestamp(float(timestamp_str))
+            except Exception:
+                pass
 
     return {
         'sync_run_id': sync_run_id,
@@ -385,6 +397,7 @@ def publish_staging(conn, sync_run_id: int, region_id: int) -> Tuple[int, int, i
             UPDATE osm_catalog_regions
             SET catalog_status = 'READY',
                 last_success_at = NOW(),
+                last_error = NULL,
                 place_count = (
                     SELECT COUNT(*) FROM osm_places WHERE region_id = %s AND active = true
                 ),
@@ -403,14 +416,31 @@ def clean_staging(conn, sync_run_id: int):
     conn.commit()
 
 
+def update_region_error(conn, region_id: int, error_message: str):
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE osm_catalog_regions
+            SET last_error = %s,
+                last_attempt_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+        """, (error_message[:1000], region_id))
+    conn.commit()
+
+
 def main():
     args = parse_args()
+
+    database_url = os.environ.get('OSM_SYNC_DATABASE_URL')
+    if not database_url:
+        log('error', 'OSM_SYNC_DATABASE_URL environment variable not set')
+        sys.exit(1)
 
     log('info', 'staging_start', sync_run_id=args.sync_run_id, region_id=args.region_id)
 
     conn = None
     try:
-        conn = connect_db(args.database_url)
+        conn = connect_db(database_url)
         conn.autocommit = False
 
         validate_sync_run(conn, args.sync_run_id, args.region_id)
@@ -421,7 +451,8 @@ def main():
 
         with open(args.input, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
-                line = line.strip()
+                # Handle record separator (0x1e) if present
+                line = line.lstrip('\x1e').strip()
                 if not line:
                     continue
                 stats['read'] += 1
@@ -457,7 +488,7 @@ def main():
         if not sanity_check(conn, args.sync_run_id, args.region_id, staged_count):
             raise ValueError('Sanity check failed: extreme drop in place count')
 
-        # Publish atomically
+        # Publish atomically (single transaction)
         log('info', 'publish_start', sync_run_id=args.sync_run_id)
         inserted, updated, deactivated = publish_staging(conn, args.sync_run_id, args.region_id)
         stats['inserted'] = inserted
@@ -476,6 +507,7 @@ def main():
             try:
                 conn.rollback()
                 mark_failed(conn, args.sync_run_id, str(e)[:1000])
+                update_region_error(conn, args.region_id, str(e)[:1000])
             except Exception:
                 pass
         sys.exit(1)
