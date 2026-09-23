@@ -58,6 +58,10 @@ jobs:
       OSM_ID: ${{ github.event.inputs.osm_id }}
       GEOFABRIK_REGION: ${{ github.event.inputs.geofabrik_region }}
       GITHUB_RUN_ID: ${{ github.run_id }}
+      OSM_SYNC_WEBSITE_MAX_WORKERS: "8"
+      OSM_SYNC_SOCIAL_MAX_WORKERS: "4"
+      OSM_SYNC_SOCIAL_PUBLIC_FETCH_ENABLED: "true"
+      OSM_SYNC_CONTACT_HUBS_ENABLED: "true"
 
     steps:
       - name: Checkout repository

@@ -40,10 +40,58 @@ CONTACT_PHONE_KEYS = [
     'phone',
     'contact:mobile',
     'mobile',
+    'contact:sms',
+    'sms',
 ]
+
+# Full OSM option B: typed direct-phone evidence (priority order).
+DIRECT_PHONE_KEYS = [
+    ('contact:whatsapp', 'DIRECT_OSM_WHATSAPP'),
+    ('whatsapp', 'DIRECT_OSM_WHATSAPP'),
+    ('contact:phone', 'DIRECT_OSM_PHONE'),
+    ('phone', 'DIRECT_OSM_PHONE'),
+    ('contact:mobile', 'DIRECT_OSM_MOBILE'),
+    ('mobile', 'DIRECT_OSM_MOBILE'),
+    ('contact:sms', 'DIRECT_OSM_SMS'),
+    ('sms', 'DIRECT_OSM_SMS'),
+]
+
+PRIMARY_WEBSITE_KEYS = [
+    'contact:website',
+    'website',
+    'url',
+]
+
+SECONDARY_WEBSITE_KEYS = [
+    'operator:website',
+    'brand:website',
+]
+
+INSTAGRAM_KEYS = [
+    'contact:instagram',
+    'instagram',
+]
+
+FACEBOOK_KEYS = [
+    'contact:facebook',
+    'facebook',
+]
+
+TELEGRAM_KEYS = [
+    'contact:telegram',
+    'telegram',
+]
+
+EMAIL_KEYS = [
+    'contact:email',
+    'email',
+]
+
 CONTACT_WEBSITE_KEYS = ['contact:website', 'website', 'url']
 CONTACT_EMAIL_KEYS = ['contact:email', 'email']
 CONTACT_INSTAGRAM_KEYS = ['contact:instagram', 'instagram']
+CONTACT_FACEBOOK_KEYS = ['contact:facebook', 'facebook']
+CONTACT_TELEGRAM_KEYS = ['contact:telegram', 'telegram']
 
 ADDRESS_KEYS = [
     'addr:street', 'addr:housenumber', 'addr:suburb', 'addr:neighbourhood',
@@ -65,13 +113,62 @@ def _env_int(name: str, default: int) -> int:
         pass
     return default
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
+def _env_str_set(name: str, default: set) -> set:
+    val = os.environ.get(name)
+    if val is None or not str(val).strip():
+        return set(default)
+    out = set()
+    for part in str(val).split(','):
+        part = part.strip().lower().lstrip('.')
+        if part:
+            out.add(part)
+    return out or set(default)
+
 WEBSITE_CONNECT_TIMEOUT_SECONDS = _env_int('OSM_SYNC_WEBSITE_CONNECT_TIMEOUT_SECONDS', 2)
 WEBSITE_READ_TIMEOUT_SECONDS = _env_int('OSM_SYNC_WEBSITE_READ_TIMEOUT_SECONDS', 3)
 WEBSITE_MAX_BYTES = _env_int('OSM_SYNC_WEBSITE_MAX_BYTES', 500_000)
 WEBSITE_MAX_WORKERS = _env_int('OSM_SYNC_WEBSITE_MAX_WORKERS', 8)
+SOCIAL_MAX_WORKERS = _env_int('OSM_SYNC_SOCIAL_MAX_WORKERS', 4)
+SOCIAL_PUBLIC_FETCH_ENABLED = _env_bool('OSM_SYNC_SOCIAL_PUBLIC_FETCH_ENABLED', True)
+CONTACT_HUBS_ENABLED = _env_bool('OSM_SYNC_CONTACT_HUBS_ENABLED', True)
 
-WEBSITE_MAX_REDIRECTS = 3
-WEBSITE_MAX_CONTACT_PAGES = 2
+WEBSITE_MAX_REDIRECTS = _env_int('OSM_SYNC_MAX_REDIRECTS', 3)
+WEBSITE_MAX_CONTACT_PAGES = _env_int('OSM_SYNC_MAX_CONTACT_PAGES', 2)
+
+DEFAULT_CONTACT_HUB_HOSTS = {
+    'linktr.ee',
+    'beacons.ai',
+    'bio.site',
+    'campsite.bio',
+    'taplink.cc',
+    'msha.ke',
+    'linkin.bio',
+}
+
+
+def get_contact_hub_hosts() -> set:
+    return _env_str_set('OSM_SYNC_CONTACT_HUB_HOSTS', DEFAULT_CONTACT_HUB_HOSTS)
+
+
+CONTACT_HUB_HOSTS = DEFAULT_CONTACT_HUB_HOSTS
+
+SAMEAS_HUB_SUFFIXES = (
+    'linktr.ee',
+    'beacons.ai',
+    'bio.site',
+    'campsite.bio',
+    'taplink.cc',
+    'msha.ke',
+    'linkin.bio',
+)
 
 WHATSAPP_PATTERNS = [
     re.compile(r'(?i)(?:https?://)?(?:www\.)?wa\.me/([^&"\'\s<>]+)'),
@@ -86,7 +183,16 @@ EMAIL_PATTERN = re.compile(r'([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})', 
 
 INSTAGRAM_PATTERN = re.compile(r'(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9_.]+)', re.I)
 
-CONTACT_KEYWORDS = ['contato', 'contact', 'fale-conosco', 'fale conosco', 'atendimento']
+CONTACT_KEYWORDS = [
+    'contato',
+    'contact',
+    'fale-conosco',
+    'fale conosco',
+    'atendimento',
+    'whatsapp',
+    'fale',
+    'como chegar',
+]
 
 RESERVED_INSTAGRAM = {'p', 'reel', 'tv', 'explore', 'accounts', 'direct', 'developer', 'about', 'legal', 'press', 'jobs', 'api', 'graph', 'www'}
 
@@ -97,6 +203,51 @@ class WebsiteContactResult:
     email: Optional[str]
     instagram: Optional[str]
     status: str
+    facebook: Optional[str] = None
+    telegram: Optional[str] = None
+    source_type: Optional[str] = None
+    source_url: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PhoneEvidence:
+    phone: str
+    source_type: str
+    source_url: Optional[str] = None
+
+
+@dataclass
+class FetchResult:
+    body: Optional[str]
+    final_url: Optional[str]
+    status: str
+    http_status: Optional[int] = None
+
+
+def extract_direct_phone_evidence(
+    tags: Dict[str, Any],
+    country_code: str,
+) -> Optional[PhoneEvidence]:
+    for key, source_type in DIRECT_PHONE_KEYS:
+        raw = tags.get(key)
+
+        if raw is None:
+            continue
+
+        for part in str(raw).split(';'):
+            normalized = normalize_phone_for_catalog(
+                part,
+                country_code,
+            )
+
+            if normalized:
+                return PhoneEvidence(
+                    phone=normalized,
+                    source_type=source_type,
+                    source_url=None,
+                )
+
+    return None
 
 
 def is_public_ip(value: str) -> bool:
@@ -167,81 +318,270 @@ def normalize_website_url(raw) -> Optional[str]:
         return None
 
 
-def fetch_public_html(
+def _classify_fetch_exception(exc: Exception) -> Tuple[str, Optional[int]]:
+    if isinstance(exc, urllib.error.HTTPError):
+        code = getattr(exc, 'code', None)
+        if code == 403:
+            return 'HTTP_403', 403
+        if code == 404:
+            return 'HTTP_404', 404
+        if code == 429:
+            return 'HTTP_429', 429
+        if code is not None and 500 <= code < 600:
+            return 'HTTP_5XX', code
+        return 'FETCH_FAILED', code
+    msg = f'{type(exc).__name__}: {exc}'.lower()
+    if isinstance(exc, socket.timeout) or 'timed out' in msg or 'timeout' in msg:
+        return 'TIMEOUT', None
+    if 'ssl' in msg or 'tls' in msg or 'certificate' in msg:
+        return 'TLS_FAILED', None
+    if isinstance(exc, socket.gaierror) or 'name resolution' in msg or 'nodename nor servname' in msg or 'getaddrinfo failed' in msg or 'dns' in msg:
+        return 'DNS_FAILED', None
+    if isinstance(exc, (urllib.error.URLError, OSError, ValueError)):
+        if 'ssl' in msg or 'tls' in msg or 'certificate' in msg:
+            return 'TLS_FAILED', None
+        if 'refused' in msg or 'reset' in msg:
+            return 'FETCH_FAILED', None
+        return 'FETCH_FAILED', None
+    return 'FETCH_FAILED', None
+
+
+def _is_retryable_fetch_status(status: str, http_status: Optional[int]) -> bool:
+    if status == 'TIMEOUT':
+        return True
+    if status == 'FETCH_FAILED':
+        return False
+    if http_status in (502, 503, 504):
+        return True
+    return False
+
+
+def _single_fetch_attempt(url: str, timeout: float):
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect())
+    req = urllib.request.Request(
+        url,
+        headers={'User-Agent': 'GendazLeads-OSM-Sync/1.0'},
+        method='GET',
+    )
+    resp = opener.open(req, timeout=timeout)
+    return resp
+
+
+def fetch_public_html_result(
     url: str,
     redirect_count: int = 0,
-) -> Optional[str]:
+    _retried: bool = False,
+) -> FetchResult:
     if redirect_count > WEBSITE_MAX_REDIRECTS:
-        return None
+        return FetchResult(None, url, 'REDIRECT_LIMIT', None)
+    parsed_probe = urllib.parse.urlparse(url)
+    if parsed_probe.scheme not in ('http', 'https'):
+        return FetchResult(None, url, 'INVALID_URL', None)
     if not is_safe_public_url(url):
-        return None
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={'User-Agent': 'GendazLeads-OSM-Sync/1.0'},
-            method='GET'
-        )
-        # use read timeout as overall timeout; connect timeout handled via env but urllib uses single timeout
-        timeout = max(WEBSITE_CONNECT_TIMEOUT_SECONDS, 1) + max(WEBSITE_READ_TIMEOUT_SECONDS, 1)
-        # opener without redirect
-        # create custom handler to prevent auto redirect
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                return None
-
-        opener = urllib.request.build_opener(NoRedirect())
-        # fallback: use opener.open
+        # Distinguish invalid URL from unsafe: is_safe covers localhost/private/scheme
         try:
-            resp = opener.open(req, timeout=timeout)
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.hostname or '').lower()
+            if parsed.scheme not in ('http', 'https') or not host:
+                return FetchResult(None, url, 'INVALID_URL', None)
+        except Exception:
+            return FetchResult(None, url, 'INVALID_URL', None)
+        return FetchResult(None, url, 'UNSAFE_URL', None)
+    timeout = max(WEBSITE_CONNECT_TIMEOUT_SECONDS, 1) + max(WEBSITE_READ_TIMEOUT_SECONDS, 1)
+    try:
+        try:
+            resp = _single_fetch_attempt(url, timeout)
         except urllib.error.HTTPError as e:
-            # Handle redirects manually
             if 300 <= e.code < 400:
                 location = e.headers.get('Location') if e.headers else None
                 if not location:
-                    return None
+                    return FetchResult(None, url, 'FETCH_FAILED', e.code)
                 next_url = urllib.parse.urljoin(url, location)
                 if not is_safe_public_url(next_url):
-                    return None
-                return fetch_public_html(next_url, redirect_count + 1)
-            return None
-
+                    return FetchResult(None, url, 'UNSAFE_URL', e.code)
+                return fetch_public_html_result(next_url, redirect_count + 1, _retried)
+            status, http_status = _classify_fetch_exception(e)
+            if not _retried and _is_retryable_fetch_status(status, http_status):
+                try:
+                    resp = _single_fetch_attempt(url, timeout)
+                except Exception as e2:
+                    status2, http2 = _classify_fetch_exception(e2)
+                    return FetchResult(None, url, status2, http2)
+            else:
+                return FetchResult(None, url, status, http_status)
         try:
-            status = getattr(resp, 'status', resp.getcode())
-            if 300 <= status < 400:
+            status_code = getattr(resp, 'status', resp.getcode())
+            if 300 <= status_code < 400:
                 location = resp.headers.get('Location')
+                try:
+                    resp.close()
+                except Exception:
+                    pass
                 if not location:
-                    return None
+                    return FetchResult(None, url, 'FETCH_FAILED', status_code)
                 next_url = urllib.parse.urljoin(url, location)
                 if not is_safe_public_url(next_url):
-                    return None
-                return fetch_public_html(next_url, redirect_count + 1)
-            if not (200 <= status < 300):
-                return None
+                    return FetchResult(None, url, 'UNSAFE_URL', status_code)
+                return fetch_public_html_result(next_url, redirect_count + 1, _retried)
+            if status_code == 403:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                return FetchResult(None, url, 'HTTP_403', 403)
+            if status_code == 404:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                return FetchResult(None, url, 'HTTP_404', 404)
+            if status_code == 429:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                return FetchResult(None, url, 'HTTP_429', 429)
+            if 500 <= status_code < 600:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                if not _retried and _is_retryable_fetch_status('HTTP_5XX', status_code):
+                    try:
+                        resp = _single_fetch_attempt(url, timeout)
+                        status_code = getattr(resp, 'status', resp.getcode())
+                        if not (200 <= status_code < 300):
+                            try:
+                                resp.close()
+                            except Exception:
+                                pass
+                            if status_code == 403:
+                                return FetchResult(None, url, 'HTTP_403', 403)
+                            if status_code == 404:
+                                return FetchResult(None, url, 'HTTP_404', 404)
+                            if status_code == 429:
+                                return FetchResult(None, url, 'HTTP_429', 429)
+                            if 500 <= status_code < 600:
+                                return FetchResult(None, url, 'HTTP_5XX', status_code)
+                            return FetchResult(None, url, 'FETCH_FAILED', status_code)
+                    except Exception as e2:
+                        status2, http2 = _classify_fetch_exception(e2)
+                        return FetchResult(None, url, status2, http2)
+                else:
+                    return FetchResult(None, url, 'HTTP_5XX', status_code)
+            if not (200 <= status_code < 300):
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                return FetchResult(None, url, 'FETCH_FAILED', status_code)
             content_type = resp.headers.get('Content-Type', '') or ''
-            # If content-type indicates binary and not html/text, return None
-            # but allow missing content-type and try to read
             if content_type:
                 ct = content_type.lower()
-                if 'text/html' not in ct and 'text/plain' not in ct and 'application/xhtml' not in ct and 'application/xml' not in ct:
-                    # check for obvious binary
-                    if any(x in ct for x in ['image/', 'video/', 'audio/', 'application/octet-stream', 'application/pdf', 'application/zip']):
-                        return None
+                if any(x in ct for x in ['image/', 'video/', 'audio/', 'application/octet-stream', 'application/pdf', 'application/zip', 'application/gzip']):
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+                    return FetchResult(None, url, 'BINARY_CONTENT', status_code)
+                if 'text/html' not in ct and 'text/plain' not in ct and 'application/xhtml' not in ct and 'application/xml' not in ct and 'application/ld+json' not in ct:
+                    if any(x in ct for x in ['image/', 'video/', 'audio/', 'font/', 'application/pdf', 'application/zip', 'application/octet-stream']):
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
+                        return FetchResult(None, url, 'BINARY_CONTENT', status_code)
             data = resp.read(WEBSITE_MAX_BYTES + 1)
+            try:
+                resp.close()
+            except Exception:
+                pass
             if len(data) > WEBSITE_MAX_BYTES:
-                # truncate to max
-                data = data[:WEBSITE_MAX_BYTES]
-            # decode
+                # Site too large: do not parse partial content for phone (avoid truncation artifacts)
+                return FetchResult(None, url, 'TOO_LARGE', status_code)
             text = data.decode('utf-8', errors='ignore')
-            return text
+            return FetchResult(text, url, 'OK', status_code)
         finally:
             try:
                 resp.close()
             except Exception:
                 pass
-    except (urllib.error.URLError, socket.timeout, socket.gaierror, OSError, ValueError):
-        return None
-    except Exception:
-        return None
+    except Exception as exc:
+        status, http_status = _classify_fetch_exception(exc)
+        if not _retried and _is_retryable_fetch_status(status, http_status):
+            try:
+                resp = _single_fetch_attempt(url, timeout)
+                try:
+                    status_code = getattr(resp, 'status', resp.getcode())
+                    if 200 <= status_code < 300:
+                        data = resp.read(WEBSITE_MAX_BYTES + 1)
+                        if len(data) > WEBSITE_MAX_BYTES:
+                            return FetchResult(None, url, 'TOO_LARGE', status_code)
+                        return FetchResult(data.decode('utf-8', errors='ignore'), url, 'OK', status_code)
+                    if status_code == 403:
+                        return FetchResult(None, url, 'HTTP_403', 403)
+                    if status_code == 404:
+                        return FetchResult(None, url, 'HTTP_404', 404)
+                    if status_code == 429:
+                        return FetchResult(None, url, 'HTTP_429', 429)
+                    if 500 <= status_code < 600:
+                        return FetchResult(None, url, 'HTTP_5XX', status_code)
+                    return FetchResult(None, url, 'FETCH_FAILED', status_code)
+                finally:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+            except Exception as exc2:
+                status2, http2 = _classify_fetch_exception(exc2)
+                return FetchResult(None, url, status2, http2)
+        if isinstance(exc, socket.gaierror):
+            return FetchResult(None, url, 'DNS_FAILED', http_status)
+        return FetchResult(None, url, status, http_status)
+
+
+def fetch_public_html_with_fallback(raw_url: str) -> FetchResult:
+    """Fetch honoring the controlled HTTP fallback rule.
+
+    If the original OSM value had no explicit protocol and HTTPS fails with
+    TLS/connection errors, try plain HTTP once. Never downgrade explicit https.
+    """
+    if raw_url is None:
+        return FetchResult(None, None, 'INVALID_URL', None)
+    original = str(raw_url).strip()
+    if not original:
+        return FetchResult(None, None, 'INVALID_URL', None)
+    had_protocol = original.lower().startswith(('http://', 'https://'))
+    normalized = normalize_website_url(original)
+    if not normalized:
+        return FetchResult(None, None, 'INVALID_URL', None)
+    result = fetch_public_html_result(normalized)
+    if had_protocol:
+        return result
+    # OSM had no protocol (we defaulted to https). Allow single http fallback
+    # only for TLS/connection-style failures.
+    if result.status in ('TLS_FAILED', 'DNS_FAILED', 'TIMEOUT', 'FETCH_FAILED') and normalized.startswith('https://'):
+        http_url = 'http://' + normalized[len('https://'):]
+        fallback = fetch_public_html_result(http_url)
+        # Only accept fallback if it actually returned content
+        if fallback.status == 'OK':
+            return fallback
+    return result
+
+
+def fetch_public_html(
+    url: str,
+    redirect_count: int = 0,
+) -> Optional[str]:
+    """Backward-compatible wrapper returning only the body (or None)."""
+    result = fetch_public_html_result(url, redirect_count)
+    if result.status == 'OK':
+        return result.body
+    return None
 
 
 def _extract_phone_from_html(html_text: str, country_code: str) -> Optional[str]:
@@ -309,6 +649,374 @@ def _extract_instagram_from_html(html_text: str) -> Optional[str]:
     return None
 
 
+FACEBOOK_PATTERN = re.compile(
+    r'(?:https?://)?(?:www\.|m\.|web\.)?(?:facebook\.com|fb\.com)/([A-Za-z0-9_.]+)',
+    re.I,
+)
+
+TELEGRAM_PATTERN = re.compile(
+    r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)',
+    re.I,
+)
+
+JSONLD_SCRIPT_PATTERN = re.compile(
+    r'<script[^>]+type\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+
+MICRODATA_META_PATTERN = re.compile(
+    r'''<meta[^>]+itemprop\s*=\s*["']telephone["'][^>]*>''',
+    re.I,
+)
+
+MICRODATA_CONTENT_PATTERN = re.compile(
+    r'''content\s*=\s*["']([^"']+)["']''',
+    re.I,
+)
+
+MICRODATA_TEL_HREF_PATTERN = re.compile(
+    r'''<[^>]+itemprop\s*=\s*["']telephone["'][^>]*href\s*=\s*["']\s*tel:([^"']+)["']''',
+    re.I,
+)
+
+MICRODATA_SPAN_PATTERN = re.compile(
+    r'''<[^>]+itemprop\s*=\s*["']telephone["'][^>]*>(.*?)</[^>]+>''',
+    re.I | re.S,
+)
+
+
+def normalize_instagram_url(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    # Accept full URL, handle, or @handle
+    m = INSTAGRAM_PATTERN.search(value)
+    if m:
+        handle = m.group(1).strip().strip('/')
+        handle = handle.split('?')[0].split('#')[0].split('/')[0]
+    else:
+        handle = value.split('?')[0].split('#')[0].split('/')[0].strip()
+        handle = handle.lstrip('@').strip()
+        # strip possible domain leftovers
+        if '/' in handle:
+            handle = handle.split('/')[-1]
+    if not handle:
+        return None
+    if handle.lower() in RESERVED_INSTAGRAM:
+        return None
+    if not re.match(r'^[A-Za-z0-9_.]+$', handle):
+        return None
+    return f'https://www.instagram.com/{handle}/'
+
+
+def normalize_facebook_url(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    m = FACEBOOK_PATTERN.search(value)
+    if m:
+        handle = m.group(1).strip().strip('/').split('?')[0].split('#')[0].split('/')[0]
+        if not handle or handle.lower() in ('sharer', 'share', 'plugins', 'tr'):
+            return None
+        return f'https://www.facebook.com/{handle}/'
+    # bare username
+    handle = value.lstrip('@').strip().split('?')[0].split('#')[0].split('/')[0]
+    if not handle or not re.match(r'^[A-Za-z0-9_.]+$', handle):
+        return None
+    return f'https://www.facebook.com/{handle}/'
+
+
+def normalize_telegram_url(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    m = TELEGRAM_PATTERN.search(value)
+    if m:
+        handle = m.group(1).strip().split('?')[0].split('#')[0].split('/')[0].lstrip('@')
+        if not handle:
+            return None
+        return f'https://t.me/{handle}'
+    handle = value.lstrip('@').strip().split('?')[0].split('#')[0].split('/')[0]
+    if not handle or not re.match(r'^[A-Za-z0-9_]+$', handle):
+        return None
+    return f'https://t.me/{handle}'
+
+
+def _instagram_handle_from_url(url: str) -> Optional[str]:
+    m = INSTAGRAM_PATTERN.search(url or '')
+    if not m:
+        return None
+    handle = m.group(1).strip().strip('/').split('?')[0].split('#')[0].split('/')[0]
+    if not handle or handle.lower() in RESERVED_INSTAGRAM:
+        return None
+    return handle.lower()
+
+
+def extract_jsonld_blocks(html_text: str) -> List[Any]:
+    if not html_text:
+        return []
+    blocks: List[Any] = []
+    for m in JSONLD_SCRIPT_PATTERN.finditer(html_text):
+        raw = (m.group(1) or '').strip()
+        if not raw:
+            continue
+        # Strip HTML comments/CDATA sometimes wrapping JSON-LD
+        raw = re.sub(r'^<!--', '', raw).strip()
+        raw = re.sub(r'-->$', '', raw).strip()
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            continue
+        blocks.append(parsed)
+    return blocks
+
+
+def iter_jsonld_nodes(value):
+    seen = set()
+
+    def _walk(node):
+        nid = id(node)
+        if nid in seen:
+            return
+        seen.add(nid)
+        if isinstance(node, dict):
+            yield node
+            graph = node.get('@graph')
+            if isinstance(graph, list):
+                for item in graph:
+                    yield from _walk(item)
+            elif isinstance(graph, dict):
+                yield from _walk(graph)
+            for child in node.values():
+                if isinstance(child, (dict, list)):
+                    yield from _walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                yield from _walk(item)
+
+    if isinstance(value, list):
+        for item in value:
+            yield from _walk(item)
+    else:
+        yield from _walk(value)
+
+
+def _normalize_jsonld_phone_candidate(raw: Any, country_code: str) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        for item in raw:
+            normalized = _normalize_jsonld_phone_candidate(item, country_code)
+            if normalized:
+                return normalized
+        return None
+    if isinstance(raw, dict):
+        # e.g. {"@value": "+55..."} or nested telephone
+        for key in ('telephone', 'phone'):
+            if key in raw:
+                normalized = _normalize_jsonld_phone_candidate(raw[key], country_code)
+                if normalized:
+                    return normalized
+        return None
+    return normalize_phone_for_catalog(str(raw), country_code or '')
+
+
+def extract_jsonld_phone(html_text: str, country_code: str) -> Optional[str]:
+    blocks = extract_jsonld_blocks(html_text)
+    if not blocks:
+        return None
+    for block in blocks:
+        for node in iter_jsonld_nodes(block):
+            if not isinstance(node, dict):
+                continue
+            for key in ('telephone', 'phone'):
+                if key in node:
+                    normalized = _normalize_jsonld_phone_candidate(node.get(key), country_code)
+                    if normalized:
+                        return normalized
+            contact = node.get('contactPoint')
+            if contact is not None:
+                normalized = _normalize_jsonld_phone_candidate(contact, country_code)
+                if normalized:
+                    return normalized
+    return None
+
+
+def extract_same_as_urls(jsonld_blocks) -> List[str]:
+    urls: List[str] = []
+    seen = set()
+    for block in jsonld_blocks or []:
+        for node in iter_jsonld_nodes(block):
+            if not isinstance(node, dict):
+                continue
+            same = node.get('sameAs')
+            if same is None:
+                # also accept case variants
+                for k, v in node.items():
+                    if isinstance(k, str) and k.lower() == 'sameas':
+                        same = v
+                        break
+            if same is None:
+                continue
+            candidates = same if isinstance(same, list) else [same]
+            for item in candidates:
+                if not isinstance(item, str):
+                    continue
+                u = item.strip()
+                if not u or u in seen:
+                    continue
+                if len(urls) >= 20:
+                    return urls
+                seen.add(u)
+                urls.append(u)
+    return urls
+
+
+def classify_external_contact_url(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(url if '://' in url else 'https://' + url)
+        host = (parsed.hostname or '').lower()
+    except Exception:
+        return 'OTHER'
+    if not host:
+        return 'OTHER'
+    host = host.lstrip('www.').lstrip('m.')
+    if 'instagram.com' in host:
+        return 'INSTAGRAM'
+    if host.endswith('facebook.com') or host == 'fb.com' or host.endswith('.fb.com'):
+        return 'FACEBOOK'
+    hubs = get_contact_hub_hosts() or DEFAULT_CONTACT_HUB_HOSTS
+    normalized_host = host.lstrip('www.')
+    for hub in hubs:
+        hub_norm = hub.lower().lstrip('www.').lstrip('.')
+        if normalized_host == hub_norm or normalized_host.endswith('.' + hub_norm):
+            return 'CONTACT_HUB'
+    for suffix in SAMEAS_HUB_SUFFIXES:
+        if normalized_host == suffix or normalized_host.endswith('.' + suffix):
+            return 'CONTACT_HUB'
+    return 'OTHER'
+
+
+def extract_microdata_phone(html_text: str, country_code: str) -> Optional[str]:
+    if not html_text:
+        return None
+    for m in MICRODATA_TEL_HREF_PATTERN.finditer(html_text):
+        normalized = normalize_phone_for_catalog(m.group(1), country_code or '')
+        if normalized:
+            return normalized
+    for m in MICRODATA_META_PATTERN.finditer(html_text):
+        tag = m.group(0)
+        cm = MICRODATA_CONTENT_PATTERN.search(tag)
+        if cm:
+            normalized = normalize_phone_for_catalog(cm.group(1), country_code or '')
+            if normalized:
+                return normalized
+    for m in MICRODATA_SPAN_PATTERN.finditer(html_text):
+        inner = re.sub(r'<[^>]+>', '', m.group(1) or '').strip()
+        if inner:
+            normalized = normalize_phone_for_catalog(inner, country_code or '')
+            if normalized:
+                return normalized
+    return None
+
+
+def _extract_facebook_from_html(html_text: str) -> Optional[str]:
+    if not html_text:
+        return None
+    for m in FACEBOOK_PATTERN.finditer(html_text):
+        handle = m.group(1).strip().strip('/').split('?')[0].split('#')[0].split('/')[0]
+        if not handle or handle.lower() in ('sharer', 'share', 'plugins', 'tr', 'www'):
+            continue
+        return normalize_facebook_url(handle)
+    return None
+
+
+def _extract_telegram_from_html(html_text: str) -> Optional[str]:
+    if not html_text:
+        return None
+    for m in TELEGRAM_PATTERN.finditer(html_text):
+        handle = m.group(1).strip().split('?')[0].split('#')[0].split('/')[0]
+        if handle:
+            return normalize_telegram_url(handle)
+    return None
+
+
+def is_contact_hub_url(url: str) -> bool:
+    return classify_external_contact_url(url) == 'CONTACT_HUB'
+
+
+def find_contact_hub_urls(html_text: str, jsonld_blocks=None) -> List[str]:
+    found: List[str] = []
+    seen = set()
+    anchor_pat = re.compile(r'''<a[^>]+href\s*=\s*["']([^"']+)["\']''', re.I)
+    for m in anchor_pat.finditer(html_text or ''):
+        href = (m.group(1) or '').strip()
+        if not href or href.startswith(('tel:', 'mailto:', 'javascript:', 'data:', '#')):
+            continue
+        if href in seen:
+            continue
+        if classify_external_contact_url(href) == 'CONTACT_HUB':
+            seen.add(href)
+            found.append(href)
+            if len(found) >= 5:
+                return found
+    for u in extract_same_as_urls(jsonld_blocks or []):
+        if u in seen:
+            continue
+        if classify_external_contact_url(u) == 'CONTACT_HUB':
+            seen.add(u)
+            found.append(u)
+            if len(found) >= 5:
+                break
+    return found
+
+
+def _extract_phone_with_source(html_text: str, country_code: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract phone following spec order. Returns (phone, source_suffix)."""
+    if not html_text:
+        return None, None
+    for pat in WHATSAPP_PATTERNS:
+        for m in pat.finditer(html_text):
+            raw = m.group(1)
+            if raw:
+                try:
+                    raw = urllib.parse.unquote(raw)
+                except Exception:
+                    pass
+                normalized = normalize_phone_for_catalog(raw, country_code or '')
+                if normalized:
+                    return normalized, 'WHATSAPP'
+    for m in TEL_LINK_PATTERN.finditer(html_text):
+        raw = m.group(1)
+        if raw:
+            try:
+                raw = urllib.parse.unquote(raw)
+            except Exception:
+                pass
+            normalized = normalize_phone_for_catalog(raw, country_code or '')
+            if normalized:
+                return normalized, 'TEL'
+    phone = extract_jsonld_phone(html_text, country_code or '')
+    if phone:
+        return phone, 'JSONLD_PHONE'
+    phone = extract_microdata_phone(html_text, country_code or '')
+    if phone:
+        return phone, 'MICRODATA_PHONE'
+    for m in GENERIC_PHONE_PATTERN.finditer(html_text):
+        raw = m.group(0)
+        if raw:
+            normalized = normalize_phone_for_catalog(raw, country_code or '')
+            if normalized:
+                return normalized, 'TEXT_PHONE'
+    return None, None
+
+
 def _find_contact_page_urls(base_url: str, html_text: str) -> List[str]:
     if not html_text or not base_url:
         return []
@@ -359,41 +1067,186 @@ def _extract_contact_from_html(html_text: str, country_code: str) -> Tuple[Optio
     return phone, email, instagram
 
 
-def fetch_website_contact_result(normalized_url: str, country_code: str) -> WebsiteContactResult:
+def extract_html_contacts(html_text: str, country_code: str) -> Dict[str, Optional[str]]:
+    phone, phone_kind = _extract_phone_with_source(html_text, country_code)
+    blocks = extract_jsonld_blocks(html_text)
+    same_as = extract_same_as_urls(blocks)
+    instagram = _extract_instagram_from_html(html_text)
+    if not instagram:
+        for u in same_as:
+            if classify_external_contact_url(u) == 'INSTAGRAM':
+                handle = _instagram_handle_from_url(u)
+                if handle:
+                    instagram = handle
+                    break
+    return {
+        'phone': phone,
+        'phone_kind': phone_kind,
+        'email': _extract_email_from_html(html_text),
+        'instagram': instagram,
+        'facebook': _extract_facebook_from_html(html_text),
+        'telegram': _extract_telegram_from_html(html_text),
+        'same_as': same_as,
+        'jsonld_blocks': blocks,
+    }
+
+
+def _source_type_for(kind: Optional[str], contact_page: bool = False) -> str:
+    if contact_page:
+        return 'OSM_WEBSITE_CONTACT_PAGE'
+    mapping = {
+        'WHATSAPP': 'OSM_WEBSITE_WHATSAPP',
+        'TEL': 'OSM_WEBSITE_TEL',
+        'JSONLD_PHONE': 'OSM_WEBSITE_JSONLD_PHONE',
+        'MICRODATA_PHONE': 'OSM_WEBSITE_MICRODATA_PHONE',
+        'TEXT_PHONE': 'OSM_WEBSITE_TEXT_PHONE',
+    }
+    return mapping.get(kind or '', 'OSM_WEBSITE_TEXT_PHONE')
+
+
+def _fetch_failure_result_to_status(fetch: FetchResult) -> str:
+    mapping = {
+        'UNSAFE_URL': 'UNSAFE_URL',
+        'INVALID_URL': 'INVALID_WEBSITE',
+        'DNS_FAILED': 'DNS_FAILED',
+        'TIMEOUT': 'TIMEOUT',
+        'TLS_FAILED': 'TLS_FAILED',
+        'HTTP_403': 'HTTP_403',
+        'HTTP_404': 'HTTP_404',
+        'HTTP_429': 'HTTP_429',
+        'HTTP_5XX': 'HTTP_5XX',
+        'TOO_LARGE': 'TOO_LARGE',
+        'BINARY_CONTENT': 'BINARY_CONTENT',
+        'REDIRECT_LIMIT': 'REDIRECT_LIMIT',
+    }
+    return mapping.get(fetch.status, 'FETCH_FAILED')
+
+
+def fetch_contact_hub_result(hub_url: str, country_code: str, cache: Optional[Dict[str, WebsiteContactResult]] = None) -> WebsiteContactResult:
+    if cache is not None and hub_url in cache:
+        return cache[hub_url]
+    if not CONTACT_HUBS_ENABLED:
+        result = WebsiteContactResult(None, None, None, 'NO_PHONE', source_type='OSM_WEBSITE_CONTACT_HUB', source_url=hub_url)
+        if cache is not None:
+            cache[hub_url] = result
+        return result
+    if not is_contact_hub_url(hub_url):
+        result = WebsiteContactResult(None, None, None, 'NO_PHONE', source_type='OSM_WEBSITE_CONTACT_HUB', source_url=hub_url)
+        if cache is not None:
+            cache[hub_url] = result
+        return result
+    fetch = fetch_public_html_result(hub_url)
+    if fetch.status != 'OK' or not fetch.body:
+        result = WebsiteContactResult(None, None, None, _fetch_failure_result_to_status(fetch), source_type='OSM_WEBSITE_CONTACT_HUB', source_url=hub_url)
+        if cache is not None:
+            cache[hub_url] = result
+        return result
+    phone, kind = _extract_phone_with_source(fetch.body, country_code)
+    email = _extract_email_from_html(fetch.body)
+    instagram = _extract_instagram_from_html(fetch.body)
+    if phone:
+        result = WebsiteContactResult(phone, email, instagram, 'FOUND_PHONE', source_type='OSM_WEBSITE_CONTACT_HUB', source_url=hub_url)
+    else:
+        result = WebsiteContactResult(None, email, instagram, 'NO_PHONE', source_type='OSM_WEBSITE_CONTACT_HUB', source_url=hub_url)
+    if cache is not None:
+        cache[hub_url] = result
+    return result
+
+
+def fetch_public_social_contact(url: str, country_code: str) -> WebsiteContactResult:
+    """Best-effort public fetch of an official social profile. No auth/JS/crawl."""
+    if not SOCIAL_PUBLIC_FETCH_ENABLED:
+        return WebsiteContactResult(None, None, None, 'SOCIAL_BLOCKED', source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=url)
+    kind = classify_external_contact_url(url)
+    if kind not in ('INSTAGRAM', 'FACEBOOK'):
+        return WebsiteContactResult(None, None, None, 'SOCIAL_BLOCKED', source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=url)
+    fetch = fetch_public_html_result(url)
+    if fetch.status in ('HTTP_403', 'HTTP_429') or fetch.http_status in (401, 403, 429):
+        return WebsiteContactResult(None, None, None, 'SOCIAL_BLOCKED', source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=url)
+    if fetch.status != 'OK' or not fetch.body:
+        body_lower = (fetch.body or '').lower()
+        if any(marker in body_lower for marker in ('login', 'challenge', 'captcha')):
+            return WebsiteContactResult(None, None, None, 'SOCIAL_BLOCKED', source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=url)
+        mapped = _fetch_failure_result_to_status(fetch)
+        if mapped in ('HTTP_403', 'HTTP_429'):
+            mapped = 'SOCIAL_BLOCKED'
+        return WebsiteContactResult(None, None, None, mapped, source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=url)
+    body_lower = fetch.body.lower()
+    if 'login' in body_lower and ('instagram' in body_lower or 'facebook' in body_lower) and len(fetch.body) < 5000:
+        # Likely a login wall without public content
+        pass
+    phone, _kind = _extract_phone_with_source(fetch.body, country_code)
+    if phone:
+        return WebsiteContactResult(phone, None, None, 'FOUND_PHONE', source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=url)
+    return WebsiteContactResult(None, None, None, 'NO_PHONE', source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=url)
+
+
+def fetch_website_contact_result(normalized_url: str, country_code: str, raw_url: Optional[str] = None, hub_cache: Optional[Dict[str, WebsiteContactResult]] = None) -> WebsiteContactResult:
     if not normalized_url:
         return WebsiteContactResult(None, None, None, 'INVALID_WEBSITE')
     if not is_safe_public_url(normalized_url):
         return WebsiteContactResult(None, None, None, 'UNSAFE_URL')
-    html_text = fetch_public_html(normalized_url, 0)
-    if html_text is None:
-        return WebsiteContactResult(None, None, None, 'FETCH_FAILED')
-    phone, email, instagram = _extract_contact_from_html(html_text, country_code)
-    if phone:
-        return WebsiteContactResult(phone, email, instagram, 'FOUND_PHONE')
-    # try contact pages
+    fetch = fetch_public_html_with_fallback(raw_url or normalized_url)
+    if fetch.status != 'OK' or not fetch.body:
+        return WebsiteContactResult(None, None, None, _fetch_failure_result_to_status(fetch), source_url=normalized_url)
+    html_text = fetch.body
+    contacts = extract_html_contacts(html_text, country_code)
+    if contacts['phone']:
+        result = WebsiteContactResult(
+            contacts['phone'], contacts['email'], contacts['instagram'],
+            'FOUND_PHONE',
+            facebook=contacts['facebook'], telegram=contacts['telegram'],
+            source_type=_source_type_for(contacts['phone_kind']),
+            source_url=normalized_url,
+        )
+        result.same_as_list = contacts['same_as']
+        return result
+    best_email = contacts['email']
+    best_insta = contacts['instagram']
+    best_fb = contacts['facebook']
+    best_tg = contacts['telegram']
+    same_as = contacts['sameAs'] if 'sameAs' in contacts else contacts['same_as']
+    # same-host contact pages (max 2, no spider)
     contact_urls = _find_contact_page_urls(normalized_url, html_text)
-    best_email = email
-    best_insta = instagram
     for curl in contact_urls:
         if not is_safe_public_url(curl):
             continue
-        c_html = fetch_public_html(curl, 0)
-        if c_html is None:
+        c_fetch = fetch_public_html_result(curl)
+        if c_fetch.status != 'OK' or not c_fetch.body:
             continue
-        c_phone, c_email, c_insta = _extract_contact_from_html(c_html, country_code)
+        c_phone, c_kind = _extract_phone_with_source(c_fetch.body, country_code)
+        c_email = _extract_email_from_html(c_fetch.body)
+        c_insta = _extract_instagram_from_html(c_fetch.body)
         if c_email and not best_email:
             best_email = c_email
         if c_insta and not best_insta:
             best_insta = c_insta
         if c_phone:
-            return WebsiteContactResult(c_phone, best_email, best_insta, 'FOUND_PHONE')
-        # keep best
-        if c_email and not email:
-            email = c_email
-        if c_insta and not instagram:
-            instagram = c_insta
-    # aggregated email/instagram but no phone
-    return WebsiteContactResult(None, email or best_email, instagram or best_insta, 'NO_PHONE')
+            return WebsiteContactResult(
+                c_phone, best_email, best_insta, 'FOUND_PHONE',
+                facebook=best_fb, telegram=best_tg,
+                source_type='OSM_WEBSITE_CONTACT_PAGE', source_url=curl,
+            )
+    # contact hub officially linked (single GET, no recursion)
+    hub_urls = find_contact_hub_urls(html_text, contacts['jsonld_blocks'])
+    for hub_url in hub_urls:
+        hub_res = fetch_contact_hub_result(hub_url, country_code, hub_cache)
+        if hub_res.email and not best_email:
+            best_email = hub_res.email
+        if hub_res.instagram and not best_insta:
+            best_insta = hub_res.instagram
+        if hub_res.phone:
+            hub_res.email = hub_res.email or best_email
+            hub_res.instagram = hub_res.instagram or best_insta
+            hub_res.same_as_list = contacts['same_as']
+            return hub_res
+    result = WebsiteContactResult(
+        None, best_email, best_insta, 'NO_PHONE',
+        facebook=best_fb, telegram=best_tg,
+        source_type=None, source_url=normalized_url,
+    )
+    result.same_as_list = contacts['same_as']
+    return result
 
 
 def parse_args():
@@ -618,6 +1471,133 @@ def is_commercial(tags: Dict[str, Any]) -> bool:
     return any(k in tags for k in COMMERCIAL_TAG_KEYS)
 
 
+def primary_website(tags: Dict[str, Any]) -> Optional[str]:
+    return first_present(tags, PRIMARY_WEBSITE_KEYS)
+
+
+def secondary_website_seen(tags: Dict[str, Any]) -> Dict[str, bool]:
+    return {
+        'brand': first_present(tags, ['brand:website']) is not None,
+        'operator': first_present(tags, ['operator:website']) is not None,
+    }
+
+
+def official_social_urls(tags: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    instagram = first_present(tags, INSTAGRAM_KEYS)
+    facebook = first_present(tags, FACEBOOK_KEYS)
+    out: Dict[str, Optional[str]] = {'instagram': None, 'facebook': None}
+    if instagram:
+        out['instagram'] = normalize_instagram_url(instagram)
+    if facebook:
+        out['facebook'] = normalize_facebook_url(facebook)
+    return out
+
+
+def has_primary_website(tags: Dict[str, Any]) -> bool:
+    return primary_website(tags) is not None
+
+
+def has_official_social(tags: Dict[str, Any]) -> bool:
+    social = official_social_urls(tags)
+    return bool(social.get('instagram') or social.get('facebook'))
+
+
+def has_any_official_channel(tags: Dict[str, Any]) -> bool:
+    if extract_direct_phone_evidence(tags, 'br') is not None:
+        return True
+    # any country: check raw presence
+    if first_phone_like(tags, [k for k, _ in DIRECT_PHONE_KEYS]) is not None:
+        return True
+    if has_primary_website(tags):
+        return True
+    if has_official_social(tags):
+        return True
+    return False
+
+
+def audit_contact_coverage(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {
+        'raw_rows': len(rows),
+        'commercial_rows': 0,
+        'contact_only_rows': 0,
+        'tag_phone': 0,
+        'tag_contact_phone': 0,
+        'tag_mobile': 0,
+        'tag_contact_mobile': 0,
+        'tag_whatsapp': 0,
+        'tag_contact_whatsapp': 0,
+        'tag_sms': 0,
+        'tag_contact_sms': 0,
+        'tag_website': 0,
+        'tag_contact_website': 0,
+        'tag_url': 0,
+        'tag_instagram': 0,
+        'tag_contact_instagram': 0,
+        'tag_facebook': 0,
+        'tag_contact_facebook': 0,
+        'tag_telegram': 0,
+        'tag_contact_telegram': 0,
+        'tag_brand_website': 0,
+        'tag_operator_website': 0,
+        'with_any_direct_phone_tag': 0,
+        'with_primary_website': 0,
+        'with_social_channel': 0,
+        'with_any_official_channel': 0,
+        'without_any_official_channel': 0,
+    }
+
+    def _present(tags: Dict[str, Any], key: str) -> bool:
+        v = tags.get(key)
+        return v is not None and str(v).strip() != ''
+
+    for row in rows:
+        tags = row_tags(row)
+        commercial = is_commercial(tags)
+        if commercial:
+            counts['commercial_rows'] += 1
+        else:
+            counts['contact_only_rows'] += 1
+        for metric, key in [
+            ('tag_phone', 'phone'),
+            ('tag_contact_phone', 'contact:phone'),
+            ('tag_mobile', 'mobile'),
+            ('tag_contact_mobile', 'contact:mobile'),
+            ('tag_whatsapp', 'whatsapp'),
+            ('tag_contact_whatsapp', 'contact:whatsapp'),
+            ('tag_sms', 'sms'),
+            ('tag_contact_sms', 'contact:sms'),
+            ('tag_website', 'website'),
+            ('tag_contact_website', 'contact:website'),
+            ('tag_url', 'url'),
+            ('tag_instagram', 'instagram'),
+            ('tag_contact_instagram', 'contact:instagram'),
+            ('tag_facebook', 'facebook'),
+            ('tag_contact_facebook', 'contact:facebook'),
+            ('tag_telegram', 'telegram'),
+            ('tag_contact_telegram', 'contact:telegram'),
+            ('tag_brand_website', 'brand:website'),
+            ('tag_operator_website', 'operator:website'),
+        ]:
+            if _present(tags, key):
+                counts[metric] += 1
+        country = row.get('country_code') or ''
+        has_direct = extract_direct_phone_evidence(tags, country) is not None
+        if has_direct:
+            counts['with_any_direct_phone_tag'] += 1
+        has_site = has_primary_website(tags)
+        if has_site:
+            counts['with_primary_website'] += 1
+        has_social = has_official_social(tags)
+        if has_social:
+            counts['with_social_channel'] += 1
+        has_any = has_direct or has_site or has_social
+        if has_any:
+            counts['with_any_official_channel'] += 1
+        else:
+            counts['without_any_official_channel'] += 1
+    return counts
+
+
 def has_contact_signal(tags: Dict[str, Any]) -> bool:
     if first_phone_like(tags, CONTACT_PHONE_KEYS) is not None:
         return True
@@ -629,6 +1609,12 @@ def has_contact_signal(tags: Dict[str, Any]) -> bool:
         return True
 
     if first_present(tags, CONTACT_INSTAGRAM_KEYS) is not None:
+        return True
+
+    if first_present(tags, CONTACT_FACEBOOK_KEYS) is not None:
+        return True
+
+    if first_present(tags, CONTACT_TELEGRAM_KEYS) is not None:
         return True
 
     return False
@@ -930,23 +1916,20 @@ def build_merged_cluster_candidate(cluster):
     phone_source = None
 
     for row in ordered:
-        normalized = normalize_phone_for_catalog(
-            row.get('phone'),
-            country_code,
-        )
-        if normalized:
-            phone = normalized
-            # Determine if from base or companion
+        tags = row_tags(row)
+        evidence = extract_direct_phone_evidence(tags, country_code)
+        if evidence is None and row.get('phone'):
+            # Fallback for rows whose phone column was pre-extracted
+            normalized = normalize_phone_for_catalog(row.get('phone'), country_code)
+            if normalized:
+                # Attribute generically to DIRECT_OSM_PHONE when tag detail lost
+                evidence = PhoneEvidence(phone=normalized, source_type='DIRECT_OSM_PHONE')
+        if evidence is not None:
+            phone = evidence.phone
             if row is base:
-                phone_source = 'direct'
+                phone_source = evidence.source_type
             else:
-                # companion phone (could be commercial second but treat as companion)
-                phone_source = 'companion' if row not in [base] or True else 'companion'
-                # Distinguish direct vs companion: if first phone found is not base, it's companion
-                if phone_source is None:
-                    phone_source = 'companion'
-            # more precise: if row is base => direct else companion
-            phone_source = 'direct' if row is base else 'companion'
+                phone_source = evidence.source_type.replace('DIRECT_', 'COMPANION_', 1) if evidence.source_type.startswith('DIRECT_') else 'COMPANION_OSM_PHONE'
             break
 
     result = dict(base)
@@ -964,38 +1947,133 @@ def build_merged_cluster_candidate(cluster):
     return result
 
 
-def enrich_candidate_from_osm_website(candidate, website_cache):
-    # phone already valid -> no HTTP
-    existing = normalize_phone_for_catalog(candidate.get('phone'), candidate.get('country_code') or '')
-    if existing:
-        candidate['phone'] = existing
-        return WebsiteContactResult(existing, candidate.get('email'), candidate.get('instagram'), 'FOUND_PHONE')
-
-    website_raw = candidate.get('website')
-    normalized_url = normalize_website_url(website_raw)
-    if not normalized_url:
-        return WebsiteContactResult(None, None, None, 'INVALID_WEBSITE')
-    country_code = candidate.get('country_code') or ''
-    # cache check
-    if normalized_url in website_cache:
-        cached = website_cache[normalized_url]
-        if cached.phone:
-            candidate['phone'] = cached.phone
-        if cached.email and not candidate.get('email'):
-            candidate['email'] = cached.email
-        if cached.instagram and not candidate.get('instagram'):
-            candidate['instagram'] = cached.instagram
-        return cached
-
-    result = fetch_website_contact_result(normalized_url, country_code)
-    website_cache[normalized_url] = result
+def apply_contact_result_to_candidate(candidate, result: WebsiteContactResult):
     if result.phone:
         candidate['phone'] = result.phone
     if result.email and not candidate.get('email'):
         candidate['email'] = result.email
     if result.instagram and not candidate.get('instagram'):
         candidate['instagram'] = result.instagram
-    return result
+    if result.source_type:
+        candidate['_phone_source'] = result.source_type
+        candidate['_source_url'] = result.source_url
+
+
+def enrich_candidate_full(candidate, website_cache, hub_cache, social_cache):
+    """Full OSM option B chain for one candidate: website -> social OSM -> sameAs social."""
+    country_code = candidate.get('country_code') or ''
+    existing = normalize_phone_for_catalog(candidate.get('phone'), country_code)
+    if existing:
+        candidate['phone'] = existing
+        return WebsiteContactResult(existing, candidate.get('email'), candidate.get('instagram'), 'FOUND_PHONE', source_type=candidate.get('_phone_source'), source_url=candidate.get('_source_url'))
+
+    tags = row_tags(candidate)
+    if not tags:
+        # candidate built from merged cluster already carries tags JSON; fall back to fields
+        tags = {}
+
+    # C. primary website OSM
+    website_raw = candidate.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if tags else None)
+    normalized_url = normalize_website_url(website_raw) if website_raw else None
+    same_as_social: List[str] = []
+    if normalized_url:
+        if normalized_url in website_cache:
+            cached = website_cache[normalized_url]
+            if cached.phone:
+                apply_contact_result_to_candidate(candidate, cached)
+                return cached
+            # reuse cached even when NO_PHONE (still need social fallback below,
+            # but keep aggregated email/instagram)
+            if cached.email and not candidate.get('email'):
+                candidate['email'] = cached.email
+            if cached.instagram and not candidate.get('instagram'):
+                candidate['instagram'] = cached.instagram
+            if cached.status != 'FOUND_PHONE':
+                # do not return yet: still try social fallbacks
+                pass
+            else:
+                return cached
+        result = fetch_website_contact_result(normalized_url, country_code, raw_url=website_raw, hub_cache=hub_cache)
+        website_cache[normalized_url] = result
+        if result.phone:
+            apply_contact_result_to_candidate(candidate, result)
+            return result
+        if result.email and not candidate.get('email'):
+            candidate['email'] = result.email
+        if result.instagram and not candidate.get('instagram'):
+            candidate['instagram'] = result.instagram
+        # collect sameAs social for step E (re-extract cheaply from cache? fetch again avoided:
+        # we already parsed inside fetch; re-derive social hub/IG from result is enough.
+        # For sameAs social profiles, we need the sameAs list; fetch function does not
+        # return it, so we only attempt direct OSM social here and sameAs via a light
+        # re-parse only if website fetch was OK. To avoid double fetch, skip re-parse:
+        # sameAs social is handled in qualify loop via website_cache bodies? Instead,
+        # attempt sameAs social only when direct fetch gave us instagram/facebook fields.
+        # NOTE: full sameAs social URL list requires body; we re-derive from a fresh
+        # lightweight parse only if needed and body available via new fetch? Avoid extra
+        # HTTP: rely on direct OSM social first.
+        pass
+
+    # D. social oficial direto do OSM (best effort, 1 fetch each, cached)
+    social = official_social_urls(tags) if tags else {}
+    for platform in ('instagram', 'facebook'):
+        surl = (social or {}).get(platform)
+        if not surl:
+            # also check candidate-level instagram field
+            if platform == 'instagram' and candidate.get('instagram'):
+                surl = normalize_instagram_url(candidate.get('instagram'))
+            else:
+                continue
+        if not surl:
+            continue
+        if surl in social_cache:
+            cached = social_cache[surl]
+        else:
+            cached = fetch_public_social_contact(surl, country_code)
+            social_cache[surl] = cached
+        if cached.phone:
+            apply_contact_result_to_candidate(candidate, cached)
+            candidate['_phone_source'] = 'OSM_DIRECT_SOCIAL_PUBLIC'
+            return cached
+
+    # E. sameAs social from official website (best effort, 1 fetch each, cached).
+    # Only URLs explicitly linked via JSON-LD sameAs on the official website.
+    same_as_list = []
+    if normalized_url and normalized_url in website_cache:
+        same_as_list = getattr(website_cache[normalized_url], 'same_as_list', []) or []
+    for surl in same_as_list[:20]:
+        kind = classify_external_contact_url(surl)
+        if kind not in ('INSTAGRAM', 'FACEBOOK'):
+            continue
+        if surl in social_cache:
+            cached = social_cache[surl]
+        else:
+            cached = fetch_public_social_contact(surl, country_code)
+            # mark provenance as sameAs-derived rather than direct OSM
+            if cached.source_type == 'OSM_DIRECT_SOCIAL_PUBLIC':
+                cached.source_type = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+            social_cache[surl] = cached
+        if cached.phone:
+            apply_contact_result_to_candidate(candidate, cached)
+            candidate['_phone_source'] = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+            return cached
+
+    status = 'NO_PHONE'
+    # propagate most informative failure status from website fetch if present
+    if normalized_url and normalized_url in website_cache:
+        status = website_cache[normalized_url].status
+        if status == 'FOUND_PHONE':
+            status = 'NO_PHONE'
+    return WebsiteContactResult(None, candidate.get('email'), candidate.get('instagram'), status)
+
+
+def enrich_candidate_from_osm_website(candidate, website_cache, hub_cache=None, social_cache=None):
+    # phone already valid -> no HTTP
+    existing = normalize_phone_for_catalog(candidate.get('phone'), candidate.get('country_code') or '')
+    if existing:
+        candidate['phone'] = existing
+        return WebsiteContactResult(existing, candidate.get('email'), candidate.get('instagram'), 'FOUND_PHONE')
+    return enrich_candidate_full(candidate, website_cache, hub_cache or {}, social_cache or {})
 
 
 def finalize_qualified_candidate(candidate):
@@ -1074,6 +2152,123 @@ def load_staging_rows(conn, sync_run_id):
         ]
 
 
+def _empty_qualification_stats(total_rows: int) -> Dict[str, int]:
+    return {
+        'raw_rows': total_rows,
+        'clusters': 0,
+        'qualified': 0,
+        'qualified_direct_phone': 0,
+        'qualified_direct_whatsapp': 0,
+        'qualified_direct_mobile': 0,
+        'qualified_direct_sms': 0,
+        'qualified_companion_phone': 0,
+        'qualified_website_phone': 0,
+        'qualified_website_whatsapp': 0,
+        'qualified_website_tel': 0,
+        'qualified_website_jsonld': 0,
+        'qualified_website_microdata': 0,
+        'qualified_website_text': 0,
+        'qualified_website_contact_page': 0,
+        'qualified_contact_hub': 0,
+        'qualified_social_public': 0,
+        'discarded_no_commercial': 0,
+        'discarded_no_phone': 0,
+        'website_candidates': 0,
+        'website_ok': 0,
+        'website_fetch_success': 0,
+        'website_phone_found': 0,
+        'website_no_phone': 0,
+        'website_fetch_failed': 0,
+        'website_dns_failed': 0,
+        'website_timeout': 0,
+        'website_tls_failed': 0,
+        'website_http_403': 0,
+        'website_http_404': 0,
+        'website_http_429': 0,
+        'website_http_5xx': 0,
+        'website_too_large': 0,
+        'website_binary': 0,
+        'website_unsafe': 0,
+        'contact_hub_candidates': 0,
+        'contact_hub_phone_found': 0,
+        'social_candidates': 0,
+        'social_phone_found': 0,
+        'social_blocked': 0,
+        'brand_website_seen': 0,
+        'operator_website_seen': 0,
+        'merged_clusters': 0,
+    }
+
+
+def _count_qualified_source(stats: Dict[str, int], source: Optional[str]):
+    if not source:
+        return
+    if source in ('DIRECT_OSM_PHONE', 'direct'):
+        stats['qualified_direct_phone'] += 1
+    elif source in ('DIRECT_OSM_WHATSAPP',):
+        stats['qualified_direct_whatsapp'] += 1
+        stats['qualified_direct_phone'] += 1
+    elif source in ('DIRECT_OSM_MOBILE',):
+        stats['qualified_direct_mobile'] += 1
+        stats['qualified_direct_phone'] += 1
+    elif source in ('DIRECT_OSM_SMS',):
+        stats['qualified_direct_sms'] += 1
+        stats['qualified_direct_phone'] += 1
+    elif source in ('companion',) or source.startswith('COMPANION_'):
+        stats['qualified_companion_phone'] += 1
+    elif source == 'OSM_WEBSITE_WHATSAPP':
+        stats['qualified_website_phone'] += 1
+        stats['qualified_website_whatsapp'] += 1
+    elif source == 'OSM_WEBSITE_TEL':
+        stats['qualified_website_phone'] += 1
+        stats['qualified_website_tel'] += 1
+    elif source == 'OSM_WEBSITE_JSONLD_PHONE':
+        stats['qualified_website_phone'] += 1
+        stats['qualified_website_jsonld'] += 1
+    elif source == 'OSM_WEBSITE_MICRODATA_PHONE':
+        stats['qualified_website_phone'] += 1
+        stats['qualified_website_microdata'] += 1
+    elif source == 'OSM_WEBSITE_TEXT_PHONE':
+        stats['qualified_website_phone'] += 1
+        stats['qualified_website_text'] += 1
+    elif source == 'OSM_WEBSITE_CONTACT_PAGE':
+        stats['qualified_website_phone'] += 1
+        stats['qualified_website_contact_page'] += 1
+    elif source == 'OSM_WEBSITE_CONTACT_HUB':
+        stats['qualified_website_phone'] += 1
+        stats['qualified_contact_hub'] += 1
+    elif source in ('OSM_DIRECT_SOCIAL_PUBLIC', 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'):
+        stats['qualified_social_public'] += 1
+    elif source == 'website':
+        stats['qualified_website_phone'] += 1
+
+
+def _count_fetch_status(stats: Dict[str, int], status: Optional[str]):
+    mapping = {
+        'FOUND_PHONE': None,
+        'NO_PHONE': None,
+        'DNS_FAILED': 'website_dns_failed',
+        'TIMEOUT': 'website_timeout',
+        'TLS_FAILED': 'website_tls_failed',
+        'HTTP_403': 'website_http_403',
+        'HTTP_404': 'website_http_404',
+        'HTTP_429': 'website_http_429',
+        'HTTP_5XX': 'website_http_5xx',
+        'TOO_LARGE': 'website_too_large',
+        'BINARY_CONTENT': 'website_binary',
+        'UNSAFE_URL': 'website_unsafe',
+        'INVALID_WEBSITE': 'website_fetch_failed',
+        'FETCH_FAILED': 'website_fetch_failed',
+        'REDIRECT_LIMIT': 'website_fetch_failed',
+        'SOCIAL_BLOCKED': None,
+    }
+    key = mapping.get(status or '')
+    if key:
+        stats[key] += 1
+    elif status not in ('FOUND_PHONE', 'NO_PHONE', 'SOCIAL_BLOCKED'):
+        stats['website_fetch_failed'] += 1
+
+
 def qualify_staging_rows(
     rows,
     radius_meters=50.0,
@@ -1086,25 +2281,9 @@ def qualify_staging_rows(
         if name:
             by_name[name].append(row)
 
-    stats = {
-        'raw_rows': len(rows),
-        'clusters': 0,
-        'qualified': 0,
-        'qualified_direct_phone': 0,
-        'qualified_companion_phone': 0,
-        'qualified_website_phone': 0,
-        'discarded_no_commercial': 0,
-        'discarded_no_phone': 0,
-        'website_candidates': 0,
-        'website_fetch_success': 0,
-        'website_phone_found': 0,
-        'website_no_phone': 0,
-        'website_fetch_failed': 0,
-        'website_unsafe': 0,
-        'merged_clusters': 0,
-    }
+    stats = _empty_qualification_stats(len(rows))
 
-    # First pass: build merged candidates per cluster, separate categories
+    # First pass: build merged candidates per cluster
     pending_candidates = []  # list of (cluster, candidate)
     for same_name_rows in by_name.values():
         clusters = cluster_rows(
@@ -1127,177 +2306,222 @@ def qualify_staging_rows(
                 stats['discarded_no_commercial'] += 1
                 continue
 
-            if len(cluster) > 1:
-                # will count merged after qualification success
-                pass
+            # brand/operator website audit (never qualifies the branch)
+            merged_tags = row_tags(candidate)
+            if isinstance(merged_tags, dict):
+                if first_present(merged_tags, ['brand:website']):
+                    stats['brand_website_seen'] += 1
+                if first_present(merged_tags, ['operator:website']):
+                    stats['operator_website_seen'] += 1
 
             pending_candidates.append((cluster, candidate))
 
-    # Separate A) already has phone, B) needs website, C) no phone no website
+    # Conceptual split (spec section 28):
+    # HAS_DIRECT_PHONE -> qualify immediately
+    # NEEDS_OFFICIAL_ENRICHMENT -> primary website or official social present
+    # NO_OFFICIAL_CHANNELS -> discard
     qualified = []
-    website_cache = {}
-    to_enrich = []  # list of candidates needing website
-    # For metrics tracking
-    enrich_results = []
+    to_enrich = []
 
     for cluster, cand in pending_candidates:
         has_phone = normalize_phone_for_catalog(cand.get('phone'), cand.get('country_code') or '') is not None
-        has_website = bool(normalize_website_url(cand.get('website')))
         if has_phone:
-            src = cand.get('_phone_source')
+            src = cand.get('_phone_source') or 'direct'
+            # normalize legacy markers
+            if src == 'direct':
+                src = 'DIRECT_OSM_PHONE'
+            elif src == 'companion':
+                src = 'COMPANION_OSM_PHONE'
             finalized = finalize_qualified_candidate(cand)
             if finalized:
                 qualified.append((cluster, finalized, src))
             else:
                 stats['discarded_no_phone'] += 1
-        elif has_website:
+            continue
+        tags = row_tags(cand)
+        needs = False
+        if isinstance(tags, dict) and tags:
+            if has_primary_website(tags) or has_official_social(tags):
+                needs = True
+        if not needs:
+            # fall back to candidate-level fields (merged cluster columns)
+            if normalize_website_url(cand.get('website')) or normalize_instagram_url(cand.get('instagram')):
+                needs = True
+        if needs:
             to_enrich.append((cluster, cand))
         else:
             stats['discarded_no_phone'] += 1
 
-    stats['website_candidates'] = len(to_enrich)
+    # Parallel enrichment: websites (workers=8) + social handled inside candidate flow.
+    # Website-level parallelism with shared caches; social fetches happen inline
+    # per candidate with their own cache (bounded by SOCIAL_MAX_WORKERS conceptually
+    # through sequential per-candidate fetches after website stage).
+    page_cache: Dict[str, WebsiteContactResult] = {}
+    hub_cache: Dict[str, WebsiteContactResult] = {}
+    social_cache: Dict[str, WebsiteContactResult] = {}
 
-    # Parallel enrichment for B)
     if to_enrich:
-        # Deduplicate by normalized website to avoid duplicate fetches
-        url_to_entries = defaultdict(list)
-        url_to_country = {}
+        # Count website candidates (primary website present)
+        website_cands = []
         for cluster, cand in to_enrich:
-            nurl = normalize_website_url(cand.get('website'))
-            url_to_entries[nurl].append((cluster, cand))
-            url_to_country[nurl] = cand.get('country_code') or ''
+            tags = row_tags(cand)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            if normalize_website_url(raw_site) if raw_site else None:
+                website_cands.append((cluster, cand))
+        stats['website_candidates'] = len(website_cands)
 
-        # Limit workers
-        max_workers = max(1, min(WEBSITE_MAX_WORKERS, len(url_to_entries)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_url = {}
-            for nurl, _entries in url_to_entries.items():
-                country = url_to_country.get(nurl, '')
-                # Submit fetch
-                future = executor.submit(fetch_website_contact_result, nurl, country)
-                future_to_url[future] = nurl
+        # Deduplicate website fetches by normalized URL (cache = single GET per URL)
+        url_to_country: Dict[str, str] = {}
+        for _, cand in website_cands:
+            tags = row_tags(cand)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            nurl = normalize_website_url(raw_site)
+            if nurl and nurl not in url_to_country:
+                url_to_country[nurl] = cand.get('country_code') or ''
 
-            # Collect results
-            url_results = {}
-            for future in as_completed(future_to_url):
-                nurl = future_to_url[future]
+        if url_to_country:
+            max_workers = max(1, min(WEBSITE_MAX_WORKERS, len(url_to_country)))
+
+            def _fetch_one(item):
+                nurl, country = item
+                # find a representative raw url for fallback semantics
+                raw_probe = nurl
+                for _, c in website_cands:
+                    tags = row_tags(c)
+                    raw_site = c.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+                    if raw_site and normalize_website_url(raw_site) == nurl:
+                        raw_probe = raw_site
+                        break
                 try:
-                    res = future.result()
+                    res = fetch_website_contact_result(nurl, country, raw_url=raw_probe, hub_cache=hub_cache)
                 except Exception:
                     res = WebsiteContactResult(None, None, None, 'FETCH_FAILED')
-                url_results[nurl] = res
-                website_cache[nurl] = res
+                return nurl, res
 
-            # Update metrics from url_results
-            for nurl, res in url_results.items():
-                if res.status == 'FOUND_PHONE':
-                    stats['website_phone_found'] += len(url_to_entries[nurl]) if False else 1  # count unique URLs? spec says count candidates? We'll count unique URLs for now but spec maybe expects per candidate
-                    stats['website_fetch_success'] += 1
-                elif res.status == 'NO_PHONE':
-                    stats['website_no_phone'] += 1
-                    stats['website_fetch_success'] += 1
-                elif res.status == 'FETCH_FAILED':
-                    stats['website_fetch_failed'] += 1
-                elif res.status == 'UNSAFE_URL':
-                    stats['website_unsafe'] += 1
-                elif res.status == 'INVALID_WEBSITE':
-                    stats['website_fetch_failed'] += 1
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_url = {
+                    executor.submit(_fetch_one, item): item[0]
+                    for item in url_to_country.items()
+                }
+                for future in as_completed(future_to_url):
+                    nurl = future_to_url[future]
+                    try:
+                        _, res = future.result()
+                    except Exception:
+                        res = WebsiteContactResult(None, None, None, 'FETCH_FAILED')
+                    page_cache[nurl] = res
 
-            # Need to adjust counts to per candidate not per unique URL for some metrics
-            # Recompute per candidate for phone found vs no phone
-            # But keep website_* as per unique website (makes sense for cache)
-            # For detailed per candidate qualification:
-            # Apply results to candidates
+        # Per-candidate application + social fallback (uses caches, no duplicate GETs)
         for cluster, cand in to_enrich:
-            nurl = normalize_website_url(cand.get('website'))
-            res = url_results.get(nurl)
-            if res is None:
-                res = website_cache.get(nurl) or WebsiteContactResult(None, None, None, 'FETCH_FAILED')
-            # apply to candidate
-            if res.phone:
-                cand['phone'] = res.phone
-            if res.email and not cand.get('email'):
-                cand['email'] = res.email
-            if res.instagram and not cand.get('instagram'):
-                cand['instagram'] = res.instagram
+            # website stage
+            tags = row_tags(cand)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            nurl = normalize_website_url(raw_site) if raw_site else None
+            res = page_cache.get(nurl) if nurl else None
+            website_status = res.status if res else None
+            if res and res.phone:
+                apply_contact_result_to_candidate(cand, res)
+            else:
+                if res:
+                    if res.email and not cand.get('email'):
+                        cand['email'] = res.email
+                    if res.instagram and not cand.get('instagram'):
+                        cand['instagram'] = res.instagram
+                # social fallback stages D/E (single GET each, cached)
+                if SOCIAL_PUBLIC_FETCH_ENABLED:
+                    # D: direct OSM social
+                    social = official_social_urls(tags) if isinstance(tags, dict) else {}
+                    attempted_social = False
+                    for platform in ('instagram', 'facebook'):
+                        surl = (social or {}).get(platform)
+                        if not surl and platform == 'instagram' and cand.get('instagram'):
+                            surl = normalize_instagram_url(cand.get('instagram'))
+                        if not surl:
+                            continue
+                        attempted_social = True
+                        if surl in social_cache:
+                            sres = social_cache[surl]
+                        else:
+                            max_social_workers = max(1, SOCIAL_MAX_WORKERS)
+                            _ = max_social_workers  # documents bounded concurrency
+                            sres = fetch_public_social_contact(surl, cand.get('country_code') or '')
+                            social_cache[surl] = sres
+                        if sres.phone:
+                            apply_contact_result_to_candidate(cand, sres)
+                            cand['_phone_source'] = 'OSM_DIRECT_SOCIAL_PUBLIC'
+                            break
+                    # E: sameAs social from official website
+                    if not normalize_phone_for_catalog(cand.get('phone'), cand.get('country_code') or ''):
+                        same_as_list = getattr(res, 'same_as_list', []) if res else []
+                        for surl in (same_as_list or [])[:20]:
+                            if classify_external_contact_url(surl) not in ('INSTAGRAM', 'FACEBOOK'):
+                                continue
+                            attempted_social = True
+                            if surl in social_cache:
+                                sres = social_cache[surl]
+                            else:
+                                sres = fetch_public_social_contact(surl, cand.get('country_code') or '')
+                                if sres.source_type == 'OSM_DIRECT_SOCIAL_PUBLIC':
+                                    sres.source_type = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+                                social_cache[surl] = sres
+                            if sres.phone:
+                                apply_contact_result_to_candidate(cand, sres)
+                                cand['_phone_source'] = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+                                break
+                    _ = attempted_social
+
+            finalized_src = cand.get('_phone_source') or (res.source_type if res and res.phone else None) or 'website'
             finalized = finalize_qualified_candidate(cand)
             if finalized:
-                qualified.append((cluster, finalized, 'website'))
-                # count website success already
+                qualified.append((cluster, finalized, finalized_src))
+                if nurl:
+                    stats['website_ok'] += 1
             else:
                 stats['discarded_no_phone'] += 1
-                # need to adjust website_no_phone etc already counted
-                pass
 
-        # Correct website metrics to per candidate counts for phone found vs no phone
-        # Re-evaluate: stats['website_phone_found'] should count candidates where website enrichment succeeded to provide phone
-        # For now recount:
-        # Reset and recount based on qualified website vs discarded
-        # Simpler: compute per candidate results
-        # We'll recompute website_phone_found as number of qualified website candidates
-        # Actually above we counted per unique URL; let's fix to per candidate where phone found
-        # Quick fix: recount after enrichment loop
-        # Count website qualified vs not
-        # Need to track separately
-        # To avoid double count, redo metrics for website_phone_found counting qualified website entries
-        # Let's adjust: count how many of to_enrich became qualified
-        qualified_website_count = sum(1 for _, fin, src in qualified if src == 'website')
-        # But qualified includes previous direct; need to know website qualified
-        # So compute separately
-        # We already have stats['website_phone_found'] per URL, fix to per candidate:
-        # Re-set:
-        # website_phone_found = qualified website phone
-        # website_no_phone = website_candidates - found - failed - unsafe
-        # Let's recompute safely:
-        # Already we have website_candidates
-        # For each candidate in to_enrich, check its result status
-        per_candidate_found = 0
-        per_candidate_no_phone = 0
-        per_candidate_failed = 0
-        per_candidate_unsafe = 0
+        # Per-candidate website outcome metrics (independent of final qualification:
+        # a website fetch failure still counts even if social later recovered a phone)
         for _, cand in to_enrich:
-            nurl = normalize_website_url(cand.get('website'))
-            # note cand has been mutated; but result stored in url_results
-            res = url_results.get(nurl)
-            if not res:
-                per_candidate_failed += 1
+            tags = row_tags(cand)
+            # NOTE: cand was mutated; recover original site from page_cache keys is
+            # unreliable, so recompute from tags/fields (website field unchanged by flow)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            nurl = normalize_website_url(raw_site) if raw_site else None
+            if not nurl:
+                continue
+            res = page_cache.get(nurl)
+            if res is None:
+                stats['website_fetch_failed'] += 1
             elif res.status == 'FOUND_PHONE':
-                # but finalize may still fail if phone invalid? but already validated
-                # check if candidate now has phone (meaning found)
-                has_phone_now = normalize_phone_for_catalog(cand.get('phone'), cand.get('country_code') or '') is not None
-                if has_phone_now:
-                    per_candidate_found += 1
-                else:
-                    per_candidate_failed += 1
+                stats['website_phone_found'] += 1
+                stats['website_fetch_success'] += 1
             elif res.status == 'NO_PHONE':
-                per_candidate_no_phone += 1
-            elif res.status == 'UNSAFE_URL':
-                per_candidate_unsafe += 1
-            elif res.status == 'FETCH_FAILED':
-                per_candidate_failed += 1
+                stats['website_no_phone'] += 1
+                stats['website_fetch_success'] += 1
             else:
-                per_candidate_failed += 1
-        stats['website_phone_found'] = per_candidate_found
-        stats['website_no_phone'] = per_candidate_no_phone
-        stats['website_fetch_failed'] = per_candidate_failed
-        stats['website_unsafe'] = per_candidate_unsafe
-        stats['website_fetch_success'] = per_candidate_found + per_candidate_no_phone
+                _count_fetch_status(stats, res.status)
 
-    # Now qualified list contains tuples; flatten and count merged
+        # Hub metrics: hubs actually fetched (hub_cache populated during website stage)
+        stats['contact_hub_candidates'] = len(hub_cache)
+        stats['contact_hub_phone_found'] = sum(1 for r in hub_cache.values() if r.phone)
+        # Social metrics
+        stats['social_candidates'] = len(social_cache)
+        stats['social_phone_found'] = sum(1 for r in social_cache.values() if r.phone)
+        stats['social_blocked'] = sum(1 for r in social_cache.values() if r.status == 'SOCIAL_BLOCKED')
+        # website_too_large/binary counted via detailed statuses
+        for res in page_cache.values():
+            if res.status in ('TOO_LARGE', 'BINARY_CONTENT'):
+                _count_fetch_status(stats, res.status)
+
+    # Now qualified list contains tuples; flatten and count merged + sources
     final_qualified_rows = []
     for cluster, fin, src in qualified:
         final_qualified_rows.append(fin)
         if len(cluster) > 1:
             stats['merged_clusters'] += 1
-        if src == 'direct':
-            stats['qualified_direct_phone'] += 1
-        elif src == 'companion':
-            stats['qualified_companion_phone'] += 1
-        elif src == 'website':
-            stats['qualified_website_phone'] += 1
+        _count_qualified_source(stats, src)
 
     stats['qualified'] = len(final_qualified_rows)
-    # discarded_no_phone already includes C plus failed enrichments, no need extra
 
     return final_qualified_rows, stats
 
@@ -1736,6 +2960,10 @@ def main():
             args.sync_run_id,
         )
 
+        coverage = audit_contact_coverage(raw_rows)
+
+        log('info', 'contact_coverage_summary', **coverage)
+
         qualified_rows, qualification_stats = (
             qualify_staging_rows(
                 raw_rows,
@@ -1750,8 +2978,19 @@ def main():
             clusters=qualification_stats['clusters'],
             qualified=qualification_stats['qualified'],
             qualified_direct_phone=qualification_stats.get('qualified_direct_phone', 0),
+            qualified_direct_whatsapp=qualification_stats.get('qualified_direct_whatsapp', 0),
+            qualified_direct_mobile=qualification_stats.get('qualified_direct_mobile', 0),
+            qualified_direct_sms=qualification_stats.get('qualified_direct_sms', 0),
             qualified_companion_phone=qualification_stats.get('qualified_companion_phone', 0),
             qualified_website_phone=qualification_stats.get('qualified_website_phone', 0),
+            qualified_website_whatsapp=qualification_stats.get('qualified_website_whatsapp', 0),
+            qualified_website_tel=qualification_stats.get('qualified_website_tel', 0),
+            qualified_website_jsonld=qualification_stats.get('qualified_website_jsonld', 0),
+            qualified_website_microdata=qualification_stats.get('qualified_website_microdata', 0),
+            qualified_website_text=qualification_stats.get('qualified_website_text', 0),
+            qualified_website_contact_page=qualification_stats.get('qualified_website_contact_page', 0),
+            qualified_contact_hub=qualification_stats.get('qualified_contact_hub', 0),
+            qualified_social_public=qualification_stats.get('qualified_social_public', 0),
             discarded_no_commercial=qualification_stats[
                 'discarded_no_commercial'
             ],
@@ -1759,11 +2998,28 @@ def main():
                 'discarded_no_phone'
             ],
             website_candidates=qualification_stats.get('website_candidates', 0),
+            website_ok=qualification_stats.get('website_ok', 0),
             website_fetch_success=qualification_stats.get('website_fetch_success', 0),
             website_phone_found=qualification_stats.get('website_phone_found', 0),
             website_no_phone=qualification_stats.get('website_no_phone', 0),
             website_fetch_failed=qualification_stats.get('website_fetch_failed', 0),
+            website_dns_failed=qualification_stats.get('website_dns_failed', 0),
+            website_timeout=qualification_stats.get('website_timeout', 0),
+            website_tls_failed=qualification_stats.get('website_tls_failed', 0),
+            website_http_403=qualification_stats.get('website_http_403', 0),
+            website_http_404=qualification_stats.get('website_http_404', 0),
+            website_http_429=qualification_stats.get('website_http_429', 0),
+            website_http_5xx=qualification_stats.get('website_http_5xx', 0),
+            website_too_large=qualification_stats.get('website_too_large', 0),
+            website_binary=qualification_stats.get('website_binary', 0),
             website_unsafe=qualification_stats.get('website_unsafe', 0),
+            contact_hub_candidates=qualification_stats.get('contact_hub_candidates', 0),
+            contact_hub_phone_found=qualification_stats.get('contact_hub_phone_found', 0),
+            social_candidates=qualification_stats.get('social_candidates', 0),
+            social_phone_found=qualification_stats.get('social_phone_found', 0),
+            social_blocked=qualification_stats.get('social_blocked', 0),
+            brand_website_seen=qualification_stats.get('brand_website_seen', 0),
+            operator_website_seen=qualification_stats.get('operator_website_seen', 0),
             merged_clusters=qualification_stats[
                 'merged_clusters'
             ],

@@ -14,6 +14,8 @@ nwr/mobile
 nwr/contact:mobile
 nwr/contact:whatsapp
 nwr/whatsapp
+nwr/contact:sms
+nwr/sms
 
 # Other contact
 nwr/website
@@ -23,3 +25,11 @@ nwr/email
 nwr/contact:email
 nwr/instagram
 nwr/contact:instagram
+nwr/facebook
+nwr/contact:facebook
+nwr/telegram
+nwr/contact:telegram
+
+# Lower-confidence official web references
+nwr/operator:website
+nwr/brand:website

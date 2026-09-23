@@ -12,6 +12,18 @@
   <node id="10" lat="-15.61" lon="-56.11" version="1" timestamp="2026-01-01T00:00:00Z"/>
   <node id="11" lat="-15.61" lon="-56.12" version="1" timestamp="2026-01-01T00:00:00Z"/>
   <node id="12" lat="-15.62" lon="-56.12" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="13" lat="-15.63" lon="-56.13" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Loja SMS Teste"/>
+    <tag k="shop" v="convenience"/>
+    <tag k="contact:sms" v="+5565999990001"/>
+  </node>
+  <node id="14" lat="-15.64" lon="-56.14" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Loja Social Teste"/>
+    <tag k="shop" v="beauty"/>
+    <tag k="contact:instagram" v="lojasocialteste"/>
+    <tag k="contact:facebook" v="lojasocialteste"/>
+    <tag k="website" v="https://social-teste.example.com"/>
+  </node>
   <way id="2" version="1" timestamp="2026-01-01T00:00:00Z">
     <nd ref="10"/>
     <nd ref="11"/>

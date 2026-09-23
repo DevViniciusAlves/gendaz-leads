@@ -318,7 +318,7 @@ class TestQualifyWithWebsite(unittest.TestCase):
     def test_website_whatsapp_enrichment(self):
         a = make_row(osm_id=1, name='Loja Web', phone=None, website='https://example.com', tags={'shop': 'barber'})
         html = '<a href="https://wa.me/5565999991111">wa</a>'
-        with patch.object(sync, 'fetch_public_html', return_value=html):
+        with patch.object(sync, 'fetch_public_html_result', return_value=sync.FetchResult(html, 'https://example.com', 'OK', 200)):
             with patch.object(sync, 'is_safe_public_url', return_value=True):
                 qualified, stats = sync.qualify_staging_rows([a], 50.0)
                 self.assertEqual(len(qualified), 1)
@@ -330,7 +330,7 @@ class TestQualifyWithWebsite(unittest.TestCase):
     def test_website_without_phone_discarded(self):
         a = make_row(osm_id=1, name='Loja Sem Phone Web', phone=None, website='https://example.com', tags={'shop': 'barber'})
         html = '<html>nothing</html>'
-        with patch.object(sync, 'fetch_public_html', return_value=html):
+        with patch.object(sync, 'fetch_public_html_result', return_value=sync.FetchResult(html, 'https://example.com', 'OK', 200)):
             with patch.object(sync, 'is_safe_public_url', return_value=True):
                 qualified, stats = sync.qualify_staging_rows([a], 50.0)
                 self.assertEqual(len(qualified), 0)
@@ -373,21 +373,21 @@ class TestQualifyWithWebsite(unittest.TestCase):
         # We'll patch fetch_public_html side effect: homepage returns html with contact link to private host
         homepage_html = '<a href="/contato">contato</a>'
         contact_html_should_not_be_fetched = None
-        def fake_fetch(url, redirect_count=0):
+        def fake_fetch(url, redirect_count=0, _retried=False):
             if url == 'https://example.com':
-                return homepage_html
+                return sync.FetchResult(homepage_html, url, 'OK', 200)
             if url == 'https://example.com/contato':
                 # should be blocked before fetch: our code checks is_safe_public_url before fetch
                 # we make is_safe_public_url return False for this contact url
-                return None
-            return None
+                return sync.FetchResult(None, url, 'UNSAFE_URL', None)
+            return sync.FetchResult(None, url, 'FETCH_FAILED', None)
         # patch is_safe_public_url to allow homepage but block contact
         original_safe = sync.is_safe_public_url
         def fake_safe(url):
             if 'contato' in url:
                 return False
             return original_safe(url) if 'example.com' not in url else True
-        with patch.object(sync, 'fetch_public_html', side_effect=fake_fetch):
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
             with patch.object(sync, 'is_safe_public_url', side_effect=fake_safe):
                 # also need _find_contact_page_urls to produce contato link
                 qualified, stats = sync.qualify_staging_rows([a], 50.0)
@@ -399,13 +399,13 @@ class TestQualifyWithWebsite(unittest.TestCase):
         a = make_row(osm_id=1, name='Loja Contato Page', phone=None, website='https://example.com', tags={'shop': 'barber'})
         homepage_html = '<a href="/contato">Contato</a><p>sem telefone</p>'
         contact_html = '<a href="tel:+55 65 99999-1111">call</a>'
-        def fake_fetch(url, redirect_count=0):
+        def fake_fetch(url, redirect_count=0, _retried=False):
             if url == 'https://example.com':
-                return homepage_html
+                return sync.FetchResult(homepage_html, url, 'OK', 200)
             if url == 'https://example.com/contato':
-                return contact_html
-            return None
-        with patch.object(sync, 'fetch_public_html', side_effect=fake_fetch):
+                return sync.FetchResult(contact_html, url, 'OK', 200)
+            return sync.FetchResult(None, url, 'FETCH_FAILED', None)
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
             with patch.object(sync, 'is_safe_public_url', return_value=True):
                 qualified, stats = sync.qualify_staging_rows([a], 50.0)
                 self.assertEqual(len(qualified), 1)
@@ -418,7 +418,7 @@ class TestQualifyWithWebsite(unittest.TestCase):
         # Different names, so separate clusters
         html = '<a href="https://wa.me/5565999991111">wa</a>'
         call_count = {'count': 0}
-        def counting_fetch(url, cc='br'):
+        def counting_fetch(url, cc='br', *args, **kwargs):
             call_count['count'] += 1
             return sync.WebsiteContactResult('5565999991111', None, None, 'FOUND_PHONE')
         # Patch fetch_website_contact_result instead of fetch_public_html to count per unique URL
@@ -434,7 +434,7 @@ class TestQualifyWithWebsite(unittest.TestCase):
         for i in range(10):
             rows.append(make_row(osm_id=100+i, name=f'Loja {i}', lat=-15.6 + i*0.001, lon=-56.1 + i*0.001, phone=None, website=f'https://example{i}.com', tags={'shop': 'barber'}))
         # Mock fetch to return simple phone quickly
-        def fake_result(nurl, cc):
+        def fake_result(nurl, cc, *args, **kwargs):
             return sync.WebsiteContactResult('5565999991111', None, None, 'FOUND_PHONE')
         max_workers_seen = {}
         original_executor = sync.ThreadPoolExecutor
@@ -452,6 +452,375 @@ class TestQualifyWithWebsite(unittest.TestCase):
                         self.assertIn('workers', max_workers_seen)
                         self.assertLessEqual(max_workers_seen['workers'], 2)
                         self.assertEqual(len(qualified), 10)
+
+
+# ===== Full OSM option B tests =====
+
+class TestDirectPhoneEvidence(unittest.TestCase):
+    def test_contact_whatsapp_source(self):
+        tags = {'contact:whatsapp': '+55 65 99999-9999'}
+        ev = sync.extract_direct_phone_evidence(tags, 'br')
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.phone, '5565999999999')
+        self.assertEqual(ev.source_type, 'DIRECT_OSM_WHATSAPP')
+
+    def test_phone_parens(self):
+        tags = {'phone': '(65) 3333-4444'}
+        ev = sync.extract_direct_phone_evidence(tags, 'br')
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.phone, '556533334444')
+        self.assertEqual(ev.source_type, 'DIRECT_OSM_PHONE')
+
+    def test_contact_mobile(self):
+        tags = {'contact:mobile': '65 99999-9999'}
+        ev = sync.extract_direct_phone_evidence(tags, 'br')
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.phone, '5565999999999')
+        self.assertEqual(ev.source_type, 'DIRECT_OSM_MOBILE')
+
+    def test_contact_sms_is_not_whatsapp(self):
+        tags = {'contact:sms': '65 99999-9999'}
+        ev = sync.extract_direct_phone_evidence(tags, 'br')
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.source_type, 'DIRECT_OSM_SMS')
+
+    def test_semicolon_second_value(self):
+        tags = {'phone': 'invalid;+55 65 99999-9999'}
+        ev = sync.extract_direct_phone_evidence(tags, 'br')
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.phone, '5565999999999')
+
+    def test_sms_qualifies_with_sms_source(self):
+        row = make_row(osm_id=21, name='Loja SMS', phone='65 99999-9999',
+                       tags={'shop': 'barber', 'contact:sms': '65 99999-9999'})
+        qualified, stats = sync.qualify_staging_rows([row], 50.0)
+        self.assertEqual(len(qualified), 1)
+        self.assertEqual(stats['qualified_direct_sms'], 1)
+        self.assertEqual(stats['qualified_direct_phone'], 1)
+
+    def test_whatsapp_qualifies_with_whatsapp_source(self):
+        row = make_row(osm_id=22, name='Loja Wpp', phone='+55 65 99999-9999',
+                       tags={'shop': 'barber', 'contact:whatsapp': '+55 65 99999-9999'})
+        qualified, stats = sync.qualify_staging_rows([row], 50.0)
+        self.assertEqual(len(qualified), 1)
+        self.assertEqual(stats['qualified_direct_whatsapp'], 1)
+
+
+class TestJsonLd(unittest.TestCase):
+    def test_localbusiness_telephone(self):
+        html = ('<script type="application/ld+json">'
+                '{"@type":"LocalBusiness","telephone":"+55 65 99999-9999"}'
+                '</script>')
+        self.assertEqual(sync.extract_jsonld_phone(html, 'br'), '5565999999999')
+
+    def test_contact_point(self):
+        html = ('<script type="application/ld+json">'
+                '{"@type":"Organization","contactPoint":{"@type":"ContactPoint","telephone":"+55 65 99999-9999"}}'
+                '</script>')
+        self.assertEqual(sync.extract_jsonld_phone(html, 'br'), '5565999999999')
+
+    def test_graph(self):
+        html = ('<script type="application/ld+json">'
+                '{"@graph":[{"@type":"LocalBusiness","telephone":"+55 65 99999-9999"}]}'
+                '</script>')
+        self.assertEqual(sync.extract_jsonld_phone(html, 'br'), '5565999999999')
+
+    def test_malformed_ignored(self):
+        html = '<script type="application/ld+json">{invalid json</script>'
+        self.assertEqual(sync.extract_jsonld_blocks(html), [])
+        self.assertIsNone(sync.extract_jsonld_phone(html, 'br'))
+
+    def test_jsonld_enrichment_source(self):
+        html = ('<script type="application/ld+json">'
+                '{"@type":"LocalBusiness","telephone":"+55 65 99999-9999"}'
+                '</script>')
+        phone, kind = sync._extract_phone_with_source(html, 'br')
+        self.assertEqual(phone, '5565999999999')
+        self.assertEqual(kind, 'JSONLD_PHONE')
+        with patch.object(sync, 'fetch_public_html_result',
+                          return_value=sync.FetchResult(html, 'https://example.com', 'OK', 200)):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                res = sync.fetch_website_contact_result('https://example.com', 'br')
+                self.assertEqual(res.status, 'FOUND_PHONE')
+                self.assertEqual(res.phone, '5565999999999')
+                self.assertEqual(res.source_type, 'OSM_WEBSITE_JSONLD_PHONE')
+
+    def test_jsonld_qualifies(self):
+        a = make_row(osm_id=31, name='Loja JSONLD', phone=None, website='https://example.com',
+                     tags={'shop': 'barber'})
+        html = ('<script type="application/ld+json">'
+                '{"@type":"LocalBusiness","telephone":"+55 65 99999-9999"}'
+                '</script>')
+        with patch.object(sync, 'fetch_public_html_result',
+                          return_value=sync.FetchResult(html, 'https://example.com', 'OK', 200)):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                qualified, stats = sync.qualify_staging_rows([a], 50.0)
+                self.assertEqual(len(qualified), 1)
+                self.assertEqual(stats['qualified_website_jsonld'], 1)
+
+
+class TestMicrodata(unittest.TestCase):
+    def test_meta_itemprop(self):
+        html = '<meta itemprop="telephone" content="+55 65 99999-9999">'
+        self.assertEqual(sync.extract_microdata_phone(html, 'br'), '5565999999999')
+
+    def test_anchor_itemprop_tel(self):
+        html = '<a itemprop="telephone" href="tel:+5565999999999">call</a>'
+        self.assertEqual(sync.extract_microdata_phone(html, 'br'), '5565999999999')
+
+    def test_microdata_qualifies(self):
+        a = make_row(osm_id=32, name='Loja Micro', phone=None, website='https://example.com',
+                     tags={'shop': 'barber'})
+        html = '<meta itemprop="telephone" content="+55 65 99999-9999">'
+        with patch.object(sync, 'fetch_public_html_result',
+                          return_value=sync.FetchResult(html, 'https://example.com', 'OK', 200)):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                qualified, stats = sync.qualify_staging_rows([a], 50.0)
+                self.assertEqual(len(qualified), 1)
+                self.assertEqual(stats['qualified_website_microdata'], 1)
+
+
+class TestContactHub(unittest.TestCase):
+    def test_hub_follow_recovers(self):
+        home = '<a href="https://linktr.ee/barbeariax">link</a>'
+        hub = '<a href="https://wa.me/5565999999999">wa</a>'
+
+        def fake_fetch(url, redirect_count=0, _retried=False):
+            if 'linktr.ee' in url:
+                return sync.FetchResult(hub, url, 'OK', 200)
+            return sync.FetchResult(home, url, 'OK', 200)
+
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                res = sync.fetch_website_contact_result('https://example.com', 'br')
+                self.assertEqual(res.phone, '5565999999999')
+                self.assertEqual(res.source_type, 'OSM_WEBSITE_CONTACT_HUB')
+
+    def test_random_domain_not_followed(self):
+        home = '<a href="https://random-domain.example/page">link</a>'
+
+        def fake_fetch(url, redirect_count=0, _retried=False):
+            return sync.FetchResult(home, url, 'OK', 200)
+
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                res = sync.fetch_website_contact_result('https://example.com', 'br')
+                self.assertIsNone(res.phone)
+                self.assertEqual(res.status, 'NO_PHONE')
+
+    def test_hub_cache_single_get(self):
+        home = '<a href="https://linktr.ee/shared">link</a>'
+        hub = '<a href="https://wa.me/5565999999999">wa</a>'
+        calls = {'hub': 0}
+
+        def fake_fetch(url, redirect_count=0, _retried=False):
+            if 'linktr.ee' in url:
+                calls['hub'] += 1
+                return sync.FetchResult(hub, url, 'OK', 200)
+            return sync.FetchResult(home, url, 'OK', 200)
+
+        a1 = make_row(osm_id=41, name='Loja Hub A', phone=None, website='https://a.example.com',
+                      tags={'shop': 'barber'})
+        a2 = make_row(osm_id=42, name='Loja Hub B', phone=None, website='https://b.example.com',
+                      tags={'shop': 'barber'})
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                qualified, stats = sync.qualify_staging_rows([a1, a2], 50.0)
+                self.assertEqual(len(qualified), 2)
+                self.assertEqual(calls['hub'], 1)
+                self.assertEqual(stats['qualified_contact_hub'], 2)
+
+
+class TestSameAs(unittest.TestCase):
+    def test_sameas_classification(self):
+        blocks = [{'sameAs': ['https://instagram.com/barbeariax',
+                              'https://linktr.ee/barbeariax',
+                              'https://random-domain.example/x']}]
+        urls = sync.extract_same_as_urls(blocks)
+        self.assertEqual(len(urls), 3)
+        kinds = [sync.classify_external_contact_url(u) for u in urls]
+        self.assertIn('INSTAGRAM', kinds)
+        self.assertIn('CONTACT_HUB', kinds)
+        self.assertIn('OTHER', kinds)
+
+    def test_sameas_other_not_followed(self):
+        self.assertEqual(sync.classify_external_contact_url('https://random-domain.example/x'), 'OTHER')
+        self.assertFalse(sync.is_contact_hub_url('https://random-domain.example/x'))
+
+
+class TestSocialFetch(unittest.TestCase):
+    def _social_row(self, osm_id, name):
+        return make_row(osm_id=osm_id, name=name, phone=None, website=None,
+                        tags={'shop': 'barber', 'contact:instagram': 'barbeariax'})
+
+    def test_direct_social_recovers(self):
+        a = self._social_row(51, 'Loja Social A')
+        html = '<a href="https://wa.me/5565999999999">wa</a>'
+
+        def fake_fetch(url, redirect_count=0, _retried=False):
+            return sync.FetchResult(html, url, 'OK', 200)
+
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                qualified, stats = sync.qualify_staging_rows([a], 50.0)
+                self.assertEqual(len(qualified), 1)
+                self.assertEqual(stats['qualified_social_public'], 1)
+                self.assertEqual(stats['social_phone_found'], 1)
+
+    def test_social_403_blocked(self):
+        a = self._social_row(52, 'Loja Social B')
+
+        def fake_fetch(url, redirect_count=0, _retried=False):
+            return sync.FetchResult(None, url, 'HTTP_403', 403)
+
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                qualified, stats = sync.qualify_staging_rows([a], 50.0)
+                self.assertEqual(len(qualified), 0)
+                self.assertEqual(stats['social_blocked'], 1)
+
+    def test_social_429_blocked_no_aggressive_retry(self):
+        a = self._social_row(53, 'Loja Social C')
+        calls = {'n': 0}
+
+        def fake_fetch(url, redirect_count=0, _retried=False):
+            calls['n'] += 1
+            return sync.FetchResult(None, url, 'HTTP_429', 429)
+
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                qualified, stats = sync.qualify_staging_rows([a], 50.0)
+                self.assertEqual(len(qualified), 0)
+                self.assertEqual(calls['n'], 1)
+                self.assertEqual(stats['social_blocked'], 1)
+
+    def test_social_cache_single_get(self):
+        a1 = self._social_row(54, 'Loja Social D')
+        a2 = make_row(osm_id=55, name='Loja Social E', phone=None, website=None,
+                      tags={'shop': 'beauty', 'contact:instagram': 'barbeariax'})
+        html = '<a href="https://wa.me/5565999999999">wa</a>'
+        calls = {'n': 0}
+
+        def fake_fetch(url, redirect_count=0, _retried=False):
+            calls['n'] += 1
+            return sync.FetchResult(html, url, 'OK', 200)
+
+        with patch.object(sync, 'fetch_public_html_result', side_effect=fake_fetch):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                qualified, stats = sync.qualify_staging_rows([a1, a2], 50.0)
+                self.assertEqual(len(qualified), 2)
+                self.assertEqual(calls['n'], 1)
+
+    def test_normalize_instagram_variants(self):
+        self.assertEqual(sync.normalize_instagram_url('https://instagram.com/empresa'),
+                         'https://www.instagram.com/empresa/')
+        self.assertEqual(sync.normalize_instagram_url('empresa'), 'https://www.instagram.com/empresa/')
+        self.assertEqual(sync.normalize_instagram_url('@empresa'), 'https://www.instagram.com/empresa/')
+
+
+class TestSsrfExtended(unittest.TestCase):
+    def test_all_private_blocked(self):
+        for url in ['http://localhost/', 'http://127.0.0.1/', 'http://10.0.0.1/',
+                    'http://172.16.0.1/', 'http://192.168.0.1/',
+                    'http://169.254.169.254/', 'http://[::1]/']:
+            res = sync.fetch_public_html_result(url)
+            self.assertEqual(res.status, 'UNSAFE_URL', url)
+
+    def test_redirect_public_to_private_blocked(self):
+        def fake_safe(url):
+            if 'evil' in url:
+                return False
+            return True
+
+        with patch.object(sync, 'is_safe_public_url', side_effect=fake_safe):
+            with patch('urllib.request.OpenerDirector.open') as mock_open:
+                err = __import__('urllib.error', fromlist=['HTTPError']).HTTPError(
+                    'http://example.com/', 302, 'Found', {'Location': 'http://evil-private/'}, None)
+                mock_open.side_effect = err
+                res = sync.fetch_public_html_result('http://example.com/')
+                self.assertEqual(res.status, 'UNSAFE_URL')
+
+    def test_hub_redirect_private_blocked(self):
+        with patch.object(sync, 'is_safe_public_url', side_effect=lambda u: 'linktr.ee' in u):
+            with patch('urllib.request.OpenerDirector.open') as mock_open:
+                err = __import__('urllib.error', fromlist=['HTTPError']).HTTPError(
+                    'https://linktr.ee/x', 302, 'Found', {'Location': 'http://10.0.0.1/'}, None)
+                mock_open.side_effect = err
+                res = sync.fetch_contact_hub_result('https://linktr.ee/x', 'br', cache={})
+                self.assertEqual(res.status, 'UNSAFE_URL')
+
+    def test_social_redirect_private_blocked(self):
+        with patch.object(sync, 'is_safe_public_url', side_effect=lambda u: 'instagram.com' in u):
+            with patch('urllib.request.OpenerDirector.open') as mock_open:
+                err = __import__('urllib.error', fromlist=['HTTPError']).HTTPError(
+                    'https://www.instagram.com/x/', 302, 'Found', {'Location': 'http://192.168.0.1/'}, None)
+                mock_open.side_effect = err
+                res = sync.fetch_public_social_contact('https://www.instagram.com/x/', 'br')
+                self.assertIn(res.status, ('UNSAFE_URL', 'SOCIAL_BLOCKED', 'FETCH_FAILED'))
+
+
+class TestBrandOperator(unittest.TestCase):
+    def test_brand_website_does_not_qualify(self):
+        a = make_row(osm_id=61, name='Loja Marca', phone=None, website=None,
+                     tags={'shop': 'barber', 'brand:website': 'https://marca.com'})
+        with patch.object(sync, 'fetch_public_html_result') as mock_fetch:
+            qualified, stats = sync.qualify_staging_rows([a], 50.0)
+            mock_fetch.assert_not_called()
+            self.assertEqual(len(qualified), 0)
+            self.assertEqual(stats['brand_website_seen'], 1)
+            self.assertEqual(stats['discarded_no_phone'], 1)
+
+    def test_operator_website_does_not_qualify(self):
+        a = make_row(osm_id=62, name='Loja Operador', phone=None, website=None,
+                     tags={'shop': 'barber', 'operator:website': 'https://operadora.com'})
+        with patch.object(sync, 'fetch_public_html_result') as mock_fetch:
+            qualified, stats = sync.qualify_staging_rows([a], 50.0)
+            mock_fetch.assert_not_called()
+            self.assertEqual(len(qualified), 0)
+            self.assertEqual(stats['operator_website_seen'], 1)
+
+
+class TestCoverageAudit(unittest.TestCase):
+    def test_audit_counts(self):
+        rows = [
+            make_row(osm_id=71, name='A', phone='+5565999991111',
+                     tags={'shop': 'barber', 'phone': '+5565999991111'}),
+            make_row(osm_id=72, name='B', phone=None, website='https://b.com',
+                     tags={'shop': 'barber', 'contact:phone': '+5565999992222',
+                           'website': 'https://b.com', 'contact:sms': '65999992222',
+                           'instagram': 'lojab', 'facebook': 'lojab',
+                           'brand:website': 'https://marca.com'}),
+        ]
+        cov = sync.audit_contact_coverage(rows)
+        self.assertEqual(cov['raw_rows'], 2)
+        self.assertEqual(cov['tag_phone'], 1)
+        self.assertEqual(cov['tag_contact_phone'], 1)
+        self.assertEqual(cov['tag_contact_sms'], 1)
+        self.assertEqual(cov['tag_website'], 1)
+        self.assertEqual(cov['tag_instagram'], 1)
+        self.assertEqual(cov['tag_facebook'], 1)
+        self.assertEqual(cov['tag_brand_website'], 1)
+        self.assertEqual(cov['with_any_direct_phone_tag'], 2)
+        self.assertEqual(cov['with_primary_website'], 1)
+        self.assertEqual(cov['with_social_channel'], 1)
+        self.assertEqual(cov['with_any_official_channel'], 2)
+        self.assertEqual(cov['without_any_official_channel'], 0)
+
+
+class TestFetchFailureClassification(unittest.TestCase):
+    def test_dns_failed(self):
+        with patch('socket.getaddrinfo', side_effect=socket.gaierror('dns fail')):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                res = sync.fetch_public_html_result('https://nonexistent.invalid/')
+                self.assertIn(res.status, ('DNS_FAILED', 'FETCH_FAILED'))
+
+    def test_403_404_429_5xx(self):
+        import urllib.error
+        for code, expected in [(403, 'HTTP_403'), (404, 'HTTP_404'), (429, 'HTTP_429'), (503, 'HTTP_5XX')]:
+            with patch('urllib.request.OpenerDirector.open',
+                       side_effect=urllib.error.HTTPError('https://example.com/', code, 'err', {}, None)):
+                res = sync.fetch_public_html_result('https://example.com/')
+                self.assertEqual(res.status, expected, f'code={code}')
 
 
 if __name__ == '__main__':
