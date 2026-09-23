@@ -273,7 +273,7 @@ public class CampaignLeadDiscoveryService {
                 NicheMapper.resolve(campaign.getNiche());
 
         boolean hasStructured =
-                !nicheStrategy.tagFilters().isEmpty();
+                !nicheStrategy.structuredRules().isEmpty();
 
         if (hasStructured) {
             structuredQueue.add(rootRegion);

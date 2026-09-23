@@ -1238,4 +1238,31 @@ class CampaignLeadDiscoveryServiceTest {
         c.setPhone(phone);
         return c;
     }
+
+    @Test
+    void expandedClassifierProviderReturnsMoreCandidatesWithFirstDuplicateThenThreeNewComplete() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+        // Simulates expanded classifier: 4 candidates where first is duplicate, next 3 new
+        LeadCandidate dup = newCandidate("Bella Esmalteria", "node/1", "+55 65 9999-1111");
+        LeadCandidate n1 = newCandidate("Studio Nail 2", "node/2", "+55 65 9999-2222");
+        LeadCandidate n2 = newCandidate("Manicure Top", "node/3", "+55 65 9999-3333");
+        LeadCandidate n3 = newCandidate("Esmalteria Bella 3", "node/4", "+55 65 9999-4444");
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(3), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(dup, n1, n2, n3),
+                        4, 4, false
+                ));
+        Lead existing = Lead.builder().id(99L).businessName("Bella Esmalteria").phone("+55 65 9999-1111").build();
+        when(deduplicationService.check(any()))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        var result = service.discoverAndPersist(campaign, 3);
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+        assertEquals(3, result.acceptedThisRun());
+    }
 }

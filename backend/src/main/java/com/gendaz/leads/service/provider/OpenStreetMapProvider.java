@@ -245,26 +245,112 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 + ")";
     }
 
-private String buildStructuredTagFilter(String rawFilter) {
-        StringBuilder filterBuilder = new StringBuilder();
+    private String buildOverpassCondition(
+            NicheMapper.TagCondition condition
+    ) {
+        String key =
+                escapeTag(
+                        condition.key()
+                );
 
-        for (String part : rawFilter.split(",")) {
-            String[] kv = part.split("=", 2);
+        List<String> values =
+                condition.acceptedValues();
 
-            if (kv.length != 2 || kv[0].isBlank() || kv[1].isBlank()) {
-                continue;
+        if (condition.mode()
+                == NicheMapper.MatchMode.EXACT) {
+
+            if (values.size() == 1) {
+                return "[\""
+                        + key
+                        + "\"=\""
+                        + escapeTag(
+                        values.get(0)
+                )
+                        + "\"]";
             }
 
-            filterBuilder.append(
-                    String.format(
-                            "[\"%s\"=\"%s\"]",
-                            escapeTag(kv[0].trim()),
-                            escapeTag(kv[1].trim())
+            String alternatives =
+                    values.stream()
+                            .map(
+                                    this::escapeRegexLiteral
+                            )
+                            .collect(
+                                    java.util.stream.Collectors
+                                            .joining("|")
+                            );
+
+            return "[\""
+                    + key
+                    + "\"~\"^("
+                    + alternatives
+                    + ")$\",i]";
+        }
+
+        String alternatives =
+                values.stream()
+                        .map(
+                                this::escapeRegexLiteral
+                        )
+                        .collect(
+                                java.util.stream.Collectors
+                                        .joining("|")
+                        );
+
+        return "[\""
+                + key
+                + "\"~\"(^|;)[ ]*("
+                + alternatives
+                + ")[ ]*(;|$)\",i]";
+    }
+
+    private String escapeRegexLiteral(
+            String value
+    ) {
+        if (value == null) {
+            return "";
+        }
+
+        return value.replaceAll(
+                "([\\\\.^$|?*+()\\[\\]{}])",
+                "\\\\$1"
+        );
+    }
+
+    private String buildOverpassRuleFilter(
+            NicheMapper.NicheRule rule
+    ) {
+        StringBuilder builder =
+                new StringBuilder();
+
+        for (
+                NicheMapper.TagCondition condition
+                : rule.allOf()
+        ) {
+            builder.append(
+                    buildOverpassCondition(
+                            condition
                     )
             );
         }
 
-        return filterBuilder.isEmpty() ? null : filterBuilder.toString();
+        return builder.toString();
+    }
+
+    private String buildOverpassNameRegex(
+            List<String> aliases
+    ) {
+        return aliases.stream()
+                .filter(v ->
+                        v != null
+                                && !v.isBlank()
+                )
+                .map(
+                        this::escapeRegexLiteral
+                )
+                .collect(
+                        java.util.stream.Collectors
+                                .joining("|")
+                );
     }
 
     @Override
@@ -803,7 +889,11 @@ private String buildStructuredTagFilter(String rawFilter) {
     ) {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
 
-        if (strategy.tagFilters().isEmpty()) {
+        if (
+                strategy
+                        .structuredRules()
+                        .isEmpty()
+        ) {
             return null;
         }
 
@@ -821,16 +911,21 @@ private String buildStructuredTagFilter(String rawFilter) {
 
         String locationFilter = buildLocationFilter(geographicStrategy, region);
 
-        for (String baseFilter : strategy.tagFilters()) {
+        for (
+                NicheMapper.NicheRule rule
+                : strategy.structuredRules()
+        ) {
+            String filter =
+                    buildOverpassRuleFilter(
+                            rule
+                    );
 
-            String tagFilter = buildStructuredTagFilter(baseFilter);
-
-            if (tagFilter == null || tagFilter.isBlank()) {
+            if (filter.isBlank()) {
                 continue;
             }
 
             sb.append("nwr")
-                    .append(tagFilter)
+                    .append(filter)
                     .append(locationFilter)
                     .append(";");
         }
@@ -852,9 +947,19 @@ private String buildStructuredTagFilter(String rawFilter) {
     ) {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
 
-        String fallbackRegex = strategy.fallbackNameRegex();
+        NicheMapper.NameFallback fallback =
+                strategy.nameFallback();
 
-        if (fallbackRegex == null || fallbackRegex.isBlank() || fallbackRegex.equals("''")) {
+        if (fallback == null || !fallback.enabled()) {
+            return null;
+        }
+
+        String nameRegex =
+                buildOverpassNameRegex(
+                        fallback.aliases()
+                );
+
+        if (nameRegex == null || nameRegex.isBlank()) {
             return null;
         }
 
@@ -872,11 +977,24 @@ private String buildStructuredTagFilter(String rawFilter) {
 
         sb.append("(");
 
-        sb.append("nwr[\"name\"~\"")
-                .append(fallbackRegex)
-                .append("\",i]")
-                .append(locationFilter)
-                .append(";");
+        if (!fallback.requiresContext()) {
+            sb.append("nwr[\"name\"~\"")
+                    .append(nameRegex)
+                    .append("\",i]")
+                    .append(locationFilter)
+                    .append(";");
+        } else {
+            for (NicheMapper.NicheRule ctxRule : fallback.contextAnyOf()) {
+                String ctxFilter = buildOverpassRuleFilter(ctxRule);
+                sb.append("nwr")
+                        .append(ctxFilter)
+                        .append("[\"name\"~\"")
+                        .append(nameRegex)
+                        .append("\",i]")
+                        .append(locationFilter)
+                        .append(";");
+            }
+        }
 
         sb.append(");out center tags ")
                 .append(Math.min(limit, MAX_OUT))

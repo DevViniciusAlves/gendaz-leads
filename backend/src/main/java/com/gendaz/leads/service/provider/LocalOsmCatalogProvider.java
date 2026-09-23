@@ -178,10 +178,11 @@ public class LocalOsmCatalogProvider {
         for (OsmPlace place : basePlaces) {
             if (!matchesStrategy(place, strategy)) {
                 log.warn(
-                        "[osm-catalog] candidate_rejected reason=niche_mismatch sourceId={}/{} niche={}",
+                        "[osm-catalog] candidate_rejected reason=niche_mismatch canonicalNiche={} sourceId={}/{} businessName={}",
+                        strategy.canonicalName(),
                         place.getOsmType(),
                         place.getOsmId(),
-                        niche
+                        place.getBusinessName()
                 );
                 continue;
             }
@@ -196,10 +197,11 @@ public class LocalOsmCatalogProvider {
         boolean hasMore = rawRows == pageLimit;
 
         log.info(
-                "[osm-catalog] catalog_page regionId={} city={} niche={} offset={} rawRows={} candidates={} pageLimit={} hasMore={}",
+                "[osm-catalog] catalog_page regionId={} city={} niche={} canonicalNiche={} offset={} rawRows={} candidates={} pageLimit={} hasMore={}",
                 region.getId(),
                 city,
                 niche,
+                strategy.canonicalName(),
                 safeOffset,
                 rawRows,
                 candidates.size(),
@@ -247,43 +249,42 @@ public class LocalOsmCatalogProvider {
 
         boolean wrotePredicate = false;
 
-        List<String> tagFilters = strategy.tagFilters();
-
         if (
-                tagFilters != null
-                        && !tagFilters.isEmpty()
+                strategy.structuredRules() != null
+                        && !strategy
+                        .structuredRules()
+                        .isEmpty()
         ) {
-            appendStructuredPredicate(
-                    sql,
-                    params,
-                    tagFilters
-            );
-
-            wrotePredicate = true;
+            wrotePredicate =
+                    appendRulesPredicate(
+                            sql,
+                            params,
+                            strategy.structuredRules(),
+                            "structured"
+                    );
         }
 
-        String fallbackRegex = normalizeFallbackRegex(
-                strategy.fallbackNameRegex()
-        );
-
         if (
-                fallbackRegex != null
-                        && !fallbackRegex.isBlank()
+                strategy.nameFallback() != null
+                        && strategy
+                        .nameFallback()
+                        .enabled()
         ) {
             if (wrotePredicate) {
                 sql.append(" OR ");
             }
 
-            sql.append(
-                    "normalized_name ~* :fallbackRegex"
-            );
+            boolean fallbackWritten =
+                    appendNameFallbackPredicate(
+                            sql,
+                            params,
+                            strategy.nameFallback(),
+                            "fallback"
+                    );
 
-            params.addValue(
-                    "fallbackRegex",
-                    fallbackRegex
-            );
-
-            wrotePredicate = true;
+            wrotePredicate =
+                    wrotePredicate
+                            || fallbackWritten;
         }
 
         if (!wrotePredicate) {
@@ -306,60 +307,163 @@ public class LocalOsmCatalogProvider {
         );
     }
 
-    private void appendStructuredPredicate(
+    private boolean appendRulesPredicate(
             StringBuilder sql,
             MapSqlParameterSource params,
-            List<String> tagFilters
+            List<NicheMapper.NicheRule> rules,
+            String prefix
     ) {
-        for (int i = 0; i < tagFilters.size(); i++) {
-            if (i > 0) sql.append(" OR ");
-            String filter = tagFilters.get(i);
-            if (filter.contains(",")) {
-                // AND condition
-                String[] parts = filter.split(",");
-                sql.append("(");
-                for (int j = 0; j < parts.length; j++) {
-                    if (j > 0) sql.append(" AND ");
-                    String[] kv = parts[j].split("=", 2);
-                    String key = kv[0];
-                    String value = kv[1];
-                    String paramKey = "key" + i + "_" + j;
-                    String paramVal = "val" + i + "_" + j;
-                    sql.append("tags->> :").append(paramKey).append(" = :").append(paramVal);
-                    params.addValue(paramKey, key);
-                    params.addValue(paramVal, value);
-                }
-                sql.append(")");
-            } else {
-                String[] kv = filter.split("=", 2);
-                String key = kv[0];
-                String value = kv[1];
-                String paramKey = "key" + i;
-                String paramVal = "val" + i;
-                sql.append("tags->> :").append(paramKey).append(" = :").append(paramVal);
-                params.addValue(paramKey, key);
-                params.addValue(paramVal, value);
+        if (rules == null || rules.isEmpty()) {
+            return false;
+        }
+
+        sql.append("(");
+
+        for (int i = 0; i < rules.size(); i++) {
+            if (i > 0) {
+                sql.append(" OR ");
             }
+
+            appendRulePredicate(
+                    sql,
+                    params,
+                    rules.get(i),
+                    prefix + "_r" + i
+            );
+        }
+
+        sql.append(")");
+
+        return true;
+    }
+
+    private void appendRulePredicate(
+            StringBuilder sql,
+            MapSqlParameterSource params,
+            NicheMapper.NicheRule rule,
+            String prefix
+    ) {
+        sql.append("(");
+
+        List<NicheMapper.TagCondition> conditions =
+                rule.allOf();
+
+        for (int i = 0; i < conditions.size(); i++) {
+            if (i > 0) {
+                sql.append(" AND ");
+            }
+
+            appendConditionPredicate(
+                    sql,
+                    params,
+                    conditions.get(i),
+                    prefix + "_c" + i
+            );
+        }
+
+        sql.append(")");
+    }
+
+    private void appendConditionPredicate(
+            StringBuilder sql,
+            MapSqlParameterSource params,
+            NicheMapper.TagCondition condition,
+            String prefix
+    ) {
+        String keyParam =
+                prefix + "_key";
+
+        String valuesParam =
+                prefix + "_values";
+
+        params.addValue(
+                keyParam,
+                condition.key()
+        );
+
+        params.addValue(
+                valuesParam,
+                condition.acceptedValues()
+        );
+
+        if (condition.mode() == NicheMapper.MatchMode.EXACT) {
+            sql.append("LOWER(COALESCE(tags->> :")
+                    .append(keyParam)
+                    .append(", '')) IN (:")
+                    .append(valuesParam)
+                    .append(")");
+        } else if (condition.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN) {
+            sql.append("EXISTS (SELECT 1 FROM unnest(string_to_array(LOWER(COALESCE(tags->> :")
+                    .append(keyParam)
+                    .append(", '')), ';')) AS token(value) WHERE BTRIM(token.value) IN (:")
+                    .append(valuesParam)
+                    .append("))");
         }
     }
 
-    private String normalizeFallbackRegex(String regex) {
-        if (regex == null || regex.isBlank()) {
-            return "";
+    private boolean appendNameFallbackPredicate(
+            StringBuilder sql,
+            MapSqlParameterSource params,
+            NicheMapper.NameFallback fallback,
+            String prefix
+    ) {
+        if (
+                fallback == null
+                        || !fallback.enabled()
+        ) {
+            return false;
         }
 
-        String[] parts = regex.split("\\|");
-        List<String> normalized = new ArrayList<>();
+        sql.append("(");
 
-        for (String part : parts) {
-            String value = normalizeForCompare(part);
+        if (fallback.requiresContext()) {
+            appendRulesPredicate(
+                    sql,
+                    params,
+                    fallback.contextAnyOf(),
+                    prefix + "_ctx"
+            );
 
-            if (!value.isBlank()) {
-                normalized.add(value);
+            sql.append(" AND ");
+        }
+
+        sql.append("(");
+
+        for (int i = 0; i < fallback.aliases().size(); i++) {
+            if (i > 0) {
+                sql.append(" OR ");
             }
+
+            String param =
+                    prefix + "_name_" + i;
+
+            String alias =
+                    fallback.aliases().get(i);
+
+            params.addValue(
+                    param,
+                    "% " + alias + " %"
+            );
+
+            sql.append(
+                    "(' ' || "
+                            + "REGEXP_REPLACE("
+                            + "REGEXP_REPLACE("
+                            + "LOWER(COALESCE(normalized_name, '')), "
+                            + "'[^[:alnum:] ]+', ' ', 'g'"
+                            + "), "
+                            + "'[[:space:]]+', ' ', 'g'"
+                            + ") "
+                            + "|| ' ') LIKE :"
+            )
+            .append(param);
         }
 
-        return String.join("|", normalized);
+        sql.append(")");
+
+        sql.append(")");
+
+        return true;
     }
 
     private OsmPlace mapRow(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
@@ -396,56 +500,196 @@ public class LocalOsmCatalogProvider {
         return p;
     }
 
+    private boolean matchesCondition(
+            JsonNode tags,
+            NicheMapper.TagCondition condition
+    ) {
+        String actual =
+                tag(
+                        tags,
+                        condition.key()
+                );
+
+        if (
+                actual == null
+                        || actual.isBlank()
+        ) {
+            return false;
+        }
+
+        if (condition.mode() == NicheMapper.MatchMode.EXACT) {
+            return condition
+                    .acceptedValues()
+                    .stream()
+                    .anyMatch(
+                            expected ->
+                                    actual.trim()
+                                            .equalsIgnoreCase(
+                                                    expected
+                                            )
+                    );
+        } else if (condition.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN) {
+            java.util.Set<String> tokens =
+                    java.util.Arrays
+                            .stream(
+                                    actual.split(";")
+                            )
+                            .map(String::trim)
+                            .filter(v ->
+                                    !v.isBlank()
+                            )
+                            .map(v ->
+                                    v.toLowerCase(
+                                            Locale.ROOT
+                                    )
+                            )
+                            .collect(
+                                    java.util.stream.Collectors
+                                            .toSet()
+                            );
+
+            return condition
+                    .acceptedValues()
+                    .stream()
+                    .anyMatch(tokens::contains);
+        } else {
+            return false;
+        }
+    }
+
+    private boolean matchesRule(
+            JsonNode tags,
+            NicheMapper.NicheRule rule
+    ) {
+        return rule
+                .allOf()
+                .stream()
+                .allMatch(
+                        condition ->
+                                matchesCondition(
+                                        tags,
+                                        condition
+                                )
+                );
+    }
+
+    private boolean matchesAnyRule(
+            JsonNode tags,
+            List<NicheMapper.NicheRule> rules
+    ) {
+        return rules != null
+                && rules.stream()
+                .anyMatch(
+                        rule ->
+                                matchesRule(
+                                        tags,
+                                        rule
+                                )
+                );
+    }
+
+    private boolean containsNamePhrase(
+            String normalizedName,
+            String alias
+    ) {
+        String name =
+                NicheMapper
+                        .normalizeNamePhrase(
+                                normalizedName
+                        );
+
+        String normalizedAlias =
+                NicheMapper
+                        .normalizeNamePhrase(
+                                alias
+                        );
+
+        if (
+                name.isBlank()
+                        || normalizedAlias.isBlank()
+        ) {
+            return false;
+        }
+
+        return (
+                " " + name + " "
+        ).contains(
+                " "
+                        + normalizedAlias
+                        + " "
+        );
+    }
+
+    private boolean matchesNameFallback(
+            OsmPlace place,
+            JsonNode tags,
+            NicheMapper.NameFallback fallback
+    ) {
+        if (
+                fallback == null
+                        || !fallback.enabled()
+        ) {
+            return false;
+        }
+
+        if (
+                fallback.requiresContext()
+                        && !matchesAnyRule(
+                        tags,
+                        fallback.contextAnyOf()
+                )
+        ) {
+            return false;
+        }
+
+        String name =
+                place.getNormalizedName();
+
+        if (
+                name == null
+                        || name.isBlank()
+        ) {
+            name =
+                    place.getBusinessName();
+        }
+
+        String finalName = name;
+
+        return fallback
+                .aliases()
+                .stream()
+                .anyMatch(
+                        alias ->
+                                containsNamePhrase(
+                                        finalName,
+                                        alias
+                                )
+                );
+    }
+
     boolean matchesStrategy(
             OsmPlace place,
             NicheMapper.NicheStrategy strategy
     ) {
-        JsonNode tags = parseTags(place.getTags());
-        List<String> filters = strategy.tagFilters();
-        if (filters != null && !filters.isEmpty()) {
-            for (String filter : filters) {
-                String[] parts = filter.split(",");
-                boolean allMatch = true;
-                for (String part : parts) {
-                    String[] kv = part.split("=", 2);
-                    if (kv.length != 2) {
-                        allMatch = false;
-                        break;
-                    }
-                    String key = kv[0].trim();
-                    String expected = kv[1].trim();
-                    String actual = tag(tags, key);
-                    if (actual == null || !actual.equalsIgnoreCase(expected)) {
-                        allMatch = false;
-                        break;
-                    }
-                }
-                if (allMatch) {
-                    return true;
-                }
-            }
+        JsonNode tags =
+                parseTags(
+                        place.getTags()
+                );
+
+        if (
+                matchesAnyRule(
+                        tags,
+                        strategy.structuredRules()
+                )
+        ) {
+            return true;
         }
-        String fallback = strategy.fallbackNameRegex();
-        if (fallback != null && !fallback.isBlank()) {
-            String normalized = normalizeFallbackRegex(fallback);
-            if (!normalized.isBlank()) {
-                String name = place.getNormalizedName();
-                if (name == null) name = normalizeForCompare(place.getBusinessName());
-                if (name != null) {
-                    try {
-                        Pattern p = Pattern.compile(normalized, Pattern.CASE_INSENSITIVE);
-                        if (p.matcher(name).find()) {
-                            return true;
-                        }
-                    } catch (Exception e) {
-                        // ignore invalid regex
-                    }
-                }
-            }
-        }
-        // if no filters and no valid fallback, no match
-        // if there were filters but none matched and fallback didn't match => false
-        return false;
+
+        return matchesNameFallback(
+                place,
+                tags,
+                strategy.nameFallback()
+        );
     }
 
     private LeadCandidate mapToCandidate(

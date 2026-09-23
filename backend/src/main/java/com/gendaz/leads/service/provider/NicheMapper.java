@@ -3,6 +3,7 @@ package com.gendaz.leads.service.provider;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -16,130 +17,1000 @@ public final class NicheMapper {
     private NicheMapper() {
     }
 
-    public record NicheStrategy(List<String> tagFilters, String fallbackNameRegex) {
+    public enum MatchMode {
+        EXACT,
+        SEMICOLON_TOKEN
     }
 
-    private static final Map<String, List<String>> ALIAS_TO_TAGS = new HashMap<>();
+    public record TagCondition(
+            String key,
+            MatchMode mode,
+            List<String> acceptedValues
+    ) {
+        public TagCondition {
+            if (key == null || key.isBlank()) {
+                throw new IllegalArgumentException(
+                        "TagCondition key is required"
+                );
+            }
 
-    static {
-        // beleza / estetica
-        put(List.of("estetica", "esthetica", "clinica de estetica", "centro de estetica",
-                "beleza", "estudio de beleza", "aesthetic", "aesthetics"),
-                List.of("shop=beauty", "shop=beauty,beauty=aesthetic", "shop=beauty,beauty=skin_care"));
-        // cilios
-        put(List.of("cilios", "cilio", "extensao de cilios", "alongamento de cilios",
-                "lash", "lashes", "lash designer", "lash design", "cilista"),
-                List.of("shop=beauty,beauty=eyelash", "shop=beauty,beauty=nails,beauty=eyelash"));
-        // sobrancelhas
-        put(List.of("sobrancelha", "sobrancelhas", "designer de sobrancelha",
-                "design de sobrancelha", "brow", "brows", "eyebrow", "eyebrows"),
-                List.of("shop=beauty,beauty=eyebrow"));
-        // unhas
-        put(List.of("unha", "unhas", "manicure", "pedicure", "nail", "nails",
-                "nail designer", "esmalteria", "alongamento de unhas"),
-                List.of("shop=beauty,beauty=nails"));
-        // salao / cabelo
-        put(List.of("salao", "salao de beleza", "salao de cabelereiro", "beleza salao",
-                "cabeleireiro", "cabeleireira", "cabelo", "cabelos", "cabelereiro",
-                "hair", "hairdresser", "hair salon", "coiffeur"),
-                List.of("shop=hairdresser", "shop=beauty"));
-        // barbearia - usa estrategia composta: shop=barber E/OU hairdresser=barber
-        put(List.of("barbearia", "barbearias", "barber", "barbershop", "barba"),
-                List.of("shop=barber", "shop=hairdresser,hairdresser=barber"));
-        // dentista / odonto
-        put(List.of("dentista", "dentistas", "odontologia", "clinica odontologica",
-                "consultorio odontologico", "dentist", "dental"),
-                List.of("amenity=dentist"));
-        // clinica generica
-        put(List.of("clinica", "clinicas", "clinica medica", "consultorio",
-                "consultorio medico", "medico", "saude"),
-                List.of("amenity=clinic", "amenity=doctors"));
-        // massagem / spa
-        put(List.of("massagem", "massoterapia", "massagista", "spa", "terapia",
-                "massage", "fisioterapia", "pilates"),
-                List.of("shop=beauty,beauty=massage", "leisure=spa", "shop=massage"));
-        // depilacao
-        put(List.of("depilacao", "depiladora", "epilacao", "hair removal",
-                "laser", "depilacao a laser"),
-                List.of("shop=beauty,beauty=hair_removal"));
-        // genericos de beleza (fallback para qualquer outro termo de beleza)
-        put(List.of("estudio", "beauty", "skincare", "skin care", "maquiagem", "makeup"),
-                List.of("shop=beauty"));
-        // academia
-        put(List.of("academia", "academias", "fitness", "crossfit", "musculacao"),
-                List.of("leisure=fitness_centre"));
-        // restaurantes etc (mantem compatibilidade com mapa antigo)
-        put(List.of("restaurante", "restaurantes", "comida", "lanchonete"),
-                List.of("amenity=restaurant"));
-        put(List.of("cafe", "cafeteria", "cafeteria"),
-                List.of("amenity=cafe"));
-        put(List.of("padaria", "panificadora"), List.of("shop=bakery"));
-        put(List.of("hotel", "hoteis", "pousada", "hospedagem"), List.of("tourism=hotel"));
-        put(List.of("pet", "petshop", "banho e tosa"), List.of("shop=pet"));
-        put(List.of("veterinario", "veterinaria", "vet"), List.of("amenity=veterinary"));
-        put(List.of("farmacia", "drogaria"), List.of("amenity=pharmacy"));
-        put(List.of("advogado", "advocacia", "advogados"), List.of("office=lawyer"));
-    }
+            if (mode == null) {
+                throw new IllegalArgumentException(
+                        "TagCondition mode is required"
+                );
+            }
 
-    private static void put(List<String> aliases, List<String> tags) {
-        for (String alias : aliases) {
-            ALIAS_TO_TAGS.put(normalizeKey(alias), tags);
+            acceptedValues =
+                    acceptedValues == null
+                            ? List.of()
+                            : acceptedValues.stream()
+                            .filter(v ->
+                                    v != null
+                                            && !v.isBlank()
+                            )
+                            .map(v ->
+                                    v.trim()
+                                            .toLowerCase(
+                                                    java.util.Locale.ROOT
+                                            )
+                            )
+                            .distinct()
+                            .toList();
+
+            if (acceptedValues.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "TagCondition values are required"
+                );
+            }
+
+            key = key.trim();
         }
+    }
+
+    public record NicheRule(
+            List<TagCondition> allOf
+    ) {
+        public NicheRule {
+            allOf =
+                    allOf == null
+                            ? List.of()
+                            : List.copyOf(allOf);
+
+            if (allOf.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "NicheRule requires conditions"
+                );
+            }
+        }
+    }
+
+    public record NameFallback(
+            List<NicheRule> contextAnyOf,
+            List<String> aliases
+    ) {
+        public NameFallback {
+            contextAnyOf =
+                    contextAnyOf == null
+                            ? List.of()
+                            : List.copyOf(contextAnyOf);
+
+            aliases =
+                    aliases == null
+                            ? List.of()
+                            : aliases.stream()
+                            .filter(v ->
+                                    v != null
+                                            && !v.isBlank()
+                            )
+                            .map(
+                                    NicheMapper::normalizeNamePhrase
+                            )
+                            .filter(v -> !v.isBlank())
+                            .distinct()
+                            .toList();
+        }
+
+        public boolean enabled() {
+            return !aliases.isEmpty();
+        }
+
+        public boolean requiresContext() {
+            return !contextAnyOf.isEmpty();
+        }
+    }
+
+    public record NicheStrategy(
+            String canonicalName,
+            List<NicheRule> structuredRules,
+            NameFallback nameFallback
+    ) {
+        public NicheStrategy {
+            canonicalName =
+                    canonicalName == null
+                            ? ""
+                            : canonicalName.trim();
+
+            structuredRules =
+                    structuredRules == null
+                            ? List.of()
+                            : List.copyOf(structuredRules);
+
+            nameFallback =
+                    nameFallback == null
+                            ? new NameFallback(
+                                    List.of(),
+                                    List.of()
+                            )
+                            : nameFallback;
+        }
+    }
+
+    private static final Map<
+            String,
+            NicheStrategy
+            > ALIAS_TO_STRATEGY =
+            new HashMap<>();
+
+    private static TagCondition exact(
+            String key,
+            String... values
+    ) {
+        return new TagCondition(
+                key,
+                MatchMode.EXACT,
+                List.of(values)
+        );
+    }
+
+    private static TagCondition token(
+            String key,
+            String... values
+    ) {
+        return new TagCondition(
+                key,
+                MatchMode.SEMICOLON_TOKEN,
+                List.of(values)
+        );
+    }
+
+    private static NicheRule rule(
+            TagCondition... conditions
+    ) {
+        return new NicheRule(
+                List.of(conditions)
+        );
+    }
+
+    private static NameFallback fallback(
+            List<NicheRule> contexts,
+            String... aliases
+    ) {
+        return new NameFallback(
+                contexts,
+                List.of(aliases)
+        );
+    }
+
+    static String normalizeNamePhrase(
+            String input
+    ) {
+        if (input == null) {
+            return "";
+        }
+
+        return java.text.Normalizer.normalize(
+                        input
+                                .trim()
+                                .toLowerCase(
+                                        java.util.Locale.ROOT
+                                ),
+                        java.text.Normalizer.Form.NFD
+                )
+                .replaceAll("\\p{M}", "")
+                .replaceAll(
+                        "[^\\p{L}0-9]+",
+                        " "
+                )
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 
     /** Normaliza sem acento, minusculo e espacos colapsados. */
     public static String normalizeKey(String input) {
         if (input == null) return "";
-        String s = java.text.Normalizer.normalize(input.trim().toLowerCase(), java.text.Normalizer.Form.NFD)
+        String s = java.text.Normalizer.normalize(input.trim().toLowerCase(Locale.ROOT), java.text.Normalizer.Form.NFD)
                 .replaceAll("\\p{M}", "");
         return s.replaceAll("\\s+", " ").trim();
     }
 
+    private static void register(
+            String canonicalName,
+            List<String> aliases,
+            List<NicheRule> structuredRules,
+            NameFallback fallback
+    ) {
+        NicheStrategy strategy =
+                new NicheStrategy(
+                        canonicalName,
+                        structuredRules,
+                        fallback
+                );
+
+        for (String alias : aliases) {
+            ALIAS_TO_STRATEGY.put(
+                    normalizeKey(alias),
+                    strategy
+            );
+        }
+    }
+
+    static {
+        // A.1 — Estética / beleza
+        register(
+                "beauty",
+                List.of(
+                        "estetica",
+                        "esthetica",
+                        "clinica de estetica",
+                        "centro de estetica",
+                        "beleza",
+                        "estudio de beleza",
+                        "aesthetic",
+                        "aesthetics"
+                ),
+                List.of(
+                        rule(
+                                exact("shop", "beauty")
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "beauty"))
+                        ),
+                        "estetica",
+                        "esthetica",
+                        "clinica de estetica",
+                        "centro de estetica",
+                        "beleza",
+                        "estudio de beleza",
+                        "aesthetic",
+                        "aesthetics"
+                )
+        );
+
+        // A.2 — Cílios
+        register(
+                "eyelash",
+                List.of(
+                        "cilios",
+                        "cilio",
+                        "extensao de cilios",
+                        "alongamento de cilios",
+                        "lash",
+                        "lashes",
+                        "lash designer",
+                        "lash design",
+                        "cilista"
+                ),
+                List.of(
+                        rule(
+                                exact("shop", "beauty"),
+                                token("beauty", "eyelash")
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "beauty")),
+                                rule(exact("shop", "hairdresser"))
+                        ),
+                        "cilios",
+                        "cilio",
+                        "extensao de cilios",
+                        "alongamento de cilios",
+                        "lash",
+                        "lashes",
+                        "lash designer",
+                        "lash design",
+                        "cilista"
+                )
+        );
+
+        // A.3 — Sobrancelha
+        register(
+                "eyebrow",
+                List.of(
+                        "sobrancelha",
+                        "sobrancelhas",
+                        "designer de sobrancelha",
+                        "design de sobrancelha",
+                        "brow",
+                        "brows",
+                        "eyebrow",
+                        "eyebrows"
+                ),
+                List.of(
+                        rule(
+                                exact("shop", "beauty"),
+                                token("beauty", "eyebrow")
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "beauty")),
+                                rule(exact("shop", "hairdresser"))
+                        ),
+                        "sobrancelha",
+                        "sobrancelhas",
+                        "designer de sobrancelha",
+                        "design de sobrancelha",
+                        "brow",
+                        "brows",
+                        "eyebrow",
+                        "eyebrows"
+                )
+        );
+
+        // A.4 — Nails
+        List<String> nailAliases =
+                List.of(
+                        "unha",
+                        "unhas",
+                        "manicure",
+                        "pedicure",
+                        "nail",
+                        "nails",
+                        "nail designer",
+                        "esmalteria",
+                        "alongamento de unhas"
+                );
+        register(
+                "nails",
+                nailAliases,
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "beauty"
+                                ),
+                                token(
+                                        "beauty",
+                                        "nails",
+                                        "manicure",
+                                        "pedicure"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "shop",
+                                        "nail_salon"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(
+                                        exact(
+                                                "shop",
+                                                "beauty"
+                                        )
+                                ),
+                                rule(
+                                        exact(
+                                                "shop",
+                                                "hairdresser"
+                                        )
+                                ),
+                                rule(
+                                        exact(
+                                                "shop",
+                                                "nail_salon"
+                                        )
+                                )
+                        ),
+                        "nail",
+                        "nails",
+                        "nail designer",
+                        "manicure",
+                        "pedicure",
+                        "esmalteria",
+                        "unha",
+                        "unhas",
+                        "alongamento de unhas"
+                )
+        );
+
+        // A.5 — Salão / cabelo
+        register(
+                "hairdresser",
+                List.of(
+                        "salao",
+                        "salao de beleza",
+                        "salao de cabelereiro",
+                        "beleza salao",
+                        "cabeleireiro",
+                        "cabeleireira",
+                        "cabelo",
+                        "cabelos",
+                        "cabelereiro",
+                        "hair",
+                        "hairdresser",
+                        "hair salon",
+                        "coiffeur"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "hairdresser"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "shop",
+                                        "beauty"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "hairdresser")),
+                                rule(exact("shop", "beauty"))
+                        ),
+                        "salao",
+                        "salao de beleza",
+                        "cabeleireiro",
+                        "cabeleireira",
+                        "cabelo",
+                        "hair",
+                        "hairdresser",
+                        "coiffeur"
+                )
+        );
+
+        // A.6 — Barbearia
+        List<String> barberAliases =
+                List.of(
+                        "barbearia",
+                        "barbearias",
+                        "barber",
+                        "barbershop",
+                        "barber shop",
+                        "barba"
+                );
+        register(
+                "barber",
+                barberAliases,
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "hairdresser"
+                                ),
+                                token(
+                                        "hairdresser",
+                                        "barber"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "shop",
+                                        "barber"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "shop",
+                                        "hairdresser"
+                                ),
+                                exact(
+                                        "barber",
+                                        "yes"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(
+                                        exact(
+                                                "shop",
+                                                "hairdresser"
+                                        )
+                                ),
+                                rule(
+                                        exact(
+                                                "shop",
+                                                "barber"
+                                        )
+                                )
+                        ),
+                        "barbearia",
+                        "barbearias",
+                        "barber",
+                        "barbershop",
+                        "barber shop"
+                )
+        );
+
+        // A.7 — Dentista
+        register(
+                "dentist",
+                List.of(
+                        "dentista",
+                        "dentistas",
+                        "odontologia",
+                        "clinica odontologica",
+                        "consultorio odontologico",
+                        "dentist",
+                        "dental"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "amenity",
+                                        "dentist"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("amenity", "dentist"))
+                        ),
+                        "dentista",
+                        "odontologia",
+                        "dentist",
+                        "dental"
+                )
+        );
+
+        // A.8 — Clínica genérica
+        register(
+                "clinic",
+                List.of(
+                        "clinica",
+                        "clinicas",
+                        "clinica medica",
+                        "consultorio",
+                        "consultorio medico",
+                        "medico",
+                        "saude"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "amenity",
+                                        "clinic"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "amenity",
+                                        "doctors"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("amenity", "clinic")),
+                                rule(exact("amenity", "doctors"))
+                        ),
+                        "clinica",
+                        "clinicas",
+                        "consultorio",
+                        "medico",
+                        "saude"
+                )
+        );
+
+        // A.9 — Massagem / spa
+        register(
+                "massage",
+                List.of(
+                        "massagem",
+                        "massoterapia",
+                        "massagista",
+                        "spa",
+                        "terapia",
+                        "massage",
+                        "fisioterapia",
+                        "pilates"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "beauty"
+                                ),
+                                token(
+                                        "beauty",
+                                        "massage"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "leisure",
+                                        "spa"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "shop",
+                                        "massage"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "beauty"), token("beauty", "massage")),
+                                rule(exact("leisure", "spa")),
+                                rule(exact("shop", "massage"))
+                        ),
+                        "massagem",
+                        "massoterapia",
+                        "spa",
+                        "massage",
+                        "pilates",
+                        "fisioterapia"
+                )
+        );
+
+        // A.10 — Depilação
+        register(
+                "hair_removal",
+                List.of(
+                        "depilacao",
+                        "depiladora",
+                        "epilacao",
+                        "hair removal",
+                        "laser",
+                        "depilacao a laser"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "beauty"
+                                ),
+                                token(
+                                        "beauty",
+                                        "hair_removal"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "beauty"))
+                        ),
+                        "depilacao",
+                        "epilacao",
+                        "hair removal",
+                        "laser",
+                        "depilacao a laser"
+                )
+        );
+
+        // A.11 — Beauty genérico
+        register(
+                "beauty_generic",
+                List.of(
+                        "estudio",
+                        "beauty",
+                        "skincare",
+                        "skin care",
+                        "maquiagem",
+                        "makeup"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "beauty"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "beauty"))
+                        ),
+                        "estudio",
+                        "beauty",
+                        "skincare",
+                        "makeup",
+                        "maquiagem"
+                )
+        );
+
+        // A.12 — Academia
+        register(
+                "fitness",
+                List.of(
+                        "academia",
+                        "academias",
+                        "fitness",
+                        "crossfit",
+                        "musculacao"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "leisure",
+                                        "fitness_centre"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("leisure", "fitness_centre"))
+                        ),
+                        "academia",
+                        "fitness",
+                        "crossfit",
+                        "musculacao"
+                )
+        );
+
+        // A.13 — Restaurante
+        register(
+                "restaurant",
+                List.of(
+                        "restaurante",
+                        "restaurantes",
+                        "comida",
+                        "lanchonete"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "amenity",
+                                        "restaurant"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("amenity", "restaurant"))
+                        ),
+                        "restaurante",
+                        "comida",
+                        "lanchonete"
+                )
+        );
+
+        // A.14 — Café
+        register(
+                "cafe",
+                List.of(
+                        "cafe",
+                        "cafeteria"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "amenity",
+                                        "cafe"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("amenity", "cafe"))
+                        ),
+                        "cafe",
+                        "cafeteria"
+                )
+        );
+
+        // A.15 — Padaria
+        register(
+                "bakery",
+                List.of(
+                        "padaria",
+                        "panificadora"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "bakery"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "bakery"))
+                        ),
+                        "padaria",
+                        "panificadora"
+                )
+        );
+
+        // A.16 — Hotel
+        register(
+                "hotel",
+                List.of(
+                        "hotel",
+                        "hoteis",
+                        "pousada",
+                        "hospedagem"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "tourism",
+                                        "hotel"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("tourism", "hotel"))
+                        ),
+                        "hotel",
+                        "pousada",
+                        "hospedagem"
+                )
+        );
+
+        // A.17 — Pet shop
+        register(
+                "pet",
+                List.of(
+                        "pet",
+                        "petshop",
+                        "banho e tosa"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "shop",
+                                        "pet"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("shop", "pet"))
+                        ),
+                        "pet",
+                        "petshop",
+                        "banho e tosa"
+                )
+        );
+
+        // A.18 — Veterinário
+        register(
+                "veterinary",
+                List.of(
+                        "veterinario",
+                        "veterinaria",
+                        "vet"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "amenity",
+                                        "veterinary"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("amenity", "veterinary"))
+                        ),
+                        "veterinario",
+                        "vet"
+                )
+        );
+
+        // A.19 — Farmácia
+        register(
+                "pharmacy",
+                List.of(
+                        "farmacia",
+                        "drogaria"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "amenity",
+                                        "pharmacy"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("amenity", "pharmacy"))
+                        ),
+                        "farmacia",
+                        "drogaria"
+                )
+        );
+
+        // A.20 — Advogado
+        register(
+                "lawyer",
+                List.of(
+                        "advogado",
+                        "advocacia",
+                        "advogados"
+                ),
+                List.of(
+                        rule(
+                                exact(
+                                        "office",
+                                        "lawyer"
+                                )
+                        )
+                ),
+                fallback(
+                        List.of(
+                                rule(exact("office", "lawyer"))
+                        ),
+                        "advogado",
+                        "advocacia"
+                )
+        );
+    }
+
     /** Resolve a estrategia de busca para um nicho livre. Nunca retorna null. */
-    public static NicheStrategy resolve(String niche) {
+    public static NicheStrategy resolve(
+            String niche
+    ) {
         String key = normalizeKey(niche);
-        List<String> tags = ALIAS_TO_TAGS.get(key);
-        if (tags == null) {
-            // Match parcial deterministico: prefere alias mais especifico/mais longo.
-            // Nao usa iteracao aleatoria de HashMap.
-            List<Map.Entry<String, List<String>>> entries = new ArrayList<>(ALIAS_TO_TAGS.entrySet());
-            entries.sort((a, b) -> Integer.compare(b.getKey().length(), a.getKey().length()));
-            for (Map.Entry<String, List<String>> e : entries) {
-                if (!e.getKey().isBlank() && key.contains(e.getKey())) {
-                    tags = e.getValue();
-                    break;
-                }
+
+        NicheStrategy exact =
+                ALIAS_TO_STRATEGY.get(key);
+
+        if (exact != null) {
+            return exact;
+        }
+
+        List<Map.Entry<
+                String,
+                NicheStrategy
+                >> entries =
+                new ArrayList<>(
+                        ALIAS_TO_STRATEGY
+                                .entrySet()
+                );
+
+        entries.sort(
+                (a, b) ->
+                        Integer.compare(
+                                b.getKey().length(),
+                                a.getKey().length()
+                        )
+        );
+
+        for (
+                Map.Entry<
+                        String,
+                        NicheStrategy
+                        > entry : entries
+        ) {
+            if (
+                    !entry.getKey().isBlank()
+                            && key.contains(
+                            entry.getKey()
+                    )
+            ) {
+                return entry.getValue();
             }
         }
-        if (tags == null) tags = List.of();
-        return new NicheStrategy(tags, fallbackRegexFor(niche, key, tags));
-    }
 
-    /**
-     * Sanitiza o termo do usuario para uso dentro de query Overpass.
-     * Remove caracteres especiais de regex e limita o tamanho.
-     * NÃO usa Pattern.quote() (gera \\Q\\E incompativel com Overpass).
-     * Para nichos conhecidos, usa aliases regex explicitos.
-     */
-    static String sanitizeForRegex(String niche) {
-        if (niche == null) return "";
-        String s = niche.trim();
-        if (s.length() > 60) s = s.substring(0, 60);
-        // mantem letras (incl. acentuadas), numeros e espacos; resto vira espaco
-        s = s.replaceAll("[^\\p{L}0-9 ]", " ").replaceAll("\\s+", " ").trim();
-        // Nao usa Pattern.quote. Para texto literal no Overpass, usar aliases
-        // explicitos quando possivel. Aqui apenas limpamos para uso seguro.
-        return s;
-    }
+        String unknownAlias =
+                normalizeNamePhrase(niche);
 
-    private static String fallbackRegexFor(String niche, String key, List<String> tags) {
-        // Barbearia: fallback por nome cobre barbearia/barber/barbershop.
-        // Nao tratar qualquer hairdresser como barbearia: tags estruturadas ja distinguem
-        // (shop=barber e hairdresser=barber), o regex aqui e apenas fallback por nome.
-        if (tags != null && (tags.contains("shop=barber")
-                || tags.contains("shop=hairdresser,hairdresser=barber"))) {
-            return "barbearia|barber|barbershop";
-        }
-        return sanitizeForRegex(niche);
+        return new NicheStrategy(
+                unknownAlias,
+                List.of(),
+                new NameFallback(
+                        List.of(),
+                        unknownAlias.isBlank()
+                                ? List.of()
+                                : List.of(
+                                unknownAlias
+                        )
+                )
+        );
     }
 }

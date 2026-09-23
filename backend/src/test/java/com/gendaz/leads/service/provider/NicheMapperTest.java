@@ -9,49 +9,132 @@ import static org.junit.jupiter.api.Assertions.*;
 class NicheMapperTest {
 
     @Test
-    void barberMapsToShopBarberAndHairdresserBarber() {
+    void nailsStrategyHasCorrectCanonicalAndRules() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("nail designer");
+        assertEquals("nails", strategy.canonicalName());
+        assertEquals(2, strategy.structuredRules().size());
+
+        boolean hasBeautyTokenRule = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 2
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("shop") && c.mode() == NicheMapper.MatchMode.EXACT && c.acceptedValues().contains("beauty"))
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("beauty") && c.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN && c.acceptedValues().containsAll(List.of("nails", "manicure", "pedicure")))
+        );
+        assertTrue(hasBeautyTokenRule, "Should contain shop=beauty + beauty SEMICOLON_TOKEN nails/manicure/pedicure");
+
+        boolean hasNailSalonRule = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 1
+                        && rule.allOf().get(0).key().equals("shop")
+                        && rule.allOf().get(0).mode() == NicheMapper.MatchMode.EXACT
+                        && rule.allOf().get(0).acceptedValues().contains("nail_salon")
+        );
+        assertTrue(hasNailSalonRule, "Should contain shop=nail_salon");
+
+        // fallback aliases
+        List<String> aliases = strategy.nameFallback().aliases();
+        assertTrue(aliases.contains("nail"));
+        assertTrue(aliases.contains("nails"));
+        assertTrue(aliases.contains("nail designer"));
+        assertTrue(aliases.contains("manicure"));
+        assertTrue(aliases.contains("pedicure"));
+        assertTrue(aliases.contains("esmalteria"));
+        assertTrue(aliases.contains("unha"));
+        assertTrue(aliases.contains("unhas"));
+        assertTrue(aliases.contains("alongamento de unhas"));
+
+        // fallback context should contain beauty, hairdresser, nail_salon
+        assertTrue(strategy.nameFallback().requiresContext());
+        assertEquals(3, strategy.nameFallback().contextAnyOf().size());
+    }
+
+    @Test
+    void barberStrategyHasThreeRulesAndNoGenericHairdresser() {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
+        assertEquals("barber", strategy.canonicalName());
+        assertEquals(3, strategy.structuredRules().size());
 
-        assertTrue(strategy.tagFilters().contains("shop=barber"), "Should contain shop=barber");
-        assertTrue(strategy.tagFilters().contains("shop=hairdresser,hairdresser=barber"), "Should contain compound filter");
-        assertEquals(2, strategy.tagFilters().size(), "Should have exactly 2 filters");
+        boolean hasTokenRule = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 2
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("shop") && c.acceptedValues().contains("hairdresser"))
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("hairdresser") && c.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN && c.acceptedValues().contains("barber"))
+        );
+        assertTrue(hasTokenRule);
+
+        boolean hasShopBarber = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 1 && rule.allOf().get(0).key().equals("shop") && rule.allOf().get(0).acceptedValues().contains("barber")
+        );
+        assertTrue(hasShopBarber);
+
+        boolean hasBarberYes = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 2
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("shop") && c.acceptedValues().contains("hairdresser"))
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("barber") && c.acceptedValues().contains("yes"))
+        );
+        assertTrue(hasBarberYes);
+
+        // Should NOT have plain shop=hairdresser alone
+        boolean hasGenericHairdresserOnly = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 1 && rule.allOf().get(0).key().equals("shop") && rule.allOf().get(0).acceptedValues().size() == 1 && rule.allOf().get(0).acceptedValues().contains("hairdresser")
+        );
+        assertFalse(hasGenericHairdresserOnly, "Should not have shop=hairdresser alone as barber match");
     }
 
     @Test
-    void barberFallbackRegexCoversVariants() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
-
-        assertEquals("barbearia|barber|barbershop", strategy.fallbackNameRegex());
+    void nailsAliasesResolveToNails() {
+        for (String alias : List.of("NAIL DESIGNER", "manicure", "pedicure", "esmalteria", "unhas", "unha", "nail", "nails")) {
+            NicheMapper.NicheStrategy s = NicheMapper.resolve(alias);
+            assertEquals("nails", s.canonicalName(), "alias " + alias + " should resolve to nails");
+        }
     }
 
     @Test
-    void hairdresserMapsToShopHairdresser() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("cabeleireiro");
-
-        assertTrue(strategy.tagFilters().contains("shop=hairdresser"));
-        assertTrue(strategy.tagFilters().contains("shop=beauty"));
+    void barberAliasesResolveToBarber() {
+        for (String alias : List.of("barbearia", "barbearias", "barber", "barbershop", "barba", "barber shop")) {
+            NicheMapper.NicheStrategy s = NicheMapper.resolve(alias);
+            assertEquals("barber", s.canonicalName(), "alias " + alias + " should resolve to barber");
+        }
     }
 
     @Test
-    void genericBeautyMapsToShopBeauty() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("estetica");
-
-        assertTrue(strategy.tagFilters().contains("shop=beauty"));
-        assertTrue(strategy.tagFilters().contains("shop=beauty,beauty=aesthetic"));
+    void ciliosStrategyHasCorrectStructure() {
+        NicheMapper.NicheStrategy s = NicheMapper.resolve("cilios");
+        boolean has = s.structuredRules().stream().anyMatch(r ->
+                r.allOf().stream().anyMatch(c -> c.key().equals("shop") && c.acceptedValues().contains("beauty"))
+                        && r.allOf().stream().anyMatch(c -> c.key().equals("beauty") && c.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN && c.acceptedValues().contains("eyelash"))
+        );
+        assertTrue(has);
     }
 
     @Test
-    void dentistMapsToAmenityDentist() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("dentista");
-
-        assertTrue(strategy.tagFilters().contains("amenity=dentist"));
+    void sobrancelhasStrategyHasCorrectStructure() {
+        NicheMapper.NicheStrategy s = NicheMapper.resolve("sobrancelha");
+        boolean has = s.structuredRules().stream().anyMatch(r ->
+                r.allOf().stream().anyMatch(c -> c.key().equals("shop") && c.acceptedValues().contains("beauty"))
+                        && r.allOf().stream().anyMatch(c -> c.key().equals("beauty") && c.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN && c.acceptedValues().contains("eyebrow"))
+        );
+        assertTrue(has);
     }
 
     @Test
-    void unknownNicheReturnsEmptyTags() {
+    void massagemStrategyHasThreeRules() {
+        NicheMapper.NicheStrategy s = NicheMapper.resolve("massagem");
+        assertEquals(3, s.structuredRules().size());
+    }
+
+    @Test
+    void depilacaoStrategy() {
+        NicheMapper.NicheStrategy s = NicheMapper.resolve("depilacao");
+        boolean has = s.structuredRules().stream().anyMatch(r ->
+                r.allOf().stream().anyMatch(c -> c.key().equals("beauty") && c.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN && c.acceptedValues().contains("hair_removal"))
+        );
+        assertTrue(has);
+    }
+
+    @Test
+    void unknownNicheReturnsEmptyStructuredWithAliasFallback() {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve("unknownniche123");
-
-        assertTrue(strategy.tagFilters().isEmpty());
+        assertTrue(strategy.structuredRules().isEmpty());
+        assertFalse(strategy.nameFallback().requiresContext());
+        assertTrue(strategy.nameFallback().aliases().contains("unknownniche123"));
     }
 
     @Test
@@ -61,57 +144,58 @@ class NicheMapperTest {
     }
 
     @Test
-    void partialMatchPrefersLongestAlias() {
-        // "barbearia" should match before "bar"
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia centro");
+    void normalizeNamePhrase() {
+        assertEquals("nail designer", NicheMapper.normalizeNamePhrase("Nail-Designer"));
+        assertEquals("barber shop", NicheMapper.normalizeNamePhrase("Barber Shop"));
+        assertEquals("espaco das unhas", NicheMapper.normalizeNamePhrase("Espaço das Unhas"));
+    }
 
-        assertTrue(strategy.tagFilters().contains("shop=barber"));
+    @Test
+    void partialMatchPrefersLongestAlias() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia centro");
+        assertEquals("barber", strategy.canonicalName());
+    }
+
+    @Test
+    void longestAliasDeterministic() {
+        // "alongamento de unhas" longer than "unhas" should win
+        NicheMapper.NicheStrategy s1 = NicheMapper.resolve("alongamento de unhas teste");
+        assertEquals("nails", s1.canonicalName());
     }
 
     @Test
     void barberDoesNotAcceptGenericHairdresser() {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
-
-        // Should NOT have plain "shop=hairdresser" as that would match any hairdresser
-        assertFalse(strategy.tagFilters().contains("shop=hairdresser"), "Should not accept generic hairdresser");
+        boolean hasGeneric = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 1
+                        && rule.allOf().get(0).key().equals("shop")
+                        && rule.allOf().get(0).acceptedValues().equals(List.of("hairdresser"))
+        );
+        assertFalse(hasGeneric, "Should not accept generic hairdresser");
     }
 
     @Test
-    void compoundTagFilterUsesAnd() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("barbearia");
-
-        // Compound filter "shop=hairdresser,hairdresser=barber" means AND
-        String compound = "shop=hairdresser,hairdresser=barber";
-        assertTrue(strategy.tagFilters().contains(compound));
-
-        // Verify it's split by comma for AND condition
-        String[] parts = compound.split(",");
-        assertEquals(2, parts.length);
-        assertEquals("shop=hairdresser", parts[0]);
-        assertEquals("hairdresser=barber", parts[1]);
+    void hairdresserMapsToHairdresserAndBeauty() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("cabeleireiro");
+        assertEquals("hairdresser", strategy.canonicalName());
+        boolean hasHairdresser = strategy.structuredRules().stream().anyMatch(r -> r.allOf().stream().anyMatch(c -> c.acceptedValues().contains("hairdresser")));
+        boolean hasBeauty = strategy.structuredRules().stream().anyMatch(r -> r.allOf().stream().anyMatch(c -> c.acceptedValues().contains("beauty")));
+        assertTrue(hasHairdresser);
+        assertTrue(hasBeauty);
     }
 
     @Test
-    void nailDesignerMapsToShopBeautyNailsStrict() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("nail designer");
-        assertTrue(strategy.tagFilters().contains("shop=beauty,beauty=nails"), "Should contain shop=beauty,beauty=nails");
-        assertEquals(1, strategy.tagFilters().size(), "Nail designer should have exactly 1 structured filter");
-        assertFalse(strategy.tagFilters().contains("shop=beauty"), "Should NOT contain generic shop=beauty");
-        assertFalse(strategy.tagFilters().contains("shop=clothes"), "Should NOT contain shop=clothes");
+    void dentistMapsToAmenityDentist() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("dentista");
+        assertEquals("dentist", strategy.canonicalName());
+        boolean has = strategy.structuredRules().stream().anyMatch(r -> r.allOf().stream().anyMatch(c -> c.key().equals("amenity") && c.acceptedValues().contains("dentist")));
+        assertTrue(has);
     }
 
     @Test
-    void nailDesignerShopBeautyAloneNotMatch() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("NAIL DESIGNER");
-        assertFalse(strategy.tagFilters().contains("shop=beauty"));
-        assertFalse(strategy.tagFilters().contains("shop=clothes"));
-    }
-
-    @Test
-    void nailDesignerFallbackIsSanitized() {
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("nail designer");
-        assertNotNull(strategy.fallbackNameRegex());
-        // fallback for nail designer is sanitized niche itself (no barber regex)
-        assertTrue(strategy.fallbackNameRegex().toLowerCase().contains("nail"));
+    void genericBeautyMapsToShopBeauty() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("estetica");
+        assertEquals("beauty", strategy.canonicalName());
+        assertTrue(strategy.structuredRules().stream().anyMatch(r -> r.allOf().stream().anyMatch(c -> c.key().equals("shop") && c.acceptedValues().contains("beauty"))));
     }
 }

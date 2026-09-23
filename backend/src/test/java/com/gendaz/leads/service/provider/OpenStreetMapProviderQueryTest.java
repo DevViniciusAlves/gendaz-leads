@@ -40,7 +40,9 @@ class OpenStreetMapProviderQueryTest {
         assertNotNull(query);
 
         assertTrue(query.contains("[\"shop\"=\"barber\"]"));
-        assertTrue(query.contains("[\"shop\"=\"hairdresser\"][\"hairdresser\"=\"barber\"]"));
+        // hairdresser token barber should be regex semicolon token
+        assertTrue(query.contains("hairdresser") && query.contains("barber") && query.contains("(^|;)"));
+        assertTrue(query.contains("[\"barber\"=\"yes\"]"));
 
         assertFalse(query.contains("contact:phone"));
         assertFalse(query.contains("contact:website"));
@@ -51,6 +53,67 @@ class OpenStreetMapProviderQueryTest {
     }
 
     @Test
+    void buildStructuredQueryForNailsContainsSemicolonToken() {
+        GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
+
+        String query = provider.buildStructuredQuery("nail designer", scope, GeographicStrategy.ADMIN_AREA, region, 20, 30);
+
+        assertNotNull(query);
+        // should contain beauty token with nails|manicure|pedicure
+        assertTrue(query.contains("beauty"));
+        assertTrue(query.contains("nails"));
+        assertTrue(query.contains("manicure"));
+        assertTrue(query.contains("pedicure"));
+        assertTrue(query.contains("(^|;)"));
+        assertTrue(query.contains("[\"shop\"=\"beauty\"]"));
+        assertTrue(query.contains("[\"shop\"=\"nail_salon\"]"));
+        assertTrue(query.contains("out center tags"));
+    }
+
+    @Test
+    void buildNameFallbackQueryForBarberIsContextual() {
+        GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
+
+        String query = provider.buildNameFallbackQuery("barbearia", scope, GeographicStrategy.ADMIN_AREA, region, 20, 30);
+
+        assertNotNull(query);
+        // Should contain contextual nwr with shop hairdresser and shop barber plus name regex
+        assertTrue(query.contains("[\"shop\"=\"hairdresser\"]"));
+        assertTrue(query.contains("[\"shop\"=\"barber\"]"));
+        assertTrue(query.contains("[\"name\"~\""));
+        assertTrue(query.contains("barbearia"));
+        assertTrue(query.contains("barber"));
+        assertTrue(query.contains("barbershop"));
+        // Should NOT be a single global name regex without context
+        // Count nwr occurrences: should be 2 (one per context)
+        int nwrCount = query.split("nwr").length - 1;
+        assertEquals(2, nwrCount, "Barber fallback should have 2 contextual nwr queries");
+        assertTrue(query.contains("out center tags"));
+    }
+
+    @Test
+    void buildNameFallbackQueryForNailsIsContextual() {
+        GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
+
+        String query = provider.buildNameFallbackQuery("nail designer", scope, GeographicStrategy.ADMIN_AREA, region, 20, 30);
+
+        assertNotNull(query);
+        // Should have 3 contextual queries: beauty, hairdresser, nail_salon
+        int nwrCount = query.split("nwr").length - 1;
+        assertEquals(3, nwrCount, "Nails fallback should have 3 contextual nwr queries");
+        assertTrue(query.contains("[\"shop\"=\"beauty\"]"));
+        assertTrue(query.contains("[\"shop\"=\"hairdresser\"]"));
+        assertTrue(query.contains("[\"shop\"=\"nail_salon\"]"));
+        assertTrue(query.contains("esmalteria"));
+        assertTrue(query.contains("nail"));
+        assertTrue(query.contains("manicure"));
+        assertFalse(query.contains("shop=clothes"));
+    }
+
+    @Test
     void buildNameFallbackQueryDoesNotRequireContactTag() {
         GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
         SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
@@ -58,12 +121,8 @@ class OpenStreetMapProviderQueryTest {
         String query = provider.buildNameFallbackQuery("barbearia", scope, GeographicStrategy.ADMIN_AREA, region, 20, 30);
 
         assertNotNull(query);
-
-        assertTrue(query.contains("[\"name\"~\"barbearia|barber|barbershop\",i]"));
-
         assertFalse(query.contains("contact:phone"));
         assertFalse(query.contains("contact:website"));
-
         assertTrue(query.contains("out center tags"));
         assertTrue(query.contains("area("));
     }
@@ -83,5 +142,25 @@ class OpenStreetMapProviderQueryTest {
 
         assertTrue(query.contains("out center tags"));
         assertFalse(query.contains("area("));
+    }
+
+    @Test
+    void buildStructuredQueryUnknownNicheReturnsNull() {
+        GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true);
+        SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
+        String query = provider.buildStructuredQuery("unknownniche123", scope, GeographicStrategy.BBOX_FALLBACK, region, 20, 30);
+        assertNull(query);
+    }
+
+    @Test
+    void buildNameFallbackForUnknownIsSimpleNameRegex() {
+        GeoScope scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brasil", "br", -15.7, -56.2, -15.5, -56.0, true);
+        SearchRegion region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
+        String query = provider.buildNameFallbackQuery("unknownniche123", scope, GeographicStrategy.BBOX_FALLBACK, region, 20, 30);
+        assertNotNull(query);
+        assertTrue(query.contains("unknownniche123"));
+        // No context, so single nwr
+        int nwrCount = query.split("nwr").length - 1;
+        assertEquals(1, nwrCount);
     }
 }
