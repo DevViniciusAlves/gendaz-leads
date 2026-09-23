@@ -15,6 +15,8 @@ import psycopg2
 from psycopg2.extras import execute_batch
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
+from math import radians, sin, cos, sqrt, atan2
+from collections import defaultdict
 
 
 COMMERCIAL_TAG_KEYS = {
@@ -287,6 +289,457 @@ def is_catalog_candidate(tags: Dict[str, Any]) -> bool:
     return is_commercial(tags) or has_contact_signal(tags)
 
 
+def has_valid_brazilian_ddd(national: str) -> bool:
+    if national is None or len(national) not in (10, 11):
+        return False
+
+    if not national[:2].isdigit():
+        return False
+
+    ddd = int(national[:2])
+
+    return 11 <= ddd <= 99
+
+
+def normalize_phone_for_catalog(
+    raw_phone: Optional[str],
+    country_code: str,
+) -> Optional[str]:
+    if raw_phone is None:
+        return None
+
+    raw = str(raw_phone).strip()
+
+    if not raw:
+        return None
+
+    for candidate in raw.split(';'):
+        candidate = candidate.strip()
+
+        if not candidate:
+            continue
+
+        digits = re.sub(r'\D', '', candidate)
+
+        while digits.startswith('00') and len(digits) > 2:
+            digits = digits[2:]
+
+        if country_code == 'br':
+            if len(digits) in (10, 11):
+                if not has_valid_brazilian_ddd(digits):
+                    continue
+
+                return '55' + digits
+
+            if (
+                len(digits) in (12, 13)
+                and digits.startswith('55')
+            ):
+                national = digits[2:]
+
+                if not has_valid_brazilian_ddd(national):
+                    continue
+
+                if digits.startswith('5555'):
+                    continue
+
+                return digits
+
+            continue
+
+        if 8 <= len(digits) <= 15:
+            return digits
+
+    return None
+
+
+def row_tags(row):
+    tags = row.get('tags')
+
+    if isinstance(tags, dict):
+        return tags
+
+    if isinstance(tags, str):
+        try:
+            parsed = json.loads(tags)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    return {}
+
+
+def row_is_commercial(row):
+    return is_commercial(row_tags(row))
+
+
+def distance_meters(a, b):
+    lat1 = a.get('latitude')
+    lon1 = a.get('longitude')
+    lat2 = b.get('latitude')
+    lon2 = b.get('longitude')
+
+    if None in (lat1, lon1, lat2, lon2):
+        return float('inf')
+
+    r = 6_371_000.0
+
+    p1 = radians(float(lat1))
+    p2 = radians(float(lat2))
+    dp = radians(float(lat2) - float(lat1))
+    dl = radians(float(lon2) - float(lon1))
+
+    h = (
+        sin(dp / 2.0) ** 2
+        + cos(p1) * cos(p2) * sin(dl / 2.0) ** 2
+    )
+
+    return r * 2.0 * atan2(
+        sqrt(h),
+        sqrt(1.0 - h),
+    )
+
+
+def stable_osm_key(row):
+    order = {
+        'node': 0,
+        'way': 1,
+        'relation': 2,
+    }
+
+    return (
+        order.get(row.get('osm_type'), 9),
+        int(row.get('osm_id') or 0),
+    )
+
+
+def can_merge_rows(a, b, radius_meters):
+    if (
+        not a.get('normalized_name')
+        or a.get('normalized_name')
+        != b.get('normalized_name')
+    ):
+        return False
+
+    if distance_meters(a, b) > radius_meters:
+        return False
+
+    a_commercial = row_is_commercial(a)
+    b_commercial = row_is_commercial(b)
+
+    if not a_commercial or not b_commercial:
+        return True
+
+    if a.get('osm_type') != b.get('osm_type'):
+        return True
+
+    a_phone = normalize_phone_for_catalog(
+        a.get('phone'),
+        a.get('country_code') or '',
+    )
+
+    b_phone = normalize_phone_for_catalog(
+        b.get('phone'),
+        b.get('country_code') or '',
+    )
+
+    if a_phone and b_phone and a_phone == b_phone:
+        return True
+
+    a_site = (a.get('website') or '').strip().lower()
+    b_site = (b.get('website') or '').strip().lower()
+
+    return bool(
+        a_site
+        and b_site
+        and a_site == b_site
+    )
+
+
+def cluster_rows(rows, radius_meters):
+    if not rows:
+        return []
+
+    parent = list(range(len(rows)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a, b):
+        ra = find(a)
+        rb = find(b)
+
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(len(rows)):
+        for j in range(i + 1, len(rows)):
+            if can_merge_rows(
+                rows[i],
+                rows[j],
+                radius_meters,
+            ):
+                union(i, j)
+
+    grouped = {}
+
+    for i, row in enumerate(rows):
+        root = find(i)
+        grouped.setdefault(root, []).append(row)
+
+    return list(grouped.values())
+
+
+def choose_canonical_member(cluster):
+    commercial = [
+        row
+        for row in cluster
+        if row_is_commercial(row)
+    ]
+
+    if not commercial:
+        return None
+
+    def score(row):
+        phone = normalize_phone_for_catalog(
+            row.get('phone'),
+            row.get('country_code') or '',
+        )
+
+        return (
+            0 if phone else 1,
+            0 if row.get('address') else 1,
+            stable_osm_key(row),
+        )
+
+    return sorted(
+        commercial,
+        key=score,
+    )[0]
+
+
+def merge_tags(base, cluster):
+    merged = dict(row_tags(base))
+
+    ordered = sorted(
+        cluster,
+        key=lambda row: (
+            distance_meters(base, row),
+            stable_osm_key(row),
+        ),
+    )
+
+    for row in ordered:
+        for key, value in row_tags(row).items():
+            if (
+                key not in merged
+                or merged.get(key) in (None, '')
+            ):
+                merged[key] = value
+
+    return merged
+
+
+def first_cluster_value(base, cluster, field):
+    ordered = [base] + sorted(
+        [row for row in cluster if row is not base],
+        key=lambda row: (
+            distance_meters(base, row),
+            stable_osm_key(row),
+        ),
+    )
+
+    for row in ordered:
+        value = row.get(field)
+
+        if value is not None and str(value).strip():
+            return str(value).strip()
+
+    return None
+
+
+def build_qualified_row(cluster):
+    base = choose_canonical_member(cluster)
+
+    if base is None:
+        return None
+
+    country_code = base.get('country_code') or ''
+
+    ordered = [base] + sorted(
+        [row for row in cluster if row is not base],
+        key=lambda row: (
+            distance_meters(base, row),
+            stable_osm_key(row),
+        ),
+    )
+
+    phone = None
+
+    for row in ordered:
+        phone = normalize_phone_for_catalog(
+            row.get('phone'),
+            country_code,
+        )
+
+        if phone:
+            break
+
+    if phone is None:
+        return None
+
+    result = dict(base)
+
+    result['phone'] = phone
+    result['website'] = first_cluster_value(
+        base, cluster, 'website'
+    )
+    result['email'] = first_cluster_value(
+        base, cluster, 'email'
+    )
+    result['instagram'] = first_cluster_value(
+        base, cluster, 'instagram'
+    )
+    result['tags'] = json.dumps(
+        merge_tags(base, cluster),
+        ensure_ascii=False,
+    )
+
+    return result
+
+
+def load_staging_rows(conn, sync_run_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                sync_run_id,
+                region_id,
+                osm_type,
+                osm_id,
+                business_name,
+                normalized_name,
+                latitude,
+                longitude,
+                address,
+                city,
+                state,
+                country,
+                country_code,
+                phone,
+                email,
+                website,
+                instagram,
+                tags,
+                source_timestamp
+            FROM osm_place_staging
+            WHERE sync_run_id = %s
+            ORDER BY
+                normalized_name,
+                osm_type,
+                osm_id
+            """,
+            (sync_run_id,),
+        )
+
+        columns = [
+            desc[0]
+            for desc in cur.description
+        ]
+
+        return [
+            dict(zip(columns, row))
+            for row in cur.fetchall()
+        ]
+
+
+def qualify_staging_rows(
+    rows,
+    radius_meters=50.0,
+):
+    by_name = defaultdict(list)
+
+    for row in rows:
+        name = row.get('normalized_name')
+
+        if name:
+            by_name[name].append(row)
+
+    qualified = []
+
+    stats = {
+        'raw_rows': len(rows),
+        'clusters': 0,
+        'qualified': 0,
+        'discarded_no_commercial': 0,
+        'discarded_no_phone': 0,
+        'merged_clusters': 0,
+    }
+
+    for same_name_rows in by_name.values():
+        clusters = cluster_rows(
+            same_name_rows,
+            radius_meters,
+        )
+
+        for cluster in clusters:
+            stats['clusters'] += 1
+
+            if not any(
+                row_is_commercial(row)
+                for row in cluster
+            ):
+                stats[
+                    'discarded_no_commercial'
+                ] += 1
+                continue
+
+            qualified_row = (
+                build_qualified_row(cluster)
+            )
+
+            if qualified_row is None:
+                stats['discarded_no_phone'] += 1
+                continue
+
+            if len(cluster) > 1:
+                stats['merged_clusters'] += 1
+
+            qualified.append(
+                qualified_row
+            )
+
+    stats['qualified'] = len(qualified)
+
+    return qualified, stats
+
+
+def replace_staging_with_qualified(
+    conn,
+    sync_run_id,
+    qualified_rows,
+):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM osm_place_staging
+            WHERE sync_run_id = %s
+            """,
+            (sync_run_id,),
+        )
+
+    conn.commit()
+
+    if qualified_rows:
+        insert_staging_batch(
+            conn,
+            qualified_rows,
+        )
+
+
 def parse_feature(feature: Dict[str, Any], sync_run_id: int, region_id: int,
                   city: str, state: str, country_code: str) -> Optional[Dict[str, Any]]:
     props = feature.get('properties', {})
@@ -412,8 +865,28 @@ def get_previous_count(conn, region_id: int) -> int:
         return cur.fetchone()[0]
 
 
+def get_previous_qualified_count(
+    conn,
+    region_id,
+):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM osm_places
+            WHERE region_id = %s
+              AND active = true
+              AND phone IS NOT NULL
+              AND BTRIM(phone) <> ''
+            """,
+            (region_id,),
+        )
+
+        return cur.fetchone()[0]
+
+
 def sanity_check(conn, sync_run_id: int, region_id: int, staged_count: int) -> bool:
-    previous_count = get_previous_count(conn, region_id)
+    previous_count = get_previous_qualified_count(conn, region_id)
     if previous_count > 50 and staged_count == 0:
         log('error', 'Sanity check failed: previous count > 50 but staged count is 0',
             previous=previous_count, staged=staged_count)
@@ -668,14 +1141,51 @@ def main():
 
         log('info', 'staging_complete', **stats)
 
-        # Validate staging
-        staged_count = validate_staging(conn, args.sync_run_id)
-        if staged_count != stats['staged']:
-            log('warn', 'Staging count mismatch', expected=stats['staged'], actual=staged_count)
-            stats['staged'] = staged_count
+        raw_rows = load_staging_rows(
+            conn,
+            args.sync_run_id,
+        )
 
+        qualified_rows, qualification_stats = (
+            qualify_staging_rows(
+                raw_rows,
+                50.0,
+            )
+        )
+
+        log(
+            'info',
+            'qualification_summary',
+            raw_rows=qualification_stats['raw_rows'],
+            clusters=qualification_stats['clusters'],
+            qualified=qualification_stats['qualified'],
+            discarded_no_commercial=qualification_stats[
+                'discarded_no_commercial'
+            ],
+            discarded_no_phone=qualification_stats[
+                'discarded_no_phone'
+            ],
+            merged_clusters=qualification_stats[
+                'merged_clusters'
+            ],
+        )
+
+        replace_staging_with_qualified(
+            conn,
+            args.sync_run_id,
+            qualified_rows,
+        )
+
+        qualified_count = validate_staging(
+            conn,
+            args.sync_run_id,
+        )
+
+        stats['staged'] = qualified_count
+
+        # Validate staging already done via qualified_count
         # Sanity check
-        if not sanity_check(conn, args.sync_run_id, args.region_id, staged_count):
+        if not sanity_check(conn, args.sync_run_id, args.region_id, qualified_count):
             raise ValueError('Sanity check failed: extreme drop in place count')
 
         # Publish atomically (single transaction - includes SUCCESS marking and staging cleanup)

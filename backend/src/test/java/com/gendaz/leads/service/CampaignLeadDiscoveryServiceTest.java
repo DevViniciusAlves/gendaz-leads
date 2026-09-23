@@ -50,10 +50,11 @@ class CampaignLeadDiscoveryServiceTest {
     @Mock DeduplicationService deduplicationService;
     @Mock CampaignLeadPersistenceService persistenceService;
     @Mock WebsiteContactEnricher websiteContactEnricher;
-    @Mock Normalizer normalizer;
-    @Mock WhatsAppRecipientNormalizer whatsAppRecipientNormalizer;
     @Mock OpenStreetMapProvider osm;
     @Mock LocalOsmCatalogProvider localCatalogProvider;
+
+    private Normalizer normalizer;
+    private WhatsAppRecipientNormalizer whatsAppRecipientNormalizer;
 
     private CampaignLeadDiscoveryService service;
     private Campaign campaign;
@@ -62,6 +63,8 @@ class CampaignLeadDiscoveryServiceTest {
 
     @BeforeEach
     void setUp() throws Exception {
+        normalizer = new Normalizer();
+        whatsAppRecipientNormalizer = new WhatsAppRecipientNormalizer();
         service = new CampaignLeadDiscoveryService(
                 campaignRepository, campaignLeadRepository, leadRepository, leadEventRepository,
                 deduplicationService, persistenceService, websiteContactEnricher, whatsAppRecipientNormalizer, normalizer, osm,
@@ -89,12 +92,12 @@ class CampaignLeadDiscoveryServiceTest {
         campaign = Campaign.builder()
                 .id(1L)
                 .niche("barbearia")
-                .city("Cuiabá")
+                .city("CuiabÃƒÂ¡")
                 .country("Brazil")
                 .requestedQuantity(3)
                 .build();
 
-        scope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        scope = new GeoScope(-15.6, -56.1, "CuiabÃƒÂ¡", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
         region = SearchRegion.root(-15.7, -56.2, -15.5, -56.0, -15.6, -56.1);
 
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
@@ -102,8 +105,6 @@ class CampaignLeadDiscoveryServiceTest {
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadEventRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         lenient().when(osm.resolveScope(any(), any())).thenReturn(scope);
-        when(whatsAppRecipientNormalizer.normalizeForWhatsApp(anyString(), anyString()))
-                .thenAnswer(inv -> inv.getArgument(0));
     }
 
     private void setField(Object target, String fieldName, Object value) throws Exception {
@@ -120,7 +121,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), any(), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -137,7 +137,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), any(), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -154,7 +153,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), any(), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -171,7 +169,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), any(), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -188,7 +185,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), any(), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -224,11 +220,10 @@ class CampaignLeadDiscoveryServiceTest {
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), any(), anyInt(), any(), anyLong()))
                 .thenReturn(
-                        AreaQueryResult.infraUnavailable("OSM_ALL_ENDPOINTS_FAILED", "Todos endpoints indisponíveis", 100),
+                        AreaQueryResult.infraUnavailable("OSM_ALL_ENDPOINTS_FAILED", "Todos endpoints indisponÃƒÂ­veis", 100),
                         AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100)
                 );
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -253,7 +248,6 @@ class CampaignLeadDiscoveryServiceTest {
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any()))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing), "source_id"));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L, 1L);
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -279,7 +273,6 @@ class CampaignLeadDiscoveryServiceTest {
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any()))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing), "source_id"));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
 
         var result = service.discoverAndPersist(campaign, 3);
 
@@ -304,7 +297,6 @@ class CampaignLeadDiscoveryServiceTest {
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any()))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing), "source_id"));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
 
         var result = service.discoverAndPersist(campaign, 3);
 
@@ -327,7 +319,6 @@ class CampaignLeadDiscoveryServiceTest {
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any()))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing), "source_id"));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
 
         var result = service.discoverAndPersist(campaign, 3);
 
@@ -353,8 +344,6 @@ class CampaignLeadDiscoveryServiceTest {
         when(deduplicationService.check(any()))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing), "website"));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
-        when(normalizer.normalizeWebsite(anyString())).thenReturn("https://barbeariax.com");
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L, 1L);
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -373,8 +362,6 @@ class CampaignLeadDiscoveryServiceTest {
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any()))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
-        when(normalizer.normalizeWebsite(anyString())).thenReturn("https://barbeariax.com");
         when(websiteContactEnricher.enrich(anyString()))
                 .thenReturn(new WebsiteContactEnricher.WebsiteContactData("+55 65 99999-9999", "email@test.com", "insta"));
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
@@ -396,7 +383,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         // With target=1, we exit after first acceptance, so no fallback should be called
@@ -418,7 +404,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
 
         var result = service.discoverAndPersist(campaign, 3);
 
@@ -438,7 +423,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/2");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -452,7 +436,7 @@ class CampaignLeadDiscoveryServiceTest {
         Campaign nicheCampaign = Campaign.builder()
                 .id(2L)
                 .niche("unknown_niche")
-                .city("Cuiabá")
+                .city("CuiabÃƒÂ¡")
                 .country("Brazil")
                 .requestedQuantity(3)
                 .build();
@@ -461,7 +445,7 @@ class CampaignLeadDiscoveryServiceTest {
         candidate.setCategory("shop=barber");
         candidate.setPhone("+55 65 9999-8888");
 
-        GeoScope nicheScope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
+        GeoScope nicheScope = new GeoScope(-15.6, -56.1, "CuiabÃƒÂ¡", "MT", "Brazil", "br", -15.7, -56.2, -15.5, -56.0, true, "relation", 333734L);
         when(campaignLeadRepository.countByCampaignId(2L)).thenReturn(0L);
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -471,7 +455,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(nicheCampaign, 3);
@@ -493,8 +476,7 @@ class CampaignLeadDiscoveryServiceTest {
 
         LeadCandidate fallbackCandidate = new LeadCandidate("Barbearia Fallback", "openstreetmap", "node/3");
         fallbackCandidate.setCategory("shop=barber");
-        fallbackCandidate.setPhone("+55 65 9999-3333");
-
+        fallbackCandidate.setPhone("+55 65 99999-3333");
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(
                         // Round 1 batch: 2 empty structured (both queue fallback)
@@ -512,7 +494,6 @@ class CampaignLeadDiscoveryServiceTest {
                 );
 
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4", "openstreetmap_node/5");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -536,10 +517,12 @@ class CampaignLeadDiscoveryServiceTest {
     void structuredBatchThenFallbackBatchInSameRound() {
         // Test that within a round, we process up to 2 structured, then up to 2 fallback
         // before moving to next round
-        LeadCandidate fallbackCandidate = new LeadCandidate("Barbearia Fallback", "openstreetmap", "node/3");
-        fallbackCandidate.setCategory("shop=barber");
-        fallbackCandidate.setPhone("+55 65 9999-3333");
-
+        LeadCandidate fallbackCandidate1 = new LeadCandidate("Barbearia Fallback 1", "openstreetmap", "node/3");
+        fallbackCandidate1.setCategory("shop=barber");
+        fallbackCandidate1.setPhone("+55 65 99999-3333");
+        LeadCandidate fallbackCandidate2 = new LeadCandidate("Barbearia Fallback 2", "openstreetmap", "node/4");
+        fallbackCandidate2.setCategory("shop=barber");
+        fallbackCandidate2.setPhone("+55 65 99999-4444");
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(
                         AreaQueryResult.success(List.of(), false, "overpass-api.de", 100),
@@ -549,14 +532,13 @@ class CampaignLeadDiscoveryServiceTest {
                 );
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(
-                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100),
-                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100),
-                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100),
-                        AreaQueryResult.success(List.of(fallbackCandidate), false, "overpass-api.de", 100)
+                        AreaQueryResult.success(List.of(fallbackCandidate1), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(fallbackCandidate2), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(fallbackCandidate1), false, "overpass-api.de", 100),
+                        AreaQueryResult.success(List.of(fallbackCandidate2), false, "overpass-api.de", 100)
                 );
 
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4", "openstreetmap_node/5");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         // target=2 so we exit after round 1 (2 fallback accepted)
@@ -592,7 +574,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 1); // target = 1, so exits after first acceptance
@@ -612,24 +593,23 @@ class CampaignLeadDiscoveryServiceTest {
         Campaign smallCampaign = Campaign.builder()
                 .id(1L)
                 .niche("barbearia")
-                .city("Cuiabá")
+                .city("CuiabÃƒÂ¡")
                 .country("Brazil")
                 .requestedQuantity(1)
                 .build();
 
         // Small scope that won't split
-        GeoScope smallScope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.61, -56.11, -15.59, -56.09, true, "relation", 333734L);
+        GeoScope smallScope = new GeoScope(-15.6, -56.1, "CuiabÃƒÂ¡", "MT", "Brazil", "br", -15.61, -56.11, -15.59, -56.09, true, "relation", 333734L);
         lenient().when(osm.resolveScope(any(), any())).thenReturn(smallScope);
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(
-                        AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Timeout na região A", 5000),
+                        AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Timeout na regiÃƒÂ£o A", 5000),
                         AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100)
                 );
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(smallCampaign, 1);
@@ -653,12 +633,12 @@ class CampaignLeadDiscoveryServiceTest {
         Campaign smallCampaign = Campaign.builder()
                 .id(1L)
                 .niche("barbearia")
-                .city("Cuiabá")
+                .city("CuiabÃƒÂ¡")
                 .country("Brazil")
                 .requestedQuantity(1)
                 .build();
 
-        GeoScope smallScope = new GeoScope(-15.6, -56.1, "Cuiabá", "MT", "Brazil", "br", -15.61, -56.11, -15.59, -56.09, true, "relation", 333734L);
+        GeoScope smallScope = new GeoScope(-15.6, -56.1, "CuiabÃƒÂ¡", "MT", "Brazil", "br", -15.61, -56.11, -15.59, -56.09, true, "relation", 333734L);
         lenient().when(osm.resolveScope(any(), any())).thenReturn(smallScope);
 
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
@@ -670,7 +650,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(smallCampaign, 1);
@@ -696,8 +675,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
-        when(normalizer.normalizeWebsite(anyString())).thenReturn("https://barbeariax.com");
         when(websiteContactEnricher.enrich(anyString()))
                 .thenReturn(new WebsiteContactEnricher.WebsiteContactData("+55 65 99999-9999", "email@test.com", "insta"));
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
@@ -736,8 +713,6 @@ class CampaignLeadDiscoveryServiceTest {
                 .thenReturn(AreaQueryResult.success(List.of(fallbackCandidateB), false, "overpass-api.de", 100));
 
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2", "openstreetmap_node/3", "openstreetmap_node/4");
-        when(normalizer.normalizeWebsite(anyString())).thenReturn("https://barbeariab.com");
         when(websiteContactEnricher.enrich("https://barbeariab.com"))
                 .thenReturn(new WebsiteContactEnricher.WebsiteContactData("+55 65 9999-2222", "email@test.com", "insta"));
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
@@ -757,7 +732,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.STRUCTURED), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         service.discoverAndPersist(campaign, 3);
@@ -781,7 +755,6 @@ class CampaignLeadDiscoveryServiceTest {
         lenient().when(osm.queryRegionWithStrategy(any(), any(), any(), any(), eq(AreaQueryPhase.NAME_FALLBACK), anyInt(), any(), anyLong()))
                 .thenReturn(AreaQueryResult.success(List.of(candidate), false, "overpass-api.de", 100));
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         service.discoverAndPersist(campaign, 3);
@@ -832,7 +805,6 @@ class CampaignLeadDiscoveryServiceTest {
                         AreaQueryResult.infraUnavailableWithAttempt("OSM_DISCOVERY_TIMEOUT", "Budget de descoberta esgotado", 50000)
                 );
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
 
         var result = service.discoverAndPersist(campaign, 3);
@@ -880,7 +852,6 @@ class CampaignLeadDiscoveryServiceTest {
                 ));
 
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/10", "openstreetmap_node/11", "openstreetmap_node/12");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -905,13 +876,13 @@ class CampaignLeadDiscoveryServiceTest {
         LeadCandidate noPhone = new LeadCandidate("Barbearia Sem Contato", "openstreetmap", "node/2");
         noPhone.setCategory("shop=barber");
 
-        LeadCandidate valid1 = new LeadCandidate("Barbearia Válida 1", "openstreetmap", "node/10");
+        LeadCandidate valid1 = new LeadCandidate("Barbearia VÃƒÂ¡lida 1", "openstreetmap", "node/10");
         valid1.setCategory("shop=barber");
         valid1.setPhone("+55 65 9999-2222");
-        LeadCandidate valid2 = new LeadCandidate("Barbearia Válida 2", "openstreetmap", "node/11");
+        LeadCandidate valid2 = new LeadCandidate("Barbearia VÃƒÂ¡lida 2", "openstreetmap", "node/11");
         valid2.setCategory("shop=barber");
         valid2.setPhone("+55 65 9999-3333");
-        LeadCandidate valid3 = new LeadCandidate("Barbearia Válida 3", "openstreetmap", "node/12");
+        LeadCandidate valid3 = new LeadCandidate("Barbearia VÃƒÂ¡lida 3", "openstreetmap", "node/12");
         valid3.setCategory("shop=barber");
         valid3.setPhone("+55 65 9999-4444");
 
@@ -940,7 +911,6 @@ class CampaignLeadDiscoveryServiceTest {
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
                 .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/10", "openstreetmap_node/11", "openstreetmap_node/12");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -956,10 +926,10 @@ class CampaignLeadDiscoveryServiceTest {
     void localCatalogExhaustedWithTwoValidReturnsPartial() throws Exception {
         setField(service, "catalogDiscoveryEnabled", true);
 
-        LeadCandidate valid1 = new LeadCandidate("Barbearia Válida 1", "openstreetmap", "node/10");
+        LeadCandidate valid1 = new LeadCandidate("Barbearia VÃƒÂ¡lida 1", "openstreetmap", "node/10");
         valid1.setCategory("shop=barber");
         valid1.setPhone("+55 65 9999-1111");
-        LeadCandidate valid2 = new LeadCandidate("Barbearia Válida 2", "openstreetmap", "node/11");
+        LeadCandidate valid2 = new LeadCandidate("Barbearia VÃƒÂ¡lida 2", "openstreetmap", "node/11");
         valid2.setCategory("shop=barber");
         valid2.setPhone("+55 65 9999-2222");
 
@@ -971,7 +941,6 @@ class CampaignLeadDiscoveryServiceTest {
                 ));
 
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/10", "openstreetmap_node/11");
         when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -1000,7 +969,6 @@ class CampaignLeadDiscoveryServiceTest {
                 ));
 
         when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
-        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2");
         when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
         when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 

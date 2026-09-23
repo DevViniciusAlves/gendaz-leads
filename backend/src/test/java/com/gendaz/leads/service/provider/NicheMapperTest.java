@@ -90,4 +90,28 @@ class NicheMapperTest {
         assertEquals("shop=hairdresser", parts[0]);
         assertEquals("hairdresser=barber", parts[1]);
     }
+
+    @Test
+    void nailDesignerMapsToShopBeautyNailsStrict() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("nail designer");
+        assertTrue(strategy.tagFilters().contains("shop=beauty,beauty=nails"), "Should contain shop=beauty,beauty=nails");
+        assertEquals(1, strategy.tagFilters().size(), "Nail designer should have exactly 1 structured filter");
+        assertFalse(strategy.tagFilters().contains("shop=beauty"), "Should NOT contain generic shop=beauty");
+        assertFalse(strategy.tagFilters().contains("shop=clothes"), "Should NOT contain shop=clothes");
+    }
+
+    @Test
+    void nailDesignerShopBeautyAloneNotMatch() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("NAIL DESIGNER");
+        assertFalse(strategy.tagFilters().contains("shop=beauty"));
+        assertFalse(strategy.tagFilters().contains("shop=clothes"));
+    }
+
+    @Test
+    void nailDesignerFallbackIsSanitized() {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve("nail designer");
+        assertNotNull(strategy.fallbackNameRegex());
+        // fallback for nail designer is sanitized niche itself (no barber regex)
+        assertTrue(strategy.fallbackNameRegex().toLowerCase().contains("nail"));
+    }
 }

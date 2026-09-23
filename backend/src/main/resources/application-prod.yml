@@ -65,7 +65,6 @@ app:
       enabled: ${OSM_CATALOG_DISCOVERY_ENABLED:true}
       candidate-multiplier: ${OSM_CATALOG_CANDIDATE_MULTIPLIER:10}
       max-candidates: ${OSM_CATALOG_MAX_CANDIDATES:300}
-      entity-merge-radius-meters: ${OSM_CATALOG_ENTITY_MERGE_RADIUS_METERS:50}
   groq:
     api-key: ${GROQ_API_KEY}
     enabled: ${GROQ_ENABLED:true}
