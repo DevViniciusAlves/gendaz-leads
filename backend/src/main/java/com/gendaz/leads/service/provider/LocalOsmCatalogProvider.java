@@ -237,8 +237,6 @@ public class LocalOsmCatalogProvider {
                 "SELECT * FROM osm_places "
                         + "WHERE region_id = :regionId "
                         + "AND active = true "
-                        + "AND phone IS NOT NULL "
-                        + "AND BTRIM(phone) <> '' "
                         + "AND business_name IS NOT NULL "
                         + "AND BTRIM(business_name) <> '' "
                         + "AND ("
@@ -698,8 +696,6 @@ public class LocalOsmCatalogProvider {
         if (
                 place.getBusinessName() == null
                         || place.getBusinessName().isBlank()
-                        || place.getPhone() == null
-                        || place.getPhone().isBlank()
         ) {
             return null;
         }

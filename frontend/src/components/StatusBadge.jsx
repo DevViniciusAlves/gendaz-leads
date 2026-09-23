@@ -7,7 +7,8 @@ const CAMPAIGN_LABELS = {
   GENERATING: ['Gerando', 'badge-blue'],
   COMPLETED: ['Concluida', 'badge-green'],
   FAILED: ['Falha', 'badge-red'],
-  PARTIAL: ['Parcial', 'badge-orange']
+  PARTIAL: ['Parcial', 'badge-orange'],
+  EXHAUSTED: ['Sem novos leads', 'badge-gray']
 }
 
 const LEAD_LABELS = {

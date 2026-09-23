@@ -155,6 +155,97 @@ class TestBuildQualified(unittest.TestCase):
         pass
 
 
+class TestBuildCatalog(unittest.TestCase):
+    def test_commercial_without_phone_is_kept_in_catalog(self):
+        a = make_row(osm_id=1, name='Barbearia Teste', lat=-15.6, lon=-56.1, phone=None, tags={'shop': 'barber'})
+        rows = [a]
+        catalog, stats = sync.build_catalog_rows(rows, 50.0)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]['phone'], None)
+        self.assertEqual(stats['catalog_published'], 1)
+        self.assertEqual(stats['without_phone'], 1)
+        self.assertEqual(stats['with_phone'], 0)
+
+    def test_commercial_with_direct_phone_is_kept(self):
+        a = make_row(osm_id=1, name='Barbearia Teste', lat=-15.6, lon=-56.1, phone='65999991111', tags={'shop': 'barber'})
+        rows = [a]
+        catalog, stats = sync.build_catalog_rows(rows, 50.0)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]['phone'], '5565999991111')
+        self.assertEqual(stats['catalog_published'], 1)
+        self.assertEqual(stats['with_phone'], 1)
+        self.assertEqual(stats['without_phone'], 0)
+
+    def test_commercial_with_website_phone_is_enriched(self):
+        a = make_row(osm_id=1, name='Loja Web', phone=None, website='https://example.com', tags={'shop': 'barber'})
+        html = '<a href="https://wa.me/5565999991111">wa</a>'
+        with patch.object(sync, 'fetch_public_html_result', return_value=sync.FetchResult(html, 'https://example.com', 'OK', 200)):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                catalog, stats = sync.build_catalog_rows([a], 50.0)
+                self.assertEqual(len(catalog), 1)
+                self.assertEqual(catalog[0]['phone'], '5565999991111')
+                self.assertEqual(stats['enriched_website_whatsapp'], 1)
+
+    def test_commercial_with_website_without_phone_is_kept_with_null_phone(self):
+        a = make_row(osm_id=1, name='Loja Sem Phone Web', phone=None, website='https://example.com', tags={'shop': 'barber'})
+        html = '<html>nothing</html>'
+        with patch.object(sync, 'fetch_public_html_result', return_value=sync.FetchResult(html, 'https://example.com', 'OK', 200)):
+            with patch.object(sync, 'is_safe_public_url', return_value=True):
+                catalog, stats = sync.build_catalog_rows([a], 50.0)
+                self.assertEqual(len(catalog), 1)
+                self.assertEqual(catalog[0]['phone'], None)
+                self.assertEqual(stats['catalog_published'], 1)
+                self.assertEqual(stats['without_phone'], 1)
+
+    def test_commercial_without_official_channel_is_kept_with_null_phone(self):
+        a = make_row(osm_id=1, name='Loja Sem Canal', phone=None, website=None, tags={'shop': 'barber'})
+        catalog, stats = sync.build_catalog_rows([a], 50.0)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]['phone'], None)
+        self.assertEqual(stats['catalog_published'], 1)
+        self.assertEqual(stats['without_phone'], 1)
+
+    def test_contact_only_object_is_not_published_as_business(self):
+        b = make_row(osm_id=4, name='Contact Only', lat=-15.6, lon=-56.1, phone='+5565888887777', tags={'name': 'Contact Only'})
+        rows = [b]
+        catalog, stats = sync.build_catalog_rows(rows, 50.0)
+        self.assertEqual(len(catalog), 0)
+        self.assertEqual(stats['discarded_no_commercial'], 1)
+
+    def test_contact_only_object_can_merge_into_commercial(self):
+        a = make_row(osm_id=1, name='Barbearia Teste', lat=-15.6, lon=-56.1, phone=None, tags={'shop': 'barber'}, address='Rua A')
+        b = make_row(osm_id=4, name='Barbearia Teste', lat=-15.6002, lon=-56.1002, phone='+5565888887777', tags={'name': 'Barbearia Teste', 'contact:phone': '+5565888887777'}, website='https://example.com')
+        rows = [a, b]
+        catalog, stats = sync.build_catalog_rows(rows, 50.0)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]['phone'], '5565888887777')
+        self.assertEqual(stats['merged_clusters'], 1)
+
+    def test_companion_phone_is_inherited_safely(self):
+        a = make_row(osm_id=1, name='Barbearia Teste', lat=-15.6, lon=-56.1, phone=None, tags={'shop': 'barber'})
+        b = make_row(osm_id=4, name='Barbearia Teste', lat=-15.6002, lon=-56.1002, phone='+5565888887777', tags={'name': 'Barbearia Teste', 'contact:phone': '+5565888887777'})
+        rows = [a, b]
+        catalog, stats = sync.build_catalog_rows(rows, 50.0)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]['phone'], '5565888887777')
+
+    def test_brand_website_does_not_qualify_branch(self):
+        a = make_row(osm_id=1, name='Loja Marca', phone=None, website=None, tags={'shop': 'barber', 'brand:website': 'https://marca.com'})
+        rows = [a]
+        catalog, stats = sync.build_catalog_rows(rows, 50.0)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]['phone'], None)
+        self.assertEqual(stats['brand_website_seen'], 1)
+
+    def test_operator_website_does_not_qualify_branch(self):
+        a = make_row(osm_id=1, name='Loja Operador', phone=None, website=None, tags={'shop': 'barber', 'operator:website': 'https://operadora.com'})
+        rows = [a]
+        catalog, stats = sync.build_catalog_rows(rows, 50.0)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]['phone'], None)
+        self.assertEqual(stats['operator_website_seen'], 1)
+
+
 class TestQualify(unittest.TestCase):
     def test_qualify_merges_and_discards(self):
         a = make_row(osm_id=1, name='Barbearia Teste', lat=-15.6, lon=-56.1, phone=None, tags={'shop': 'barber'})

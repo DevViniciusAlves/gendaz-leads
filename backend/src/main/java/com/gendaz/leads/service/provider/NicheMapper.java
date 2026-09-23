@@ -382,6 +382,18 @@ public final class NicheMapper {
                         rule(
                                 exact(
                                         "shop",
+                                        "hairdresser"
+                                ),
+                                token(
+                                        "beauty",
+                                        "nails",
+                                        "manicure",
+                                        "pedicure"
+                                )
+                        ),
+                        rule(
+                                exact(
+                                        "shop",
                                         "nail_salon"
                                 )
                         )

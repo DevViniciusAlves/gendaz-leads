@@ -133,11 +133,19 @@ public class AsyncCampaignProcessor {
                 return result.acceptedThisRun();
             }
 
-            case EMPTY -> throw new ApiException(
-                    HttpStatus.NOT_FOUND,
-                    result.errorCode(),
-                    result.errorMessage()
-            );
+            case EMPTY -> {
+                if (Boolean.TRUE.equals(result.coverageExhausted())) {
+                    campaign.setStatus("EXHAUSTED");
+                    campaign.setErrorMessage(truncate(result.errorMessage()));
+                    campaignRepository.save(campaign);
+                    return result.acceptedThisRun();
+                }
+                throw new ApiException(
+                        HttpStatus.NOT_FOUND,
+                        result.errorCode(),
+                        result.errorMessage()
+                );
+            }
 
             case INFRA_UNAVAILABLE -> throw new ApiException(
                     HttpStatus.BAD_GATEWAY,
@@ -233,11 +241,19 @@ public class AsyncCampaignProcessor {
                 return;
             }
 
-            case EMPTY -> throw new ApiException(
-                    HttpStatus.NOT_FOUND,
-                    result.errorCode(),
-                    result.errorMessage()
-            );
+            case EMPTY -> {
+                if (Boolean.TRUE.equals(result.coverageExhausted())) {
+                    campaign.setStatus("EXHAUSTED");
+                    campaign.setErrorMessage(truncate(result.errorMessage()));
+                    campaignRepository.save(campaign);
+                    return;
+                }
+                throw new ApiException(
+                        HttpStatus.NOT_FOUND,
+                        result.errorCode(),
+                        result.errorMessage()
+                );
+            }
 
             case INFRA_UNAVAILABLE -> throw new ApiException(
                     HttpStatus.BAD_GATEWAY,
@@ -346,6 +362,16 @@ public class AsyncCampaignProcessor {
         long messages = leadRepository.countByCampaignIdAndStatusIn(campaign.getId(),
                 List.of("MESSAGE_READY", "APPROVED", "SENT", "REPLIED", "INTERESTED", "SCHEDULED", "CONVERTED"));
         long errors = leadRepository.countByCampaignIdAndStatusIn(campaign.getId(), List.of("ERROR"));
+
+        // If already EXHAUSTED from discovery, preserve it
+        if ("EXHAUSTED".equals(campaign.getStatus())) {
+            log.info("Campanha {} finalizada com status EXHAUSTED (preservado da descoberta)", campaign.getId());
+            campaign.setProgressStage(null);
+            campaign.setProgressCurrent((int) discovered);
+            campaign.setProgressTotal((int) discovered);
+            campaignRepository.save(campaign);
+            return;
+        }
 
         if (discovered == 0) {
             campaign.setStatus("FAILED");

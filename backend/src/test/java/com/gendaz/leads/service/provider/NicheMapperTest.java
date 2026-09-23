@@ -12,7 +12,7 @@ class NicheMapperTest {
     void nailsStrategyHasCorrectCanonicalAndRules() {
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve("nail designer");
         assertEquals("nails", strategy.canonicalName());
-        assertEquals(2, strategy.structuredRules().size());
+        assertEquals(3, strategy.structuredRules().size());
 
         boolean hasBeautyTokenRule = strategy.structuredRules().stream().anyMatch(rule ->
                 rule.allOf().size() == 2
@@ -20,6 +20,13 @@ class NicheMapperTest {
                         && rule.allOf().stream().anyMatch(c -> c.key().equals("beauty") && c.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN && c.acceptedValues().containsAll(List.of("nails", "manicure", "pedicure")))
         );
         assertTrue(hasBeautyTokenRule, "Should contain shop=beauty + beauty SEMICOLON_TOKEN nails/manicure/pedicure");
+
+        boolean hasHairdresserTokenRule = strategy.structuredRules().stream().anyMatch(rule ->
+                rule.allOf().size() == 2
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("shop") && c.mode() == NicheMapper.MatchMode.EXACT && c.acceptedValues().contains("hairdresser"))
+                        && rule.allOf().stream().anyMatch(c -> c.key().equals("beauty") && c.mode() == NicheMapper.MatchMode.SEMICOLON_TOKEN && c.acceptedValues().containsAll(List.of("nails", "manicure", "pedicure")))
+        );
+        assertTrue(hasHairdresserTokenRule, "Should contain shop=hairdresser + beauty SEMICOLON_TOKEN nails/manicure/pedicure");
 
         boolean hasNailSalonRule = strategy.structuredRules().stream().anyMatch(rule ->
                 rule.allOf().size() == 1

@@ -2526,10 +2526,344 @@ def qualify_staging_rows(
     return final_qualified_rows, stats
 
 
-def replace_staging_with_qualified(
+def _empty_catalog_stats(total_rows: int) -> Dict[str, int]:
+    return {
+        'raw_rows': total_rows,
+        'clusters': 0,
+        'commercial_rows': 0,
+        'contact_only_rows': 0,
+        'commercial_clusters': 0,
+        'catalog_published': 0,
+        'with_phone': 0,
+        'without_phone': 0,
+        'direct_phone': 0,
+        'direct_whatsapp': 0,
+        'direct_mobile': 0,
+        'direct_sms': 0,
+        'enriched_phone': 0,
+        'enriched_website_whatsapp': 0,
+        'enriched_website_tel': 0,
+        'enriched_website_jsonld': 0,
+        'enriched_website_microdata': 0,
+        'enriched_website_text': 0,
+        'enriched_website_contact_page': 0,
+        'enriched_contact_hub': 0,
+        'enriched_social_public': 0,
+        'discarded_no_commercial': 0,
+        'website_candidates': 0,
+        'website_ok': 0,
+        'website_fetch_success': 0,
+        'website_phone_found': 0,
+        'website_no_phone': 0,
+        'website_fetch_failed': 0,
+        'website_dns_failed': 0,
+        'website_timeout': 0,
+        'website_tls_failed': 0,
+        'website_http_403': 0,
+        'website_http_404': 0,
+        'website_http_429': 0,
+        'website_http_5xx': 0,
+        'website_too_large': 0,
+        'website_binary': 0,
+        'website_unsafe': 0,
+        'contact_hub_candidates': 0,
+        'contact_hub_phone_found': 0,
+        'social_candidates': 0,
+        'social_phone_found': 0,
+        'social_blocked': 0,
+        'brand_website_seen': 0,
+        'operator_website_seen': 0,
+        'merged_clusters': 0,
+    }
+
+
+def _count_catalog_source(stats: Dict[str, int], source: Optional[str]):
+    if not source:
+        return
+    if source in ('DIRECT_OSM_PHONE', 'DIRECT_OSM_WHATSAPP', 'DIRECT_OSM_MOBILE', 'DIRECT_OSM_SMS'):
+        stats['with_phone'] += 1
+        if source == 'DIRECT_OSM_WHATSAPP':
+            stats['direct_whatsapp'] += 1
+        elif source == 'DIRECT_OSM_MOBILE':
+            stats['direct_mobile'] += 1
+        elif source == 'DIRECT_OSM_SMS':
+            stats['direct_sms'] += 1
+        else:
+            stats['direct_phone'] += 1
+    elif source.startswith('COMPANION_'):
+        stats['with_phone'] += 1
+    elif source in ('OSM_WEBSITE_WHATSAPP', 'OSM_WEBSITE_TEL', 'OSM_WEBSITE_JSONLD_PHONE',
+                    'OSM_WEBSITE_MICRODATA_PHONE', 'OSM_WEBSITE_TEXT_PHONE',
+                    'OSM_WEBSITE_CONTACT_PAGE', 'OSM_WEBSITE_CONTACT_HUB',
+                    'OSM_DIRECT_SOCIAL_PUBLIC', 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'):
+        stats['with_phone'] += 1
+        stats['enriched_phone'] += 1
+        if source == 'OSM_WEBSITE_WHATSAPP':
+            stats['enriched_website_whatsapp'] += 1
+        elif source == 'OSM_WEBSITE_TEL':
+            stats['enriched_website_tel'] += 1
+        elif source == 'OSM_WEBSITE_JSONLD_PHONE':
+            stats['enriched_website_jsonld'] += 1
+        elif source == 'OSM_WEBSITE_MICRODATA_PHONE':
+            stats['enriched_website_microdata'] += 1
+        elif source == 'OSM_WEBSITE_TEXT_PHONE':
+            stats['enriched_website_text'] += 1
+        elif source == 'OSM_WEBSITE_CONTACT_PAGE':
+            stats['enriched_website_contact_page'] += 1
+        elif source == 'OSM_WEBSITE_CONTACT_HUB':
+            stats['enriched_contact_hub'] += 1
+        elif source in ('OSM_DIRECT_SOCIAL_PUBLIC', 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'):
+            stats['enriched_social_public'] += 1
+
+
+def build_catalog_rows(
+    rows,
+    radius_meters=50.0,
+):
+    by_name = defaultdict(list)
+
+    for row in rows:
+        name = row.get('normalized_name')
+
+        if name:
+            by_name[name].append(row)
+
+    stats = _empty_catalog_stats(len(rows))
+
+    # First pass: build merged candidates per cluster
+    pending_candidates = []  # list of (cluster, candidate)
+    for same_name_rows in by_name.values():
+        clusters = cluster_rows(
+            same_name_rows,
+            radius_meters,
+        )
+
+        for cluster in clusters:
+            stats['clusters'] += 1
+
+            if not any(
+                row_is_commercial(row)
+                for row in cluster
+            ):
+                stats['discarded_no_commercial'] += 1
+                continue
+
+            candidate = build_merged_cluster_candidate(cluster)
+            if candidate is None:
+                stats['discarded_no_commercial'] += 1
+                continue
+
+            stats['commercial_clusters'] += 1
+
+            # brand/operator website audit (never qualifies the branch)
+            merged_tags = row_tags(candidate)
+            if isinstance(merged_tags, dict):
+                if first_present(merged_tags, ['brand:website']):
+                    stats['brand_website_seen'] += 1
+                if first_present(merged_tags, ['operator:website']):
+                    stats['operator_website_seen'] += 1
+
+            pending_candidates.append((cluster, candidate))
+
+    stats['commercial_rows'] = sum(1 for _, c in pending_candidates)
+    stats['contact_only_rows'] = len(rows) - stats['commercial_rows'] - stats['discarded_no_commercial']
+
+    # Separate candidates: those with direct phone, those needing enrichment, those without any official channel
+    catalog_candidates = []
+    to_enrich = []
+
+    for cluster, cand in pending_candidates:
+        has_phone = normalize_phone_for_catalog(cand.get('phone'), cand.get('country_code') or '') is not None
+        if has_phone:
+            src = cand.get('_phone_source') or 'DIRECT_OSM_PHONE'
+            # normalize legacy markers
+            if src == 'direct':
+                src = 'DIRECT_OSM_PHONE'
+            elif src == 'companion':
+                src = 'COMPANION_OSM_PHONE'
+            catalog_candidates.append((cluster, cand, src))
+            continue
+        tags = row_tags(cand)
+        needs = False
+        if isinstance(tags, dict) and tags:
+            if has_primary_website(tags) or has_official_social(tags):
+                needs = True
+        if not needs:
+            # fall back to candidate-level fields (merged cluster columns)
+            if normalize_website_url(cand.get('website')) or normalize_instagram_url(cand.get('instagram')):
+                needs = True
+        if needs:
+            to_enrich.append((cluster, cand))
+        else:
+            # No phone, no official channel - still keep in catalog with phone=NULL
+            catalog_candidates.append((cluster, cand, None))
+
+    # Parallel enrichment for candidates with official channels
+    page_cache: Dict[str, WebsiteContactResult] = {}
+    hub_cache: Dict[str, WebsiteContactResult] = {}
+    social_cache: Dict[str, WebsiteContactResult] = {}
+
+    if to_enrich:
+        # Count website candidates (primary website present)
+        website_cands = []
+        for cluster, cand in to_enrich:
+            tags = row_tags(cand)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            if normalize_website_url(raw_site) if raw_site else None:
+                website_cands.append((cluster, cand))
+        stats['website_candidates'] = len(website_cands)
+
+        # Deduplicate website fetches by normalized URL (cache = single GET per URL)
+        url_to_country: Dict[str, str] = {}
+        for _, cand in website_cands:
+            tags = row_tags(cand)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            nurl = normalize_website_url(raw_site)
+            if nurl and nurl not in url_to_country:
+                url_to_country[nurl] = cand.get('country_code') or ''
+
+        if url_to_country:
+            max_workers = max(1, min(WEBSITE_MAX_WORKERS, len(url_to_country)))
+
+            def _fetch_one(item):
+                nurl, country = item
+                # find a representative raw url for fallback semantics
+                raw_probe = nurl
+                for _, c in website_cands:
+                    tags = row_tags(c)
+                    raw_site = c.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+                    if raw_site and normalize_website_url(raw_site) == nurl:
+                        raw_probe = raw_site
+                        break
+                try:
+                    res = fetch_website_contact_result(nurl, country, raw_url=raw_probe, hub_cache=hub_cache)
+                except Exception:
+                    res = WebsiteContactResult(None, None, None, 'FETCH_FAILED')
+                return nurl, res
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_url = {
+                    executor.submit(_fetch_one, item): item[0]
+                    for item in url_to_country.items()
+                }
+                for future in as_completed(future_to_url):
+                    nurl = future_to_url[future]
+                    try:
+                        _, res = future.result()
+                    except Exception:
+                        res = WebsiteContactResult(None, None, None, 'FETCH_FAILED')
+                    page_cache[nurl] = res
+
+        # Per-candidate application + social fallback (uses caches, no duplicate GETs)
+        for cluster, cand in to_enrich:
+            # website stage
+            tags = row_tags(cand)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            nurl = normalize_website_url(raw_site) if raw_site else None
+            res = page_cache.get(nurl) if nurl else None
+            website_status = res.status if res else None
+            if res and res.phone:
+                apply_contact_result_to_candidate(cand, res)
+            else:
+                if res:
+                    if res.email and not cand.get('email'):
+                        cand['email'] = res.email
+                    if res.instagram and not cand.get('instagram'):
+                        cand['instagram'] = res.instagram
+                # social fallback stages D/E (single GET each, cached)
+                if SOCIAL_PUBLIC_FETCH_ENABLED:
+                    # D: direct OSM social
+                    social = official_social_urls(tags) if isinstance(tags, dict) else {}
+                    for platform in ('instagram', 'facebook'):
+                        surl = (social or {}).get(platform)
+                        if not surl and platform == 'instagram' and cand.get('instagram'):
+                            surl = normalize_instagram_url(cand.get('instagram'))
+                        if not surl:
+                            continue
+                        if surl in social_cache:
+                            sres = social_cache[surl]
+                        else:
+                            sres = fetch_public_social_contact(surl, cand.get('country_code') or '')
+                            social_cache[surl] = sres
+                        if sres.phone:
+                            apply_contact_result_to_candidate(cand, sres)
+                            cand['_phone_source'] = 'OSM_DIRECT_SOCIAL_PUBLIC'
+                            break
+                    # E: sameAs social from official website
+                    if not normalize_phone_for_catalog(cand.get('phone'), cand.get('country_code') or ''):
+                        same_as_list = getattr(res, 'same_as_list', []) if res else []
+                        for surl in (same_as_list or [])[:20]:
+                            if classify_external_contact_url(surl) not in ('INSTAGRAM', 'FACEBOOK'):
+                                continue
+                            if surl in social_cache:
+                                sres = social_cache[surl]
+                            else:
+                                sres = fetch_public_social_contact(surl, cand.get('country_code') or '')
+                                if sres.source_type == 'OSM_DIRECT_SOCIAL_PUBLIC':
+                                    sres.source_type = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+                                social_cache[surl] = sres
+                            if sres.phone:
+                                apply_contact_result_to_candidate(cand, sres)
+                                cand['_phone_source'] = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+                                break
+
+            # ALL candidates go to catalog regardless of phone
+            catalog_candidates.append((cluster, cand, cand.get('_phone_source') or (res.source_type if res and res.phone else None)))
+
+        # Per-candidate website outcome metrics
+        for _, cand in to_enrich:
+            tags = row_tags(cand)
+            raw_site = cand.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if isinstance(tags, dict) else None)
+            nurl = normalize_website_url(raw_site) if raw_site else None
+            if not nurl:
+                continue
+            res = page_cache.get(nurl)
+            if res is None:
+                stats['website_fetch_failed'] += 1
+            elif res.status == 'FOUND_PHONE':
+                stats['website_phone_found'] += 1
+                stats['website_fetch_success'] += 1
+            elif res.status == 'NO_PHONE':
+                stats['website_no_phone'] += 1
+                stats['website_fetch_success'] += 1
+            else:
+                _count_fetch_status(stats, res.status)
+
+        # Hub metrics
+        stats['contact_hub_candidates'] = len(hub_cache)
+        stats['contact_hub_phone_found'] = sum(1 for r in hub_cache.values() if r.phone)
+        # Social metrics
+        stats['social_candidates'] = len(social_cache)
+        stats['social_phone_found'] = sum(1 for r in social_cache.values() if r.phone)
+        stats['social_blocked'] = sum(1 for r in social_cache.values() if r.status == 'SOCIAL_BLOCKED')
+        for res in page_cache.values():
+            if res.status in ('TOO_LARGE', 'BINARY_CONTENT'):
+                _count_fetch_status(stats, res.status)
+
+    # Add candidates without enrichment to catalog (those without official channels)
+    for cluster, cand, src in catalog_candidates:
+        # Already have source from earlier
+        pass
+
+    # Now catalog_candidates contains all commercial clusters
+    final_catalog_rows = []
+    for cluster, fin, src in catalog_candidates:
+        final_catalog_rows.append(fin)
+        if len(cluster) > 1:
+            stats['merged_clusters'] += 1
+        _count_catalog_source(stats, src)
+
+    stats['catalog_published'] = len(final_catalog_rows)
+    stats['with_phone'] = sum(1 for c in final_catalog_rows if normalize_phone_for_catalog(c.get('phone'), c.get('country_code') or ''))
+    stats['without_phone'] = stats['catalog_published'] - stats['with_phone']
+
+    return final_catalog_rows, stats
+
+
+def replace_staging_with_catalog(
     conn,
     sync_run_id,
-    qualified_rows,
+    catalog_rows,
 ):
     with conn.cursor() as cur:
         cur.execute(
@@ -2542,10 +2876,10 @@ def replace_staging_with_qualified(
 
     conn.commit()
 
-    if qualified_rows:
+    if catalog_rows:
         insert_staging_batch(
             conn,
-            qualified_rows,
+            catalog_rows,
         )
 
 
@@ -2700,7 +3034,7 @@ def get_previous_qualified_count(
 
 
 def sanity_check(conn, sync_run_id: int, region_id: int, staged_count: int) -> bool:
-    previous_count = get_previous_qualified_count(conn, region_id)
+    previous_count = get_previous_count(conn, region_id)
     if previous_count > 50 and staged_count == 0:
         log('error', 'Sanity check failed: previous count > 50 but staged count is 0',
             previous=previous_count, staged=staged_count)
@@ -2964,8 +3298,8 @@ def main():
 
         log('info', 'contact_coverage_summary', **coverage)
 
-        qualified_rows, qualification_stats = (
-            qualify_staging_rows(
+        catalog_rows, catalog_stats = (
+            build_catalog_rows(
                 raw_rows,
                 50.0,
             )
@@ -2973,74 +3307,71 @@ def main():
 
         log(
             'info',
-            'qualification_summary',
-            raw_rows=qualification_stats['raw_rows'],
-            clusters=qualification_stats['clusters'],
-            qualified=qualification_stats['qualified'],
-            qualified_direct_phone=qualification_stats.get('qualified_direct_phone', 0),
-            qualified_direct_whatsapp=qualification_stats.get('qualified_direct_whatsapp', 0),
-            qualified_direct_mobile=qualification_stats.get('qualified_direct_mobile', 0),
-            qualified_direct_sms=qualification_stats.get('qualified_direct_sms', 0),
-            qualified_companion_phone=qualification_stats.get('qualified_companion_phone', 0),
-            qualified_website_phone=qualification_stats.get('qualified_website_phone', 0),
-            qualified_website_whatsapp=qualification_stats.get('qualified_website_whatsapp', 0),
-            qualified_website_tel=qualification_stats.get('qualified_website_tel', 0),
-            qualified_website_jsonld=qualification_stats.get('qualified_website_jsonld', 0),
-            qualified_website_microdata=qualification_stats.get('qualified_website_microdata', 0),
-            qualified_website_text=qualification_stats.get('qualified_website_text', 0),
-            qualified_website_contact_page=qualification_stats.get('qualified_website_contact_page', 0),
-            qualified_contact_hub=qualification_stats.get('qualified_contact_hub', 0),
-            qualified_social_public=qualification_stats.get('qualified_social_public', 0),
-            discarded_no_commercial=qualification_stats[
-                'discarded_no_commercial'
-            ],
-            discarded_no_phone=qualification_stats[
-                'discarded_no_phone'
-            ],
-            website_candidates=qualification_stats.get('website_candidates', 0),
-            website_ok=qualification_stats.get('website_ok', 0),
-            website_fetch_success=qualification_stats.get('website_fetch_success', 0),
-            website_phone_found=qualification_stats.get('website_phone_found', 0),
-            website_no_phone=qualification_stats.get('website_no_phone', 0),
-            website_fetch_failed=qualification_stats.get('website_fetch_failed', 0),
-            website_dns_failed=qualification_stats.get('website_dns_failed', 0),
-            website_timeout=qualification_stats.get('website_timeout', 0),
-            website_tls_failed=qualification_stats.get('website_tls_failed', 0),
-            website_http_403=qualification_stats.get('website_http_403', 0),
-            website_http_404=qualification_stats.get('website_http_404', 0),
-            website_http_429=qualification_stats.get('website_http_429', 0),
-            website_http_5xx=qualification_stats.get('website_http_5xx', 0),
-            website_too_large=qualification_stats.get('website_too_large', 0),
-            website_binary=qualification_stats.get('website_binary', 0),
-            website_unsafe=qualification_stats.get('website_unsafe', 0),
-            contact_hub_candidates=qualification_stats.get('contact_hub_candidates', 0),
-            contact_hub_phone_found=qualification_stats.get('contact_hub_phone_found', 0),
-            social_candidates=qualification_stats.get('social_candidates', 0),
-            social_phone_found=qualification_stats.get('social_phone_found', 0),
-            social_blocked=qualification_stats.get('social_blocked', 0),
-            brand_website_seen=qualification_stats.get('brand_website_seen', 0),
-            operator_website_seen=qualification_stats.get('operator_website_seen', 0),
-            merged_clusters=qualification_stats[
-                'merged_clusters'
-            ],
+            'catalog_summary',
+            raw_rows=catalog_stats['raw_rows'],
+            clusters=catalog_stats['clusters'],
+            commercial_rows=catalog_stats.get('commercial_rows', 0),
+            contact_only_rows=catalog_stats.get('contact_only_rows', 0),
+            commercial_clusters=catalog_stats.get('commercial_clusters', 0),
+            catalog_published=catalog_stats.get('catalog_published', 0),
+            with_phone=catalog_stats.get('with_phone', 0),
+            without_phone=catalog_stats.get('without_phone', 0),
+            direct_phone=catalog_stats.get('direct_phone', 0),
+            direct_whatsapp=catalog_stats.get('direct_whatsapp', 0),
+            direct_mobile=catalog_stats.get('direct_mobile', 0),
+            direct_sms=catalog_stats.get('direct_sms', 0),
+            enriched_phone=catalog_stats.get('enriched_phone', 0),
+            enriched_website_whatsapp=catalog_stats.get('enriched_website_whatsapp', 0),
+            enriched_website_tel=catalog_stats.get('enriched_website_tel', 0),
+            enriched_website_jsonld=catalog_stats.get('enriched_website_jsonld', 0),
+            enriched_website_microdata=catalog_stats.get('enriched_website_microdata', 0),
+            enriched_website_text=catalog_stats.get('enriched_website_text', 0),
+            enriched_website_contact_page=catalog_stats.get('enriched_website_contact_page', 0),
+            enriched_contact_hub=catalog_stats.get('enriched_contact_hub', 0),
+            enriched_social_public=catalog_stats.get('enriched_social_public', 0),
+            discarded_no_commercial=catalog_stats.get('discarded_no_commercial', 0),
+            website_candidates=catalog_stats.get('website_candidates', 0),
+            website_ok=catalog_stats.get('website_ok', 0),
+            website_fetch_success=catalog_stats.get('website_fetch_success', 0),
+            website_phone_found=catalog_stats.get('website_phone_found', 0),
+            website_no_phone=catalog_stats.get('website_no_phone', 0),
+            website_fetch_failed=catalog_stats.get('website_fetch_failed', 0),
+            website_dns_failed=catalog_stats.get('website_dns_failed', 0),
+            website_timeout=catalog_stats.get('website_timeout', 0),
+            website_tls_failed=catalog_stats.get('website_tls_failed', 0),
+            website_http_403=catalog_stats.get('website_http_403', 0),
+            website_http_404=catalog_stats.get('website_http_404', 0),
+            website_http_429=catalog_stats.get('website_http_429', 0),
+            website_http_5xx=catalog_stats.get('website_http_5xx', 0),
+            website_too_large=catalog_stats.get('website_too_large', 0),
+            website_binary=catalog_stats.get('website_binary', 0),
+            website_unsafe=catalog_stats.get('website_unsafe', 0),
+            contact_hub_candidates=catalog_stats.get('contact_hub_candidates', 0),
+            contact_hub_phone_found=catalog_stats.get('contact_hub_phone_found', 0),
+            social_candidates=catalog_stats.get('social_candidates', 0),
+            social_phone_found=catalog_stats.get('social_phone_found', 0),
+            social_blocked=catalog_stats.get('social_blocked', 0),
+            brand_website_seen=catalog_stats.get('brand_website_seen', 0),
+            operator_website_seen=catalog_stats.get('operator_website_seen', 0),
+            merged_clusters=catalog_stats.get('merged_clusters', 0),
         )
 
-        replace_staging_with_qualified(
+        replace_staging_with_catalog(
             conn,
             args.sync_run_id,
-            qualified_rows,
+            catalog_rows,
         )
 
-        qualified_count = validate_staging(
+        catalog_count = validate_staging(
             conn,
             args.sync_run_id,
         )
 
-        stats['staged'] = qualified_count
+        stats['staged'] = catalog_count
 
-        # Validate staging already done via qualified_count
-        # Sanity check
-        if not sanity_check(conn, args.sync_run_id, args.region_id, qualified_count):
+        # Validate staging already done via catalog_count
+        # Sanity check - uses commercial catalog count
+        if not sanity_check(conn, args.sync_run_id, args.region_id, catalog_count):
             raise ValueError('Sanity check failed: extreme drop in place count')
 
         # Publish atomically (single transaction - includes SUCCESS marking and staging cleanup)

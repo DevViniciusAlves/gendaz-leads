@@ -84,6 +84,18 @@ public class OsmPlace {
     @Column(name = "source_timestamp", columnDefinition = "TIMESTAMPTZ")
     private Instant sourceTimestamp;
 
+    @Column(name = "contact_status", length = 50)
+    private String contactStatus;
+
+    @Column(name = "contact_source", length = 100)
+    private String contactSource;
+
+    @Column(name = "contact_source_url", columnDefinition = "TEXT")
+    private String contactSourceUrl;
+
+    @Column(name = "enriched_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant enrichedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
     private Instant createdAt;
 
