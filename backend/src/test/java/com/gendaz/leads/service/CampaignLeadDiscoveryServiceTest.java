@@ -102,6 +102,8 @@ class CampaignLeadDiscoveryServiceTest {
         when(leadRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(leadEventRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         lenient().when(osm.resolveScope(any(), any())).thenReturn(scope);
+        when(whatsAppRecipientNormalizer.normalizeForWhatsApp(anyString(), anyString()))
+                .thenAnswer(inv -> inv.getArgument(0));
     }
 
     private void setField(Object target, String fieldName, Object value) throws Exception {
@@ -837,5 +839,175 @@ class CampaignLeadDiscoveryServiceTest {
 
         assertEquals(DiscoveryExecutionResult.Outcome.PARTIAL, result.outcome());
         assertEquals(1, result.acceptedThisRun());
+    }
+
+    @Test
+    void localCatalogExhaustiveLoopPage1NoPhonePage2ValidAccepted() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+
+        LeadCandidate noPhone1 = new LeadCandidate("Barbearia Sem Contato 1", "openstreetmap", "node/1");
+        noPhone1.setCategory("shop=barber");
+        LeadCandidate noPhone2 = new LeadCandidate("Barbearia Sem Contato 2", "openstreetmap", "node/2");
+        noPhone2.setCategory("shop=barber");
+        LeadCandidate noPhone3 = new LeadCandidate("Barbearia Sem Contato 3", "openstreetmap", "node/3");
+        noPhone3.setCategory("shop=barber");
+        LeadCandidate noPhone4 = new LeadCandidate("Barbearia Sem Contato 4", "openstreetmap", "node/4");
+        noPhone4.setCategory("shop=barber");
+        LeadCandidate noPhone5 = new LeadCandidate("Barbearia Sem Contato 5", "openstreetmap", "node/5");
+        noPhone5.setCategory("shop=barber");
+
+        LeadCandidate valid1 = new LeadCandidate("Barbearia Com Contato 1", "openstreetmap", "node/10");
+        valid1.setCategory("shop=barber");
+        valid1.setPhone("+55 65 9999-1111");
+        LeadCandidate valid2 = new LeadCandidate("Barbearia Com Contato 2", "openstreetmap", "node/11");
+        valid2.setCategory("shop=barber");
+        valid2.setPhone("+55 65 9999-2222");
+        LeadCandidate valid3 = new LeadCandidate("Barbearia Com Contato 3", "openstreetmap", "node/12");
+        valid3.setCategory("shop=barber");
+        valid3.setPhone("+55 65 9999-3333");
+
+        // Page 1: 30 candidates without phone, hasMore=true
+        // Page 2: 3 candidates with phone, hasMore=false
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), anyInt(), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(noPhone1, noPhone2, noPhone3, noPhone4, noPhone5),
+                        30, 30, true
+                ));
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), anyInt(), eq(30)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(valid1, valid2, valid3),
+                        3, 33, false
+                ));
+
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/10", "openstreetmap_node/11", "openstreetmap_node/12");
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 3);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+        assertEquals(3, result.acceptedThisRun());
+
+        // Verify discoverPage called twice
+        verify(localCatalogProvider, times(2)).discoverPage(anyString(), anyString(), anyString(), anyInt(), anyInt());
+    }
+
+    @Test
+    void localCatalogDuplicateAndNoPhonePage1ValidPage2Accepted() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+
+        LeadCandidate duplicate = new LeadCandidate("Barbearia Duplicada", "openstreetmap", "node/1");
+        duplicate.setCategory("shop=barber");
+        duplicate.setPhone("+55 65 9999-1111");
+
+        LeadCandidate noPhone = new LeadCandidate("Barbearia Sem Contato", "openstreetmap", "node/2");
+        noPhone.setCategory("shop=barber");
+
+        LeadCandidate valid1 = new LeadCandidate("Barbearia Válida 1", "openstreetmap", "node/10");
+        valid1.setCategory("shop=barber");
+        valid1.setPhone("+55 65 9999-2222");
+        LeadCandidate valid2 = new LeadCandidate("Barbearia Válida 2", "openstreetmap", "node/11");
+        valid2.setCategory("shop=barber");
+        valid2.setPhone("+55 65 9999-3333");
+        LeadCandidate valid3 = new LeadCandidate("Barbearia Válida 3", "openstreetmap", "node/12");
+        valid3.setCategory("shop=barber");
+        valid3.setPhone("+55 65 9999-4444");
+
+        // Page 1: duplicate + no phone, hasMore=true
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), anyInt(), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(duplicate, noPhone),
+                        2, 2, true
+                ));
+        // Page 2: 3 valid, hasMore=false
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), anyInt(), eq(2)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(valid1, valid2, valid3),
+                        3, 5, false
+                ));
+
+        Lead existing = Lead.builder()
+                .id(50L)
+                .businessName("Barbearia Duplicada")
+                .phone("+55 65 9999-1111")
+                .doNotContact(false)
+                .build();
+
+        when(deduplicationService.check(any()))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/10", "openstreetmap_node/11", "openstreetmap_node/12");
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 3);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+        assertEquals(3, result.acceptedThisRun());
+        verify(localCatalogProvider, times(2)).discoverPage(anyString(), anyString(), anyString(), anyInt(), anyInt());
+    }
+
+    @Test
+    void localCatalogExhaustedWithTwoValidReturnsPartial() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+
+        LeadCandidate valid1 = new LeadCandidate("Barbearia Válida 1", "openstreetmap", "node/10");
+        valid1.setCategory("shop=barber");
+        valid1.setPhone("+55 65 9999-1111");
+        LeadCandidate valid2 = new LeadCandidate("Barbearia Válida 2", "openstreetmap", "node/11");
+        valid2.setCategory("shop=barber");
+        valid2.setPhone("+55 65 9999-2222");
+
+        // Page 1: 2 valid, hasMore=false (catalog exhausted)
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), anyInt(), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(valid1, valid2),
+                        2, 2, false
+                ));
+
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/10", "openstreetmap_node/11");
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 3);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.PARTIAL, result.outcome());
+        assertEquals(2, result.acceptedThisRun());
+        assertEquals("OSM_CATALOG_PARTIAL", result.errorCode());
+    }
+
+    @Test
+    void localCatalogExhaustedWithZeroValidReturnsEmpty() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+
+        LeadCandidate noPhone1 = new LeadCandidate("Barbearia Sem Contato 1", "openstreetmap", "node/1");
+        noPhone1.setCategory("shop=barber");
+        LeadCandidate noPhone2 = new LeadCandidate("Barbearia Sem Contato 2", "openstreetmap", "node/2");
+        noPhone2.setCategory("shop=barber");
+
+        // Page 1: 2 without phone, hasMore=false (catalog exhausted)
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), anyInt(), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(noPhone1, noPhone2),
+                        2, 2, false
+                ));
+
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(normalizer.normalizeSourceId(anyString(), anyString())).thenReturn("openstreetmap_node/1", "openstreetmap_node/2");
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 3);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.EMPTY, result.outcome());
+        assertEquals(0, result.acceptedThisRun());
+        assertEquals("OSM_NO_USEFUL_LEADS", result.errorCode());
     }
 }

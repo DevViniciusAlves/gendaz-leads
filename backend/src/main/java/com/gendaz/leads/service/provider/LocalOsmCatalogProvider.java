@@ -17,9 +17,13 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 @Component
@@ -33,6 +37,7 @@ public class LocalOsmCatalogProvider {
     private final Normalizer normalizer;
     private final int candidateMultiplier;
     private final int maxCandidates;
+    private final double entityMergeRadiusMeters;
 
     public LocalOsmCatalogProvider(
             OsmCatalogRegionRepository regionRepository,
@@ -40,7 +45,8 @@ public class LocalOsmCatalogProvider {
             NamedParameterJdbcTemplate jdbcTemplate,
             Normalizer normalizer,
             @Value("${app.discovery.catalog.candidate-multiplier:10}") int candidateMultiplier,
-            @Value("${app.discovery.catalog.max-candidates:300}") int maxCandidates
+            @Value("${app.discovery.catalog.max-candidates:300}") int maxCandidates,
+            @Value("${app.discovery.catalog.entity-merge-radius-meters:50}") double entityMergeRadiusMeters
     ) {
         this.regionRepository = regionRepository;
         this.placeRepository = placeRepository;
@@ -48,6 +54,7 @@ public class LocalOsmCatalogProvider {
         this.normalizer = normalizer;
         this.candidateMultiplier = candidateMultiplier;
         this.maxCandidates = maxCandidates;
+        this.entityMergeRadiusMeters = Math.max(1.0, entityMergeRadiusMeters);
     }
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -119,6 +126,21 @@ public class LocalOsmCatalogProvider {
         return null;
     }
 
+    private String firstPresent(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isBlank()) return v.trim();
+        }
+        return null;
+    }
+
+    private String normalizeForCompare(String s) {
+        if (s == null) return "";
+        return java.text.Normalizer.normalize(s.trim().toLowerCase(Locale.ROOT), java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
     public String getName() {
         return "osm-local-catalog";
     }
@@ -133,140 +155,251 @@ public class LocalOsmCatalogProvider {
             String country,
             int target
     ) {
+        return discoverPage(
+                niche,
+                city,
+                country,
+                target,
+                0
+        ).candidates();
+    }
+
+    public CatalogPage discoverPage(
+            String niche,
+            String city,
+            String country,
+            int target,
+            int offset
+    ) {
         String countryCode = CountryCodeResolver.resolveToIso2(country);
+
         String normalizedCity = normalizeForCompare(city);
 
         List<OsmCatalogRegion> readyRegions = regionRepository
-                .findByNormalizedCityAndCountryCodeAndCatalogStatus(normalizedCity, countryCode, "READY");
+                .findByNormalizedCityAndCountryCodeAndCatalogStatus(
+                        normalizedCity,
+                        countryCode,
+                        "READY"
+                );
 
         if (readyRegions.isEmpty()) {
-            throw new IllegalArgumentException("OSM_CATALOG_NOT_READY: O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads.");
+            throw new IllegalArgumentException(
+                    "OSM_CATALOG_NOT_READY: O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads."
+            );
         }
 
         if (readyRegions.size() > 1) {
-            throw new IllegalArgumentException("OSM_CATALOG_LOCATION_AMBIGUOUS: Há mais de uma cidade sincronizada com este nome. Informe uma localização mais específica.");
+            throw new IllegalArgumentException(
+                    "OSM_CATALOG_LOCATION_AMBIGUOUS: Há mais de uma cidade sincronizada com este nome. Informe uma localização mais específica."
+            );
         }
 
         OsmCatalogRegion region = readyRegions.get(0);
 
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
-        int limit = Math.min(Math.max(target * candidateMultiplier, 30), maxCandidates);
 
-        log.info("[osm-catalog] catalog_query regionId={} city={} niche={} target={} limit={} tagFilters={}",
-                region.getId(), city, niche, target, limit, strategy.tagFilters());
+        int pageLimit = Math.min(
+                Math.max(
+                        target * candidateMultiplier,
+                        30
+                ),
+                maxCandidates
+        );
 
-        List<OsmPlace> places;
-        if (strategy.tagFilters().isEmpty()) {
-            places = findByNameFallback(region.getId(), strategy.fallbackNameRegex(), limit);
-        } else {
-            places = findByStructuredTags(region.getId(), strategy.tagFilters(), limit);
-        }
+        int safeOffset = Math.max(0, offset);
 
-        // If we still have room and have tag filters, add name fallback candidates
-        if (!strategy.tagFilters().isEmpty()
-                && places.size() < limit
-                && strategy.fallbackNameRegex() != null
-                && !strategy.fallbackNameRegex().isBlank()) {
+        List<OsmPlace> basePlaces = findCandidatePage(
+                region.getId(),
+                strategy,
+                pageLimit,
+                safeOffset
+        );
 
-            List<OsmPlace> fallbackPlaces = findByNameFallback(
-                    region.getId(),
-                    strategy.fallbackNameRegex(),
-                    limit - places.size()
-            );
-
-            Set<String> seen = new HashSet<>();
-            for (OsmPlace p : places) {
-                seen.add(p.getOsmType() + "/" + p.getOsmId());
-            }
-            for (OsmPlace p : fallbackPlaces) {
-                if (seen.add(p.getOsmType() + "/" + p.getOsmId())) {
-                    places.add(p);
-                }
-            }
-        }
-
-        log.info("[osm-catalog] catalog_candidates regionId={} found={}", region.getId(), places.size());
+        Map<String, List<OsmPlace>> companions = findContactCompanions(
+                region.getId(),
+                basePlaces
+        );
 
         List<LeadCandidate> candidates = new ArrayList<>();
-        for (OsmPlace place : places) {
-            if (candidates.size() >= limit) break;
-            LeadCandidate candidate = mapToCandidate(place);
+
+        for (OsmPlace place : basePlaces) {
+            LeadCandidate candidate = mapToCandidate(
+                    place,
+                    companions.getOrDefault(
+                            place.getNormalizedName(),
+                            List.of()
+                    )
+            );
+
             if (candidate != null) {
                 candidates.add(candidate);
             }
         }
 
-        return candidates;
+        int rawRows = basePlaces.size();
+        int nextOffset = safeOffset + rawRows;
+        boolean hasMore = rawRows == pageLimit;
+
+        log.info(
+                "[osm-catalog] catalog_page regionId={} city={} niche={} offset={} rawRows={} candidates={} pageLimit={} hasMore={}",
+                region.getId(),
+                city,
+                niche,
+                safeOffset,
+                rawRows,
+                candidates.size(),
+                pageLimit,
+                hasMore
+        );
+
+        return new CatalogPage(
+                candidates,
+                rawRows,
+                nextOffset,
+                hasMore
+        );
     }
 
-    private List<OsmPlace> findByStructuredTags(Long regionId, List<String> tagFilters, int limit) {
-        // Build dynamic query for JSONB tag matching
-        // Each filter is like "shop=barber" or "shop=hairdresser,hairdresser=barber" (AND)
-        // Multiple filters are OR
+    public record CatalogPage(
+            List<LeadCandidate> candidates,
+            int rawRows,
+            int nextOffset,
+            boolean hasMore
+    ) {
+    }
 
+    private List<OsmPlace> findCandidatePage(
+            Long regionId,
+            NicheMapper.NicheStrategy strategy,
+            int limit,
+            int offset
+    ) {
         StringBuilder sql = new StringBuilder();
-        sql.append("SELECT * FROM osm_places WHERE region_id = :regionId AND active = true");
 
-        MapSqlParameterSource params = new MapSqlParameterSource("regionId", regionId);
+        sql.append(
+                "SELECT * FROM osm_places "
+                        + "WHERE region_id = :regionId "
+                        + "AND active = true "
+                        + "AND business_name IS NOT NULL "
+                        + "AND BTRIM(business_name) <> '' "
+                        + "AND ("
+        );
 
-        if (!tagFilters.isEmpty()) {
-            sql.append(" AND (");
-            for (int i = 0; i < tagFilters.size(); i++) {
-                if (i > 0) sql.append(" OR ");
-                String filter = tagFilters.get(i);
-                if (filter.contains(",")) {
-                    // AND condition
-                    String[] parts = filter.split(",");
-                    sql.append("(");
-                    for (int j = 0; j < parts.length; j++) {
-                        if (j > 0) sql.append(" AND ");
-                        String[] kv = parts[j].split("=", 2);
-                        String key = kv[0];
-                        String value = kv[1];
-                        String paramKey = "key" + i + "_" + j;
-                        String paramVal = "val" + i + "_" + j;
-                        sql.append("tags->> :").append(paramKey).append(" = :").append(paramVal);
-                        params.addValue(paramKey, key);
-                        params.addValue(paramVal, value);
-                    }
-                    sql.append(")");
-                } else {
-                    String[] kv = filter.split("=", 2);
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("regionId", regionId);
+
+        boolean wrotePredicate = false;
+
+        List<String> tagFilters = strategy.tagFilters();
+
+        if (
+                tagFilters != null
+                        && !tagFilters.isEmpty()
+        ) {
+            appendStructuredPredicate(
+                    sql,
+                    params,
+                    tagFilters
+            );
+
+            wrotePredicate = true;
+        }
+
+        String fallbackRegex = normalizeFallbackRegex(
+                strategy.fallbackNameRegex()
+        );
+
+        if (
+                fallbackRegex != null
+                        && !fallbackRegex.isBlank()
+        ) {
+            if (wrotePredicate) {
+                sql.append(" OR ");
+            }
+
+            sql.append(
+                    "normalized_name ~* :fallbackRegex"
+            );
+
+            params.addValue(
+                    "fallbackRegex",
+                    fallbackRegex
+            );
+
+            wrotePredicate = true;
+        }
+
+        if (!wrotePredicate) {
+            sql.append("FALSE");
+        }
+
+        sql.append(
+                ") ORDER BY "
+                        + "CASE "
+                        + "WHEN NULLIF(BTRIM(phone), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'contact:whatsapp'), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'whatsapp'), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'contact:phone'), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'phone'), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'contact:mobile'), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'mobile'), '') IS NOT NULL "
+                        + "THEN 0 "
+                        + "WHEN NULLIF(BTRIM(website), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'contact:website'), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'website'), '') IS NOT NULL "
+                        + "OR NULLIF(BTRIM(tags->>'url'), '') IS NOT NULL "
+                        + "THEN 1 "
+                        + "ELSE 2 END, "
+                        + "normalized_name, id "
+                        + "LIMIT :limit OFFSET :offset"
+        );
+
+        params
+                .addValue("limit", limit)
+                .addValue("offset", offset);
+
+        return jdbcTemplate.query(
+                sql.toString(),
+                params,
+                this::mapRow
+        );
+    }
+
+    private void appendStructuredPredicate(
+            StringBuilder sql,
+            MapSqlParameterSource params,
+            List<String> tagFilters
+    ) {
+        for (int i = 0; i < tagFilters.size(); i++) {
+            if (i > 0) sql.append(" OR ");
+            String filter = tagFilters.get(i);
+            if (filter.contains(",")) {
+                // AND condition
+                String[] parts = filter.split(",");
+                sql.append("(");
+                for (int j = 0; j < parts.length; j++) {
+                    if (j > 0) sql.append(" AND ");
+                    String[] kv = parts[j].split("=", 2);
                     String key = kv[0];
                     String value = kv[1];
-                    String paramKey = "key" + i;
-                    String paramVal = "val" + i;
+                    String paramKey = "key" + i + "_" + j;
+                    String paramVal = "val" + i + "_" + j;
                     sql.append("tags->> :").append(paramKey).append(" = :").append(paramVal);
                     params.addValue(paramKey, key);
                     params.addValue(paramVal, value);
                 }
+                sql.append(")");
+            } else {
+                String[] kv = filter.split("=", 2);
+                String key = kv[0];
+                String value = kv[1];
+                String paramKey = "key" + i;
+                String paramVal = "val" + i;
+                sql.append("tags->> :").append(paramKey).append(" = :").append(paramVal);
+                params.addValue(paramKey, key);
+                params.addValue(paramVal, value);
             }
-            sql.append(")");
         }
-
-        sql.append(" ORDER BY normalized_name LIMIT :limit");
-        params.addValue("limit", limit);
-
-        return jdbcTemplate.query(sql.toString(), params, this::mapRow);
-    }
-
-    private List<OsmPlace> findByNameFallback(Long regionId, String fallbackRegex, int limit) {
-        String sql = """
-                SELECT *
-                FROM osm_places
-                WHERE region_id = :regionId
-                  AND active = true
-                  AND normalized_name ~* :regex
-                ORDER BY normalized_name, id
-                LIMIT :limit
-                """;
-
-        MapSqlParameterSource params = new MapSqlParameterSource()
-                .addValue("regionId", regionId)
-                .addValue("regex", normalizeFallbackRegex(fallbackRegex))
-                .addValue("limit", limit);
-
-        return jdbcTemplate.query(sql, params, this::mapRow);
     }
 
     private String normalizeFallbackRegex(String regex) {
@@ -286,6 +419,62 @@ public class LocalOsmCatalogProvider {
         }
 
         return String.join("|", normalized);
+    }
+
+    private Map<String, List<OsmPlace>> findContactCompanions(
+            Long regionId,
+            List<OsmPlace> basePlaces
+    ) {
+        Map<String, List<OsmPlace>> companionsByName = new HashMap<>();
+
+        Set<String> uniqueNames = new LinkedHashSet<>();
+        for (OsmPlace place : basePlaces) {
+            uniqueNames.add(place.getNormalizedName());
+        }
+
+        if (uniqueNames.isEmpty()) {
+            return companionsByName;
+        }
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT * FROM osm_places ");
+        sql.append("WHERE region_id = :regionId ");
+        sql.append("AND active = true ");
+        sql.append("AND normalized_name IN (:names) ");
+        sql.append("AND ( ");
+        sql.append("    NULLIF(BTRIM(phone), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'contact:whatsapp'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'whatsapp'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'contact:phone'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'phone'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'contact:mobile'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'mobile'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(website), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'contact:website'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'website'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'url'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(email), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'contact:email'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'email'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(instagram), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'contact:instagram'), '') IS NOT NULL ");
+        sql.append("    OR NULLIF(BTRIM(tags->>'instagram'), '') IS NOT NULL ");
+        sql.append(") ");
+        sql.append("ORDER BY normalized_name, id");
+
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("regionId", regionId)
+                .addValue("names", uniqueNames);
+
+        List<OsmPlace> allCompanions = jdbcTemplate.query(sql.toString(), params, this::mapRow);
+
+        for (OsmPlace companion : allCompanions) {
+            companionsByName
+                    .computeIfAbsent(companion.getNormalizedName(), k -> new ArrayList<>())
+                    .add(companion);
+        }
+
+        return companionsByName;
     }
 
     private OsmPlace mapRow(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
@@ -322,42 +511,137 @@ public class LocalOsmCatalogProvider {
         return p;
     }
 
-    private LeadCandidate mapToCandidate(OsmPlace place) {
+    private record ContactData(
+            String phone,
+            String website,
+            String email,
+            String instagram
+    ) {
+    }
+
+    private ContactData contactData(OsmPlace place) {
+        JsonNode tags = parseTags(place.getTags());
+
+        return new ContactData(
+                firstPhoneLike(
+                        place.getPhone(),
+                        tag(tags, "contact:whatsapp"),
+                        tag(tags, "whatsapp"),
+                        tag(tags, "contact:phone"),
+                        tag(tags, "phone"),
+                        tag(tags, "contact:mobile"),
+                        tag(tags, "mobile")
+                ),
+                firstPresent(
+                        place.getWebsite(),
+                        tag(tags, "contact:website"),
+                        tag(tags, "website"),
+                        tag(tags, "url")
+                ),
+                firstPresent(
+                        place.getEmail(),
+                        tag(tags, "contact:email"),
+                        tag(tags, "email")
+                ),
+                firstPresent(
+                        place.getInstagram(),
+                        tag(tags, "contact:instagram"),
+                        tag(tags, "instagram")
+                )
+        );
+    }
+
+    private double distanceMeters(OsmPlace a, OsmPlace b) {
+        Double latA = a.getLatitude();
+        Double lonA = a.getLongitude();
+        Double latB = b.getLatitude();
+        Double lonB = b.getLongitude();
+
+        if (latA == null || lonA == null || latB == null || lonB == null) {
+            return Double.MAX_VALUE;
+        }
+
+        double R = 6_371_000.0; // Earth radius in meters
+
+        double latARad = Math.toRadians(latA);
+        double latBRad = Math.toRadians(latB);
+        double deltaLat = Math.toRadians(latB - latA);
+        double deltaLon = Math.toRadians(lonB - lonA);
+
+        double a_hav = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2)
+                + Math.cos(latARad) * Math.cos(latBRad)
+                * Math.sin(deltaLon / 2) * Math.sin(deltaLon / 2);
+
+        double c = 2 * Math.atan2(Math.sqrt(a_hav), Math.sqrt(1 - a_hav));
+
+        return R * c;
+    }
+
+    private boolean sameOsmObject(OsmPlace a, OsmPlace b) {
+        return Objects.equals(a.getOsmType(), b.getOsmType())
+                && Objects.equals(a.getOsmId(), b.getOsmId());
+    }
+
+    private List<OsmPlace> nearbyCompanions(OsmPlace base, List<OsmPlace> sameNameRows) {
+        List<OsmPlace> result = new ArrayList<>();
+
+        for (OsmPlace other : sameNameRows) {
+            if (sameOsmObject(base, other)) {
+                continue;
+            }
+
+            if (!Objects.equals(base.getNormalizedName(), other.getNormalizedName())) {
+                continue;
+            }
+
+            double dist = distanceMeters(base, other);
+            if (dist <= entityMergeRadiusMeters) {
+                result.add(other);
+            }
+        }
+
+        result.sort(Comparator
+                .comparingDouble((OsmPlace o) -> distanceMeters(base, o))
+                .thenComparingLong(OsmPlace::getId));
+
+        return result;
+    }
+
+    private ContactData mergeContacts(OsmPlace base, List<OsmPlace> companions) {
+        ContactData merged = contactData(base);
+
+        for (OsmPlace companion : companions) {
+            ContactData c = contactData(companion);
+
+            if (merged.phone() == null && c.phone() != null) {
+                merged = new ContactData(c.phone(), merged.website(), merged.email(), merged.instagram());
+            }
+            if (merged.website() == null && c.website() != null) {
+                merged = new ContactData(merged.phone(), c.website(), merged.email(), merged.instagram());
+            }
+            if (merged.email() == null && c.email() != null) {
+                merged = new ContactData(merged.phone(), merged.website(), c.email(), merged.instagram());
+            }
+            if (merged.instagram() == null && c.instagram() != null) {
+                merged = new ContactData(merged.phone(), merged.website(), merged.email(), c.instagram());
+            }
+        }
+
+        return merged;
+    }
+
+    private LeadCandidate mapToCandidate(
+            OsmPlace place,
+            List<OsmPlace> companions
+    ) {
         if (place.getBusinessName() == null
                 || place.getBusinessName().isBlank()) {
             return null;
         }
 
-        JsonNode tags = parseTags(place.getTags());
-
-        String phone = firstPhoneLike(
-                place.getPhone(),
-                tag(tags, "contact:whatsapp"),
-                tag(tags, "whatsapp"),
-                tag(tags, "contact:phone"),
-                tag(tags, "phone"),
-                tag(tags, "contact:mobile"),
-                tag(tags, "mobile")
-        );
-
-        String website = firstPresent(
-                place.getWebsite(),
-                tag(tags, "contact:website"),
-                tag(tags, "website"),
-                tag(tags, "url")
-        );
-
-        String email = firstPresent(
-                place.getEmail(),
-                tag(tags, "contact:email"),
-                tag(tags, "email")
-        );
-
-        String instagram = firstPresent(
-                place.getInstagram(),
-                tag(tags, "contact:instagram"),
-                tag(tags, "instagram")
-        );
+        ContactData own = contactData(place);
+        List<OsmPlace> nearby = nearbyCompanions(place, companions);
+        ContactData merged = mergeContacts(place, nearby);
 
         LeadCandidate candidate = new LeadCandidate(
                 place.getBusinessName().trim(),
@@ -366,9 +650,9 @@ public class LocalOsmCatalogProvider {
         );
 
         candidate.setCategory(buildCategory(place.getTags()));
-        candidate.setWebsite(website);
-        candidate.setPhone(phone);
-        candidate.setEmail(email);
+        candidate.setWebsite(merged.website());
+        candidate.setPhone(merged.phone());
+        candidate.setEmail(merged.email());
         candidate.setCity(place.getCity());
         candidate.setState(place.getState());
         candidate.setCountry(place.getCountry());
@@ -376,8 +660,8 @@ public class LocalOsmCatalogProvider {
 
         candidate.setInstagramStatus("NOT_FOUND");
 
-        if (instagram != null && !instagram.isBlank()) {
-            String normalized = normalizer.normalizeInstagram(instagram);
+        if (merged.instagram() != null && !merged.instagram().isBlank()) {
+            String normalized = normalizer.normalizeInstagram(merged.instagram());
 
             if (normalized != null && !normalized.isBlank()) {
                 candidate.setInstagramUsername(normalized);
@@ -388,10 +672,14 @@ public class LocalOsmCatalogProvider {
             }
         }
 
+        boolean phoneRecovered = own.phone() == null && merged.phone() != null;
+
         log.info(
-                "[osm-catalog] candidate_contact sourceId={} phonePresent={} websitePresent={} instagramPresent={}",
+                "[osm-catalog] candidate_contact sourceId={} companions={} phonePresent={} phoneRecoveredFromCompanion={} websitePresent={} instagramPresent={}",
                 candidate.getSourceId(),
+                nearby.size(),
                 candidate.getPhone() != null,
+                phoneRecovered,
                 candidate.getWebsite() != null,
                 candidate.getInstagramUsername() != null
         );
@@ -410,20 +698,5 @@ public class LocalOsmCatalogProvider {
             // ignore
         }
         return null;
-    }
-
-    private String firstPresent(String... values) {
-        for (String v : values) {
-            if (v != null && !v.isBlank()) return v.trim();
-        }
-        return null;
-    }
-
-    private String normalizeForCompare(String s) {
-        if (s == null) return "";
-        return java.text.Normalizer.normalize(s.trim().toLowerCase(Locale.ROOT), java.text.Normalizer.Form.NFD)
-                .replaceAll("\\p{M}", "")
-                .replaceAll("\\s+", " ")
-                .trim();
     }
 }

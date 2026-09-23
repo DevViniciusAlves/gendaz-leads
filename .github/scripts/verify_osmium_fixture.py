@@ -13,6 +13,8 @@ def main():
     types = set()
     count = 0
 
+    contact_companion_found = False
+
     with open(path, "r", encoding="utf-8") as handle:
         for raw in handle:
             raw = raw.lstrip("\x1e").strip()
@@ -32,6 +34,13 @@ def main():
             if osm_id is None:
                 raise AssertionError(f"Feature {osm_type} sem @id")
 
+            if (
+                osm_type == 'node'
+                and int(osm_id) == 4
+                and props.get('contact:phone') == '+5565888887777'
+            ):
+                contact_companion_found = True
+
             types.add(osm_type)
             count += 1
 
@@ -44,6 +53,11 @@ def main():
         raise AssertionError(
             "Tipos OSM ausentes no pipeline da fixture: "
             + ", ".join(sorted(missing))
+        )
+
+    if not contact_companion_found:
+        raise AssertionError(
+            'Contact-only OSM companion was dropped by tags-filter/export pipeline'
         )
 
     print(

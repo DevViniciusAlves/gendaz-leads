@@ -17,6 +17,8 @@ from osm_catalog_sync import (
     normalize_name,
     extract_representative_coords,
     is_commercial,
+    has_contact_signal,
+    is_catalog_candidate,
     parse_feature,
 )
 
@@ -342,6 +344,78 @@ class TestParseFeature(unittest.TestCase):
             result['phone'],
             '+5565999999999'
         )
+
+
+class TestContactSignal(unittest.TestCase):
+    def test_contact_only_named_feature_is_catalog_candidate(self):
+        tags = {
+            'name': 'Grego Barbearia',
+            'contact:phone': '+5565999999999',
+        }
+
+        self.assertFalse(is_commercial(tags))
+        self.assertTrue(has_contact_signal(tags))
+        self.assertTrue(is_catalog_candidate(tags))
+
+    def test_whatsapp_yes_only_is_not_contact_signal(self):
+        tags = {
+            'name': 'Teste',
+            'contact:whatsapp': 'yes',
+        }
+
+        self.assertFalse(has_contact_signal(tags))
+        self.assertFalse(is_catalog_candidate(tags))
+
+    def test_contact_only_feature_is_parsed(self):
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 91001,
+                'name': 'Grego Barbearia',
+                'contact:phone': '+5565999999999',
+            },
+            'geometry': {
+                'type': 'Point',
+                'coordinates': [-56.1001, -15.6001],
+            },
+        }
+
+        result = parse_feature(
+            feature,
+            1,
+            1,
+            'Cuiabá',
+            'Mato Grosso',
+            'br',
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['phone'], '+5565999999999')
+
+    def test_unrelated_named_feature_without_contact_is_rejected(self):
+        feature = {
+            'properties': {
+                '@type': 'node',
+                '@id': 91002,
+                'name': 'Objeto Qualquer',
+                'highway': 'bus_stop',
+            },
+            'geometry': {
+                'type': 'Point',
+                'coordinates': [-56.1, -15.6],
+            },
+        }
+
+        result = parse_feature(
+            feature,
+            1,
+            1,
+            'Cuiabá',
+            'Mato Grosso',
+            'br',
+        )
+
+        self.assertIsNone(result)
 
 
 class TestRecordSeparatorHandling(unittest.TestCase):

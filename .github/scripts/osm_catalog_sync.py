@@ -267,6 +267,26 @@ def is_commercial(tags: Dict[str, Any]) -> bool:
     return any(k in tags for k in COMMERCIAL_TAG_KEYS)
 
 
+def has_contact_signal(tags: Dict[str, Any]) -> bool:
+    if first_phone_like(tags, CONTACT_PHONE_KEYS) is not None:
+        return True
+
+    if first_present(tags, CONTACT_WEBSITE_KEYS) is not None:
+        return True
+
+    if first_present(tags, CONTACT_EMAIL_KEYS) is not None:
+        return True
+
+    if first_present(tags, CONTACT_INSTAGRAM_KEYS) is not None:
+        return True
+
+    return False
+
+
+def is_catalog_candidate(tags: Dict[str, Any]) -> bool:
+    return is_commercial(tags) or has_contact_signal(tags)
+
+
 def parse_feature(feature: Dict[str, Any], sync_run_id: int, region_id: int,
                   city: str, state: str, country_code: str) -> Optional[Dict[str, Any]]:
     props = feature.get('properties', {})
@@ -287,8 +307,12 @@ def parse_feature(feature: Dict[str, Any], sync_run_id: int, region_id: int,
     if osm_id is None:
         return None
 
-    # Require commercial tags
-    if not is_commercial(tags):
+    # Require catalog candidate (commercial OR contact signal) AND name
+    if not is_catalog_candidate(tags):
+        return None
+
+    name = first_present(tags, ['name'])
+    if not name:
         return None
 
     name = first_present(tags, ['name'])

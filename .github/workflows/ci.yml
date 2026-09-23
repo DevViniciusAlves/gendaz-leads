@@ -19,9 +19,9 @@ jobs:
           distribution: temurin
           cache: maven
 
-      - name: Build backend
+      - name: Test and build backend
         working-directory: backend
-        run: mvn -B -DskipTests clean package
+        run: mvn -B clean verify
 
   backend-startup-smoke:
     runs-on: ubuntu-latest
@@ -134,14 +134,8 @@ jobs:
       - name: Run osmium fixture pipeline
         run: |
           osmium tags-filter \
+            --expressions=.github/osm-catalog-filter.txt \
             .github/fixtures/small-businesses.osm \
-            nwr/shop \
-            nwr/amenity \
-            nwr/craft \
-            nwr/healthcare \
-            nwr/leisure \
-            nwr/office \
-            nwr/tourism \
             -o /tmp/filtered.osm.pbf
 
           osmium export \

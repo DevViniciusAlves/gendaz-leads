@@ -1241,63 +1241,104 @@ public class CampaignLeadDiscoveryService {
         log.info("[osm-catalog] catalog_query campaignId={} niche={} city={} country={} target={}",
                 campaign.getId(), campaign.getNiche(), campaign.getCity(), campaign.getCountry(), targetToAdd);
 
-        List<LeadCandidate> candidates;
-        try {
-            candidates = localCatalogProvider.discover(
-                    campaign.getNiche(),
-                    campaign.getCity(),
-                    campaign.getCountry(),
-                    targetToAdd
-            );
-        } catch (IllegalArgumentException e) {
-            String message = e.getMessage();
-            if (message != null && message.contains("OSM_CATALOG_NOT_READY")) {
-                return new DiscoveryExecutionResult(
-                        DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE,
-                        0,
-                        initialCampaignLeadCount,
-                        0,
-                        0,
-                        0,
-                        0,
-                        false,
-                        "OSM_CATALOG_NOT_READY",
-                        "O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads."
-                );
-            }
-            if (message != null && message.contains("OSM_CATALOG_LOCATION_AMBIGUOUS")) {
-                return new DiscoveryExecutionResult(
-                        DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE,
-                        0,
-                        initialCampaignLeadCount,
-                        0,
-                        0,
-                        0,
-                        0,
-                        false,
-                        "OSM_CATALOG_LOCATION_AMBIGUOUS",
-                        "Há mais de uma cidade sincronizada com este nome. Informe uma localização mais específica."
-                );
-            }
-            throw e;
-        }
-
-        log.info("[osm-catalog] catalog_candidates campaignId={} found={}", campaign.getId(), candidates.size());
-
-        // Use the same acceptance pipeline as Overpass discovery
-        // Create an unlimited budget for local catalog (no time limit)
-        DiscoveryBudget budget = DiscoveryBudget.unlimited();
+        int offset = 0;
+        int accepted = 0;
+        int scanned = 0;
+        int pages = 0;
+        boolean exhausted = false;
 
         Set<String> seenSourceIds = new HashSet<>();
         Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache = new HashMap<>();
 
-        int accepted = acceptCandidates(
-                campaign,
-                candidates,
-                targetToAdd,
-                seenSourceIds,
-                enrichmentCache
-        );
+        while (accepted < targetToAdd) {
+            LocalOsmCatalogProvider.CatalogPage page;
+            try {
+                page = localCatalogProvider.discoverPage(
+                        campaign.getNiche(),
+                        campaign.getCity(),
+                        campaign.getCountry(),
+                        targetToAdd,
+                        offset
+                );
+            } catch (IllegalArgumentException e) {
+                String message = e.getMessage();
+                if (message != null && message.contains("OSM_CATALOG_NOT_READY")) {
+                    return new DiscoveryExecutionResult(
+                            DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE,
+                            0,
+                            initialCampaignLeadCount,
+                            0,
+                            0,
+                            0,
+                            0,
+                            false,
+                            "OSM_CATALOG_NOT_READY",
+                            "O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads."
+                    );
+                }
+                if (message != null && message.contains("OSM_CATALOG_LOCATION_AMBIGUOUS")) {
+                    return new DiscoveryExecutionResult(
+                            DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE,
+                            0,
+                            initialCampaignLeadCount,
+                            0,
+                            0,
+                            0,
+                            0,
+                            false,
+                            "OSM_CATALOG_LOCATION_AMBIGUOUS",
+                            "Há mais de uma cidade sincronizada com este nome. Informe uma localização mais específica."
+                    );
+                }
+                throw e;
+            }
+
+            pages++;
+            scanned += page.rawRows();
+
+            if (page.rawRows() == 0) {
+                exhausted = true;
+                break;
+            }
+
+            log.info("[osm-catalog] discovery_page campaignId={} page={} offset={} rawRows={} candidates={} acceptedBefore={} target={} hasMore={}",
+                    campaign.getId(),
+                    pages,
+                    offset,
+                    page.rawRows(),
+                    page.candidates().size(),
+                    accepted,
+                    targetToAdd,
+                    page.hasMore()
+            );
+
+            accepted += acceptCandidates(
+                    campaign,
+                    page.candidates(),
+                    targetToAdd - accepted,
+                    seenSourceIds,
+                    enrichmentCache
+            );
+
+            updateProgress(campaign, initialCampaignLeadCount, accepted);
+
+            if (accepted >= targetToAdd) {
+                break;
+            }
+
+            if (!page.hasMore()) {
+                exhausted = true;
+                break;
+            }
+
+            if (page.nextOffset() <= offset) {
+                throw new IllegalStateException(
+                        "OSM catalog paging stalled"
+                );
+            }
+
+            offset = page.nextOffset();
+        }
 
         int totalCampaignLeads =
                 (int) campaignLeadRepository
@@ -1310,21 +1351,30 @@ public class CampaignLeadDiscoveryService {
         if (accepted >= targetToAdd) {
             outcome = DiscoveryExecutionResult.Outcome.COMPLETE;
 
-        } else if (accepted > 0) {
+        } else if (accepted > 0 && exhausted) {
             outcome = DiscoveryExecutionResult.Outcome.PARTIAL;
-            finalErrorMessage = "Foram encontrados " + accepted + " novos leads válidos no catálogo atual.";
+            finalErrorCode = "OSM_CATALOG_PARTIAL";
+            finalErrorMessage = "Foram encontrados " + accepted + " de " + targetToAdd + " novos leads com telefone. O catálogo OSM disponível para este nicho foi esgotado.";
 
-        } else {
+        } else if (accepted == 0 && exhausted) {
             outcome = DiscoveryExecutionResult.Outcome.EMPTY;
             finalErrorCode = "OSM_NO_USEFUL_LEADS";
-            finalErrorMessage = "Nenhum novo lead disponível no catálogo atual para este nicho.";
+            finalErrorMessage = "Nenhum novo lead com telefone foi encontrado após esgotar o catálogo OSM disponível para este nicho.";
+
+        } else {
+            outcome = DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE;
+            finalErrorCode = "OSM_CATALOG_ERROR";
+            finalErrorMessage = "Erro ao consultar o catálogo OSM.";
         }
 
         log.info(
-                "[osm-catalog] discovery_summary campaignId={} acceptedThisRun={} totalCampaignLeads={} outcome={}",
+                "[osm-catalog] discovery_summary campaignId={} acceptedThisRun={} target={} scanned={} pages={} exhausted={} outcome={}",
                 campaign.getId(),
                 accepted,
-                totalCampaignLeads,
+                targetToAdd,
+                scanned,
+                pages,
+                exhausted,
                 outcome
         );
 
@@ -1332,11 +1382,11 @@ public class CampaignLeadDiscoveryService {
                 outcome,
                 accepted,
                 totalCampaignLeads,
-                candidates.size(),
-                candidates.size(),
+                scanned,
+                pages,
                 0,
                 0,
-                true,
+                exhausted,
                 finalErrorCode,
                 finalErrorMessage
         );

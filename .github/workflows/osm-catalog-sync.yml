@@ -191,21 +191,26 @@ jobs:
 
           echo "[osm-sync] city_extract_ok"
 
-      - name: Filter commercial POIs
+      - name: Filter commercial and contact-bearing OSM objects
         run: |
-          echo "[osm-sync] filtering commercial POIs"
-          osmium tags-filter city.osm.pbf \
-            nwr/shop nwr/amenity nwr/craft nwr/healthcare nwr/leisure nwr/office nwr/tourism \
+          echo "[osm-sync] filtering commercial and contact-bearing OSM objects"
+
+          osmium tags-filter \
+            --expressions=.github/osm-catalog-filter.txt \
+            city.osm.pbf \
             -o city-commercial.osm.pbf || {
-            echo "[osm-sync] commercial filter failed"
+            echo "[osm-sync] catalog filter failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium tags-filter failed'
+              SET status = 'FAILED',
+                  finished_at = NOW(),
+                  error_message = 'osmium tags-filter failed'
               WHERE id = $SYNC_RUN_ID;
             "
             exit 1
           }
-          echo "[osm-sync] commercial_filter_ok"
+
+          echo "[osm-sync] catalog_filter_ok"
 
       - name: Export to GeoJSONSeq
         run: |

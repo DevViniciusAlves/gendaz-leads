@@ -8,6 +8,10 @@
   <node id="10" lat="-15.61" lon="-56.11" version="1" timestamp="2026-01-01T00:00:00Z"/>
   <node id="11" lat="-15.61" lon="-56.12" version="1" timestamp="2026-01-01T00:00:00Z"/>
   <node id="12" lat="-15.62" lon="-56.12" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="4" lat="-15.6002" lon="-56.1002" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Barbearia Teste"/>
+    <tag k="contact:phone" v="+5565888887777"/>
+  </node>
   <way id="2" version="1" timestamp="2026-01-01T00:00:00Z">
     <nd ref="10"/>
     <nd ref="11"/>

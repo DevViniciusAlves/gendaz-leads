@@ -1,0 +1,25 @@
+# Commercial POIs
+nwr/shop
+nwr/amenity
+nwr/craft
+nwr/healthcare
+nwr/leisure
+nwr/office
+nwr/tourism
+
+# Phone / WhatsApp
+nwr/phone
+nwr/contact:phone
+nwr/mobile
+nwr/contact:mobile
+nwr/contact:whatsapp
+nwr/whatsapp
+
+# Other contact
+nwr/website
+nwr/contact:website
+nwr/url
+nwr/email
+nwr/contact:email
+nwr/instagram
+nwr/contact:instagram
