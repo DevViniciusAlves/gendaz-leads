@@ -7,16 +7,25 @@ then atomically publishes to osm_places.
 """
 
 import argparse
+import html
+import ipaddress
 import json
 import re
 import sys
 import os
+import socket
+import urllib.error
+import urllib.parse
+import urllib.request
 import psycopg2
 from psycopg2.extras import execute_batch
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 from math import radians, sin, cos, sqrt, atan2
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from html.parser import HTMLParser
 
 
 COMMERCIAL_TAG_KEYS = {
@@ -45,6 +54,346 @@ ADDRESS_KEYS = [
 
 BATCH_SIZE = 1000
 SANITY_DROP_THRESHOLD = 0.10  # 10%
+
+# Website enrichment constants with env overrides
+def _env_int(name: str, default: int) -> int:
+    try:
+        val = os.environ.get(name)
+        if val is not None and str(val).strip():
+            return int(str(val).strip())
+    except Exception:
+        pass
+    return default
+
+WEBSITE_CONNECT_TIMEOUT_SECONDS = _env_int('OSM_SYNC_WEBSITE_CONNECT_TIMEOUT_SECONDS', 2)
+WEBSITE_READ_TIMEOUT_SECONDS = _env_int('OSM_SYNC_WEBSITE_READ_TIMEOUT_SECONDS', 3)
+WEBSITE_MAX_BYTES = _env_int('OSM_SYNC_WEBSITE_MAX_BYTES', 500_000)
+WEBSITE_MAX_WORKERS = _env_int('OSM_SYNC_WEBSITE_MAX_WORKERS', 8)
+
+WEBSITE_MAX_REDIRECTS = 3
+WEBSITE_MAX_CONTACT_PAGES = 2
+
+WHATSAPP_PATTERNS = [
+    re.compile(r'(?i)(?:https?://)?(?:www\.)?wa\.me/([^&"\'\s<>]+)'),
+    re.compile(r'(?i)(?:https?://)?(?:www\.)?(?:api|web)\.whatsapp\.com/send\?[^"\'\s>]*?phone=([^&"\'\s<>]+)'),
+]
+
+TEL_LINK_PATTERN = re.compile(r'''(?i)href\s*=\s*["']\s*tel:([^"']+)["']''')
+
+GENERIC_PHONE_PATTERN = re.compile(r'(?:\+?55[\s().-]*)?(?:\(?\d{2}\)?[\s.-]*)?\d{4,5}[\s.-]?\d{4}')
+
+EMAIL_PATTERN = re.compile(r'([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})', re.I)
+
+INSTAGRAM_PATTERN = re.compile(r'(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9_.]+)', re.I)
+
+CONTACT_KEYWORDS = ['contato', 'contact', 'fale-conosco', 'fale conosco', 'atendimento']
+
+RESERVED_INSTAGRAM = {'p', 'reel', 'tv', 'explore', 'accounts', 'direct', 'developer', 'about', 'legal', 'press', 'jobs', 'api', 'graph', 'www'}
+
+
+@dataclass
+class WebsiteContactResult:
+    phone: Optional[str]
+    email: Optional[str]
+    instagram: Optional[str]
+    status: str
+
+
+def is_public_ip(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(value)
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+    except ValueError:
+        return False
+
+
+def is_safe_public_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url)
+
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        host = parsed.hostname
+        if not host or host.lower() == 'localhost':
+            return False
+
+        infos = socket.getaddrinfo(
+            host,
+            parsed.port or (443 if parsed.scheme == 'https' else 80),
+            type=socket.SOCK_STREAM,
+        )
+
+        if not infos:
+            return False
+
+        return all(
+            is_public_ip(info[4][0])
+            for info in infos
+        )
+    except Exception:
+        return False
+
+
+def normalize_website_url(raw) -> Optional[str]:
+    if raw is None:
+        return None
+
+    value = str(raw).strip()
+    if not value:
+        return None
+
+    if not value.startswith(('http://', 'https://')):
+        value = 'https://' + value
+
+    try:
+        parsed = urllib.parse.urlparse(value)
+
+        if (
+            parsed.scheme not in ('http', 'https')
+            or not parsed.hostname
+        ):
+            return None
+
+        return parsed.geturl()
+    except Exception:
+        return None
+
+
+def fetch_public_html(
+    url: str,
+    redirect_count: int = 0,
+) -> Optional[str]:
+    if redirect_count > WEBSITE_MAX_REDIRECTS:
+        return None
+    if not is_safe_public_url(url):
+        return None
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'GendazLeads-OSM-Sync/1.0'},
+            method='GET'
+        )
+        # use read timeout as overall timeout; connect timeout handled via env but urllib uses single timeout
+        timeout = max(WEBSITE_CONNECT_TIMEOUT_SECONDS, 1) + max(WEBSITE_READ_TIMEOUT_SECONDS, 1)
+        # opener without redirect
+        # create custom handler to prevent auto redirect
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect())
+        # fallback: use opener.open
+        try:
+            resp = opener.open(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            # Handle redirects manually
+            if 300 <= e.code < 400:
+                location = e.headers.get('Location') if e.headers else None
+                if not location:
+                    return None
+                next_url = urllib.parse.urljoin(url, location)
+                if not is_safe_public_url(next_url):
+                    return None
+                return fetch_public_html(next_url, redirect_count + 1)
+            return None
+
+        try:
+            status = getattr(resp, 'status', resp.getcode())
+            if 300 <= status < 400:
+                location = resp.headers.get('Location')
+                if not location:
+                    return None
+                next_url = urllib.parse.urljoin(url, location)
+                if not is_safe_public_url(next_url):
+                    return None
+                return fetch_public_html(next_url, redirect_count + 1)
+            if not (200 <= status < 300):
+                return None
+            content_type = resp.headers.get('Content-Type', '') or ''
+            # If content-type indicates binary and not html/text, return None
+            # but allow missing content-type and try to read
+            if content_type:
+                ct = content_type.lower()
+                if 'text/html' not in ct and 'text/plain' not in ct and 'application/xhtml' not in ct and 'application/xml' not in ct:
+                    # check for obvious binary
+                    if any(x in ct for x in ['image/', 'video/', 'audio/', 'application/octet-stream', 'application/pdf', 'application/zip']):
+                        return None
+            data = resp.read(WEBSITE_MAX_BYTES + 1)
+            if len(data) > WEBSITE_MAX_BYTES:
+                # truncate to max
+                data = data[:WEBSITE_MAX_BYTES]
+            # decode
+            text = data.decode('utf-8', errors='ignore')
+            return text
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+    except (urllib.error.URLError, socket.timeout, socket.gaierror, OSError, ValueError):
+        return None
+    except Exception:
+        return None
+
+
+def _extract_phone_from_html(html_text: str, country_code: str) -> Optional[str]:
+    if not html_text:
+        return None
+    # priority 1..4 whatsapp and tel, then generic
+    for pat in WHATSAPP_PATTERNS:
+        for m in pat.finditer(html_text):
+            raw = m.group(1)
+            if raw:
+                try:
+                    raw = urllib.parse.unquote(raw)
+                except Exception:
+                    pass
+                normalized = normalize_phone_for_catalog(raw, country_code or '')
+                if normalized:
+                    return normalized
+    for m in TEL_LINK_PATTERN.finditer(html_text):
+        raw = m.group(1)
+        if raw:
+            try:
+                raw = urllib.parse.unquote(raw)
+            except Exception:
+                pass
+            normalized = normalize_phone_for_catalog(raw, country_code or '')
+            if normalized:
+                return normalized
+    for m in GENERIC_PHONE_PATTERN.finditer(html_text):
+        raw = m.group(0)
+        if raw:
+            normalized = normalize_phone_for_catalog(raw, country_code or '')
+            if normalized:
+                return normalized
+    return None
+
+
+def _extract_email_from_html(html_text: str) -> Optional[str]:
+    if not html_text:
+        return None
+    for m in EMAIL_PATTERN.finditer(html_text):
+        candidate = m.group(1).strip()
+        if candidate and '@' in candidate:
+            # basic normalization lower
+            val = candidate.lower()
+            if re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', val):
+                return val
+    return None
+
+
+def _extract_instagram_from_html(html_text: str) -> Optional[str]:
+    if not html_text:
+        return None
+    for m in INSTAGRAM_PATTERN.finditer(html_text):
+        handle = m.group(1).strip().strip('/')
+        if not handle:
+            continue
+        # skip query params
+        handle = handle.split('?')[0].split('#')[0].split('/')[0]
+        lower = handle.lower()
+        if lower in RESERVED_INSTAGRAM:
+            continue
+        # normalize: lower, alphanumeric _. keep as spec in WebsiteContactEnricher java
+        if handle:
+            return handle.lower()
+    return None
+
+
+def _find_contact_page_urls(base_url: str, html_text: str) -> List[str]:
+    if not html_text or not base_url:
+        return []
+    try:
+        base_parsed = urllib.parse.urlparse(base_url)
+        base_host = (base_parsed.hostname or '').lower()
+    except Exception:
+        return []
+    candidates = []
+    # regex for anchor tags
+    anchor_pat = re.compile(r'<a[^>]+href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
+    for m in anchor_pat.finditer(html_text):
+        href = m.group(1).strip()
+        inner = re.sub(r'<[^>]+>', '', m.group(2) or '').strip()
+        href_lower = href.lower()
+        inner_lower = inner.lower()
+        combined = href_lower + ' ' + inner_lower
+        # check keyword
+        has_keyword = any(kw in combined for kw in CONTACT_KEYWORDS)
+        if not has_keyword:
+            # also check path segment?
+            continue
+        # resolve url
+        try:
+            resolved = urllib.parse.urljoin(base_url, href)
+            parsed = urllib.parse.urlparse(resolved)
+            if parsed.scheme not in ('http', 'https'):
+                continue
+            host = (parsed.hostname or '').lower()
+            if not host:
+                continue
+            # same hostname only
+            if host != base_host:
+                continue
+            # also ensure not external social link
+            candidates.append(resolved)
+            if len(candidates) >= WEBSITE_MAX_CONTACT_PAGES:
+                break
+        except Exception:
+            continue
+    return candidates[:WEBSITE_MAX_CONTACT_PAGES]
+
+
+def _extract_contact_from_html(html_text: str, country_code: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    phone = _extract_phone_from_html(html_text, country_code)
+    email = _extract_email_from_html(html_text)
+    instagram = _extract_instagram_from_html(html_text)
+    return phone, email, instagram
+
+
+def fetch_website_contact_result(normalized_url: str, country_code: str) -> WebsiteContactResult:
+    if not normalized_url:
+        return WebsiteContactResult(None, None, None, 'INVALID_WEBSITE')
+    if not is_safe_public_url(normalized_url):
+        return WebsiteContactResult(None, None, None, 'UNSAFE_URL')
+    html_text = fetch_public_html(normalized_url, 0)
+    if html_text is None:
+        return WebsiteContactResult(None, None, None, 'FETCH_FAILED')
+    phone, email, instagram = _extract_contact_from_html(html_text, country_code)
+    if phone:
+        return WebsiteContactResult(phone, email, instagram, 'FOUND_PHONE')
+    # try contact pages
+    contact_urls = _find_contact_page_urls(normalized_url, html_text)
+    best_email = email
+    best_insta = instagram
+    for curl in contact_urls:
+        if not is_safe_public_url(curl):
+            continue
+        c_html = fetch_public_html(curl, 0)
+        if c_html is None:
+            continue
+        c_phone, c_email, c_insta = _extract_contact_from_html(c_html, country_code)
+        if c_email and not best_email:
+            best_email = c_email
+        if c_insta and not best_insta:
+            best_insta = c_insta
+        if c_phone:
+            return WebsiteContactResult(c_phone, best_email, best_insta, 'FOUND_PHONE')
+        # keep best
+        if c_email and not email:
+            email = c_email
+        if c_insta and not instagram:
+            instagram = c_insta
+    # aggregated email/instagram but no phone
+    return WebsiteContactResult(None, email or best_email, instagram or best_insta, 'NO_PHONE')
 
 
 def parse_args():
@@ -561,7 +910,7 @@ def first_cluster_value(base, cluster, field):
     return None
 
 
-def build_qualified_row(cluster):
+def build_merged_cluster_candidate(cluster):
     base = choose_canonical_member(cluster)
 
     if base is None:
@@ -578,37 +927,106 @@ def build_qualified_row(cluster):
     )
 
     phone = None
+    phone_source = None
 
     for row in ordered:
-        phone = normalize_phone_for_catalog(
+        normalized = normalize_phone_for_catalog(
             row.get('phone'),
             country_code,
         )
-
-        if phone:
+        if normalized:
+            phone = normalized
+            # Determine if from base or companion
+            if row is base:
+                phone_source = 'direct'
+            else:
+                # companion phone (could be commercial second but treat as companion)
+                phone_source = 'companion' if row not in [base] or True else 'companion'
+                # Distinguish direct vs companion: if first phone found is not base, it's companion
+                if phone_source is None:
+                    phone_source = 'companion'
+            # more precise: if row is base => direct else companion
+            phone_source = 'direct' if row is base else 'companion'
             break
 
+    result = dict(base)
+    # merge website/email/instagram before phone decision
+    result['website'] = first_cluster_value(base, cluster, 'website')
+    result['email'] = first_cluster_value(base, cluster, 'email')
+    result['instagram'] = first_cluster_value(base, cluster, 'instagram')
+    result['tags'] = json.dumps(merge_tags(base, cluster), ensure_ascii=False)
+    if phone:
+        result['phone'] = phone
+        result['_phone_source'] = phone_source
+    else:
+        result['phone'] = None
+        result['_phone_source'] = None
+    return result
+
+
+def enrich_candidate_from_osm_website(candidate, website_cache):
+    # phone already valid -> no HTTP
+    existing = normalize_phone_for_catalog(candidate.get('phone'), candidate.get('country_code') or '')
+    if existing:
+        candidate['phone'] = existing
+        return WebsiteContactResult(existing, candidate.get('email'), candidate.get('instagram'), 'FOUND_PHONE')
+
+    website_raw = candidate.get('website')
+    normalized_url = normalize_website_url(website_raw)
+    if not normalized_url:
+        return WebsiteContactResult(None, None, None, 'INVALID_WEBSITE')
+    country_code = candidate.get('country_code') or ''
+    # cache check
+    if normalized_url in website_cache:
+        cached = website_cache[normalized_url]
+        if cached.phone:
+            candidate['phone'] = cached.phone
+        if cached.email and not candidate.get('email'):
+            candidate['email'] = cached.email
+        if cached.instagram and not candidate.get('instagram'):
+            candidate['instagram'] = cached.instagram
+        return cached
+
+    result = fetch_website_contact_result(normalized_url, country_code)
+    website_cache[normalized_url] = result
+    if result.phone:
+        candidate['phone'] = result.phone
+    if result.email and not candidate.get('email'):
+        candidate['email'] = result.email
+    if result.instagram and not candidate.get('instagram'):
+        candidate['instagram'] = result.instagram
+    return result
+
+
+def finalize_qualified_candidate(candidate):
+    phone = normalize_phone_for_catalog(
+        candidate.get('phone'),
+        candidate.get('country_code') or '',
+    )
     if phone is None:
         return None
+    candidate['phone'] = phone
+    # remove internal marker before persist if exists but keep? Remove _phone_source for storage?
+    candidate.pop('_phone_source', None)
+    return candidate
 
-    result = dict(base)
 
-    result['phone'] = phone
-    result['website'] = first_cluster_value(
-        base, cluster, 'website'
-    )
-    result['email'] = first_cluster_value(
-        base, cluster, 'email'
-    )
-    result['instagram'] = first_cluster_value(
-        base, cluster, 'instagram'
-    )
-    result['tags'] = json.dumps(
-        merge_tags(base, cluster),
-        ensure_ascii=False,
-    )
-
-    return result
+def build_qualified_row(cluster):
+    # preserved for backward compatibility and tests
+    candidate = build_merged_cluster_candidate(cluster)
+    if candidate is None:
+        return None
+    # If no phone but website exists, try website enrichment inline (single thread)
+    # For tests without network, this will attempt fetch but safe fallback
+    if not normalize_phone_for_catalog(candidate.get('phone'), candidate.get('country_code') or ''):
+        # attempt website enrichment with empty cache (no reuse) - will attempt fetch but may return NO_PHONE
+        # To preserve original pure logic for legacy tests, we avoid network: if phone missing, try enrichment only if we can
+        # But for compatibility with previous behavior without website, we return None if no direct/companion phone
+        # However we should attempt enrichment if website present and fetch succeeds (mocked in tests)
+        # Create temporary cache
+        tmp_cache = {}
+        enrich_candidate_from_osm_website(candidate, tmp_cache)
+    return finalize_qualified_candidate(candidate)
 
 
 def load_staging_rows(conn, sync_run_id):
@@ -668,17 +1086,26 @@ def qualify_staging_rows(
         if name:
             by_name[name].append(row)
 
-    qualified = []
-
     stats = {
         'raw_rows': len(rows),
         'clusters': 0,
         'qualified': 0,
+        'qualified_direct_phone': 0,
+        'qualified_companion_phone': 0,
+        'qualified_website_phone': 0,
         'discarded_no_commercial': 0,
         'discarded_no_phone': 0,
+        'website_candidates': 0,
+        'website_fetch_success': 0,
+        'website_phone_found': 0,
+        'website_no_phone': 0,
+        'website_fetch_failed': 0,
+        'website_unsafe': 0,
         'merged_clusters': 0,
     }
 
+    # First pass: build merged candidates per cluster, separate categories
+    pending_candidates = []  # list of (cluster, candidate)
     for same_name_rows in by_name.values():
         clusters = cluster_rows(
             same_name_rows,
@@ -692,29 +1119,187 @@ def qualify_staging_rows(
                 row_is_commercial(row)
                 for row in cluster
             ):
-                stats[
-                    'discarded_no_commercial'
-                ] += 1
+                stats['discarded_no_commercial'] += 1
                 continue
 
-            qualified_row = (
-                build_qualified_row(cluster)
-            )
-
-            if qualified_row is None:
-                stats['discarded_no_phone'] += 1
+            candidate = build_merged_cluster_candidate(cluster)
+            if candidate is None:
+                stats['discarded_no_commercial'] += 1
                 continue
 
             if len(cluster) > 1:
-                stats['merged_clusters'] += 1
+                # will count merged after qualification success
+                pass
 
-            qualified.append(
-                qualified_row
-            )
+            pending_candidates.append((cluster, candidate))
 
-    stats['qualified'] = len(qualified)
+    # Separate A) already has phone, B) needs website, C) no phone no website
+    qualified = []
+    website_cache = {}
+    to_enrich = []  # list of candidates needing website
+    # For metrics tracking
+    enrich_results = []
 
-    return qualified, stats
+    for cluster, cand in pending_candidates:
+        has_phone = normalize_phone_for_catalog(cand.get('phone'), cand.get('country_code') or '') is not None
+        has_website = bool(normalize_website_url(cand.get('website')))
+        if has_phone:
+            src = cand.get('_phone_source')
+            finalized = finalize_qualified_candidate(cand)
+            if finalized:
+                qualified.append((cluster, finalized, src))
+            else:
+                stats['discarded_no_phone'] += 1
+        elif has_website:
+            to_enrich.append((cluster, cand))
+        else:
+            stats['discarded_no_phone'] += 1
+
+    stats['website_candidates'] = len(to_enrich)
+
+    # Parallel enrichment for B)
+    if to_enrich:
+        # Deduplicate by normalized website to avoid duplicate fetches
+        url_to_entries = defaultdict(list)
+        url_to_country = {}
+        for cluster, cand in to_enrich:
+            nurl = normalize_website_url(cand.get('website'))
+            url_to_entries[nurl].append((cluster, cand))
+            url_to_country[nurl] = cand.get('country_code') or ''
+
+        # Limit workers
+        max_workers = max(1, min(WEBSITE_MAX_WORKERS, len(url_to_entries)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {}
+            for nurl, _entries in url_to_entries.items():
+                country = url_to_country.get(nurl, '')
+                # Submit fetch
+                future = executor.submit(fetch_website_contact_result, nurl, country)
+                future_to_url[future] = nurl
+
+            # Collect results
+            url_results = {}
+            for future in as_completed(future_to_url):
+                nurl = future_to_url[future]
+                try:
+                    res = future.result()
+                except Exception:
+                    res = WebsiteContactResult(None, None, None, 'FETCH_FAILED')
+                url_results[nurl] = res
+                website_cache[nurl] = res
+
+            # Update metrics from url_results
+            for nurl, res in url_results.items():
+                if res.status == 'FOUND_PHONE':
+                    stats['website_phone_found'] += len(url_to_entries[nurl]) if False else 1  # count unique URLs? spec says count candidates? We'll count unique URLs for now but spec maybe expects per candidate
+                    stats['website_fetch_success'] += 1
+                elif res.status == 'NO_PHONE':
+                    stats['website_no_phone'] += 1
+                    stats['website_fetch_success'] += 1
+                elif res.status == 'FETCH_FAILED':
+                    stats['website_fetch_failed'] += 1
+                elif res.status == 'UNSAFE_URL':
+                    stats['website_unsafe'] += 1
+                elif res.status == 'INVALID_WEBSITE':
+                    stats['website_fetch_failed'] += 1
+
+            # Need to adjust counts to per candidate not per unique URL for some metrics
+            # Recompute per candidate for phone found vs no phone
+            # But keep website_* as per unique website (makes sense for cache)
+            # For detailed per candidate qualification:
+            # Apply results to candidates
+        for cluster, cand in to_enrich:
+            nurl = normalize_website_url(cand.get('website'))
+            res = url_results.get(nurl)
+            if res is None:
+                res = website_cache.get(nurl) or WebsiteContactResult(None, None, None, 'FETCH_FAILED')
+            # apply to candidate
+            if res.phone:
+                cand['phone'] = res.phone
+            if res.email and not cand.get('email'):
+                cand['email'] = res.email
+            if res.instagram and not cand.get('instagram'):
+                cand['instagram'] = res.instagram
+            finalized = finalize_qualified_candidate(cand)
+            if finalized:
+                qualified.append((cluster, finalized, 'website'))
+                # count website success already
+            else:
+                stats['discarded_no_phone'] += 1
+                # need to adjust website_no_phone etc already counted
+                pass
+
+        # Correct website metrics to per candidate counts for phone found vs no phone
+        # Re-evaluate: stats['website_phone_found'] should count candidates where website enrichment succeeded to provide phone
+        # For now recount:
+        # Reset and recount based on qualified website vs discarded
+        # Simpler: compute per candidate results
+        # We'll recompute website_phone_found as number of qualified website candidates
+        # Actually above we counted per unique URL; let's fix to per candidate where phone found
+        # Quick fix: recount after enrichment loop
+        # Count website qualified vs not
+        # Need to track separately
+        # To avoid double count, redo metrics for website_phone_found counting qualified website entries
+        # Let's adjust: count how many of to_enrich became qualified
+        qualified_website_count = sum(1 for _, fin, src in qualified if src == 'website')
+        # But qualified includes previous direct; need to know website qualified
+        # So compute separately
+        # We already have stats['website_phone_found'] per URL, fix to per candidate:
+        # Re-set:
+        # website_phone_found = qualified website phone
+        # website_no_phone = website_candidates - found - failed - unsafe
+        # Let's recompute safely:
+        # Already we have website_candidates
+        # For each candidate in to_enrich, check its result status
+        per_candidate_found = 0
+        per_candidate_no_phone = 0
+        per_candidate_failed = 0
+        per_candidate_unsafe = 0
+        for _, cand in to_enrich:
+            nurl = normalize_website_url(cand.get('website'))
+            # note cand has been mutated; but result stored in url_results
+            res = url_results.get(nurl)
+            if not res:
+                per_candidate_failed += 1
+            elif res.status == 'FOUND_PHONE':
+                # but finalize may still fail if phone invalid? but already validated
+                # check if candidate now has phone (meaning found)
+                has_phone_now = normalize_phone_for_catalog(cand.get('phone'), cand.get('country_code') or '') is not None
+                if has_phone_now:
+                    per_candidate_found += 1
+                else:
+                    per_candidate_failed += 1
+            elif res.status == 'NO_PHONE':
+                per_candidate_no_phone += 1
+            elif res.status == 'UNSAFE_URL':
+                per_candidate_unsafe += 1
+            elif res.status == 'FETCH_FAILED':
+                per_candidate_failed += 1
+            else:
+                per_candidate_failed += 1
+        stats['website_phone_found'] = per_candidate_found
+        stats['website_no_phone'] = per_candidate_no_phone
+        stats['website_fetch_failed'] = per_candidate_failed
+        stats['website_unsafe'] = per_candidate_unsafe
+        stats['website_fetch_success'] = per_candidate_found + per_candidate_no_phone
+
+    # Now qualified list contains tuples; flatten and count merged
+    final_qualified_rows = []
+    for cluster, fin, src in qualified:
+        final_qualified_rows.append(fin)
+        if len(cluster) > 1:
+            stats['merged_clusters'] += 1
+        if src == 'direct':
+            stats['qualified_direct_phone'] += 1
+        elif src == 'companion':
+            stats['qualified_companion_phone'] += 1
+        elif src == 'website':
+            stats['qualified_website_phone'] += 1
+
+    stats['qualified'] = len(final_qualified_rows)
+    # discarded_no_phone already includes C plus failed enrichments, no need extra
+
+    return final_qualified_rows, stats
 
 
 def replace_staging_with_qualified(
@@ -826,6 +1411,11 @@ def parse_feature(feature: Dict[str, Any], sync_run_id: int, region_id: int,
 
 
 def insert_staging_batch(conn, batch: List[Dict[str, Any]]):
+    # filter out internal keys
+    cleaned = []
+    for row in batch:
+        r = {k: v for k, v in row.items() if not k.startswith('_')}
+        cleaned.append(r)
     sql = """
         INSERT INTO osm_place_staging (
             sync_run_id, region_id, osm_type, osm_id,
@@ -845,7 +1435,7 @@ def insert_staging_batch(conn, batch: List[Dict[str, Any]]):
         ON CONFLICT (sync_run_id, osm_type, osm_id) DO NOTHING
     """
     with conn.cursor() as cur:
-        execute_batch(cur, sql, batch, page_size=BATCH_SIZE)
+        execute_batch(cur, sql, cleaned, page_size=BATCH_SIZE)
     conn.commit()
 
 
@@ -913,7 +1503,7 @@ def publish_staging(
                     FROM osm_place_staging s
                     LEFT JOIN osm_places p
                       ON p.osm_type = s.osm_type
-                     AND p.osm_id = s.osm_id
+                      AND p.osm_id = s.osm_id
                     WHERE s.sync_run_id = %s
                       AND p.id IS NULL
                     """,
@@ -1159,12 +1749,21 @@ def main():
             raw_rows=qualification_stats['raw_rows'],
             clusters=qualification_stats['clusters'],
             qualified=qualification_stats['qualified'],
+            qualified_direct_phone=qualification_stats.get('qualified_direct_phone', 0),
+            qualified_companion_phone=qualification_stats.get('qualified_companion_phone', 0),
+            qualified_website_phone=qualification_stats.get('qualified_website_phone', 0),
             discarded_no_commercial=qualification_stats[
                 'discarded_no_commercial'
             ],
             discarded_no_phone=qualification_stats[
                 'discarded_no_phone'
             ],
+            website_candidates=qualification_stats.get('website_candidates', 0),
+            website_fetch_success=qualification_stats.get('website_fetch_success', 0),
+            website_phone_found=qualification_stats.get('website_phone_found', 0),
+            website_no_phone=qualification_stats.get('website_no_phone', 0),
+            website_fetch_failed=qualification_stats.get('website_fetch_failed', 0),
+            website_unsafe=qualification_stats.get('website_unsafe', 0),
             merged_clusters=qualification_stats[
                 'merged_clusters'
             ],

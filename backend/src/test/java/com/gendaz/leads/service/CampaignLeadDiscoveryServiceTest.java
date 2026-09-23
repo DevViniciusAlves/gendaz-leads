@@ -978,4 +978,264 @@ class CampaignLeadDiscoveryServiceTest {
         assertEquals(0, result.acceptedThisRun());
         assertEquals("OSM_NO_USEFUL_LEADS", result.errorCode());
     }
+
+    @Test
+    void localCatalogTarget3WithDuplicatesProvesDynamicTarget() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+
+        LeadCandidate dup1 = new LeadCandidate("Barbearia Dup 1", "openstreetmap", "node/1");
+        dup1.setCategory("shop=barber");
+        dup1.setPhone("+55 65 9999-1111");
+        LeadCandidate dup2 = new LeadCandidate("Barbearia Dup 2", "openstreetmap", "node/2");
+        dup2.setCategory("shop=barber");
+        dup2.setPhone("+55 65 9999-2222");
+        LeadCandidate novo1 = new LeadCandidate("Barbearia Novo 1", "openstreetmap", "node/3");
+        novo1.setCategory("shop=barber");
+        novo1.setPhone("+55 65 9999-3333");
+
+        LeadCandidate novo2 = new LeadCandidate("Barbearia Novo 2", "openstreetmap", "node/10");
+        novo2.setCategory("shop=barber");
+        novo2.setPhone("+55 65 9999-4444");
+        LeadCandidate novo3 = new LeadCandidate("Barbearia Novo 3", "openstreetmap", "node/11");
+        novo3.setCategory("shop=barber");
+        novo3.setPhone("+55 65 9999-5555");
+
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(3), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(dup1, dup2, novo1),
+                        3, 3, true
+                ));
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(3), eq(3)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(novo2, novo3),
+                        2, 5, false
+                ));
+
+        Lead existing1 = Lead.builder().id(50L).businessName("Barbearia Dup 1").phone("+55 65 9999-1111").doNotContact(false).build();
+        Lead existing2 = Lead.builder().id(51L).businessName("Barbearia Dup 2").phone("+55 65 9999-2222").doNotContact(false).build();
+
+        when(deduplicationService.check(any()))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing1), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existing2), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 3);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+        assertEquals(3, result.acceptedThisRun());
+        // duplicates did not consume quota: page1 had 2 dups (rejected) +1 new = 1 accepted, page2 had 2 new = total 3
+        verify(localCatalogProvider, times(2)).discoverPage(anyString(), anyString(), anyString(), anyInt(), anyInt());
+    }
+
+    @Test
+    void localCatalogTarget10AcrossMultiplePages() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+        campaign.setRequestedQuantity(10);
+
+        List<LeadCandidate> page1Candidates = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            LeadCandidate c = new LeadCandidate("Barbearia P1-" + i, "openstreetmap", "node/" + i);
+            c.setCategory("shop=barber");
+            c.setPhone("+55 65 9000-000" + i);
+            page1Candidates.add(c);
+        }
+        // add 2 duplicates mixed
+        LeadCandidate dupA = new LeadCandidate("Dup A", "openstreetmap", "node/100");
+        dupA.setCategory("shop=barber");
+        dupA.setPhone("+55 65 9999-9999");
+        LeadCandidate dupB = new LeadCandidate("Dup B", "openstreetmap", "node/101");
+        dupB.setCategory("shop=barber");
+        dupB.setPhone("+55 65 9998-8888");
+
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(10), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(dupA, page1Candidates.get(0), page1Candidates.get(1), dupB, page1Candidates.get(2)),
+                        5, 5, true
+                ));
+        List<LeadCandidate> page2 = new java.util.ArrayList<>();
+        for (int i = 3; i < 8; i++) {
+            LeadCandidate c = new LeadCandidate("Barbearia P2-" + i, "openstreetmap", "node/" + (10 + i));
+            c.setCategory("shop=barber");
+            c.setPhone("+55 65 9001-000" + i);
+            page2.add(c);
+        }
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(10), eq(5)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        page2,
+                        5, 10, true
+                ));
+        List<LeadCandidate> page3 = new java.util.ArrayList<>();
+        for (int i = 8; i < 11; i++) {
+            LeadCandidate c = new LeadCandidate("Barbearia P3-" + i, "openstreetmap", "node/" + (20 + i));
+            c.setCategory("shop=barber");
+            c.setPhone("+55 65 9002-000" + i);
+            page3.add(c);
+        }
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(10), eq(10)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        page3,
+                        3, 13, false
+                ));
+
+        Lead existingA = Lead.builder().id(60L).businessName("Dup A").phone("+55 65 9999-9999").build();
+        Lead existingB = Lead.builder().id(61L).businessName("Dup B").phone("+55 65 9998-8888").build();
+        when(deduplicationService.check(any()))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existingA), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(existingB), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 10);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+        assertEquals(10, result.acceptedThisRun());
+    }
+
+    @Test
+    void localCatalogTarget30AcrossManyPages() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+        campaign.setRequestedQuantity(30);
+
+        // Simulate 3 pages: 10 each with phones, plus one partial to reach 30
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(30), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        makeCandidates(0, 10),
+                        10, 10, true
+                ));
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(30), eq(10)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        makeCandidates(10, 10),
+                        10, 20, true
+                ));
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(30), eq(20)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        makeCandidates(20, 10),
+                        10, 30, false
+                ));
+
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 30);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+        assertEquals(30, result.acceptedThisRun());
+        verify(localCatalogProvider, times(3)).discoverPage(anyString(), anyString(), anyString(), eq(30), anyInt());
+    }
+
+    private List<LeadCandidate> makeCandidates(int start, int count) {
+        List<LeadCandidate> list = new java.util.ArrayList<>();
+        for (int i = start; i < start + count; i++) {
+            LeadCandidate c = new LeadCandidate("Barbearia " + i, "openstreetmap", "node/" + (1000 + i));
+            c.setCategory("shop=barber");
+            c.setPhone("+55 65 9" + String.format("%03d", i) + "-0000");
+            list.add(c);
+        }
+        return list;
+    }
+
+    @Test
+    void localCatalogInsufficientReturnsPartial18Of30() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+        campaign.setRequestedQuantity(30);
+
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(30), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        makeCandidates(0, 10),
+                        10, 10, true
+                ));
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(30), eq(10)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        makeCandidates(10, 8),
+                        8, 18, false
+                ));
+
+        when(deduplicationService.check(any())).thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 30);
+
+        assertEquals(DiscoveryExecutionResult.Outcome.PARTIAL, result.outcome());
+        assertEquals(18, result.acceptedThisRun());
+        assertEquals("OSM_CATALOG_PARTIAL", result.errorCode());
+    }
+
+    @Test
+    void duplicateDoesNotConsumeTargetProven() throws Exception {
+        setField(service, "catalogDiscoveryEnabled", true);
+        // target 5 but first page has 3 duplicates, next page has 5 new
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(5), eq(0)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(
+                                dupCandidate("dup1", "node/1", "+55 65 9999-1111"),
+                                dupCandidate("dup2", "node/2", "+55 65 9999-2222"),
+                                dupCandidate("dup3", "node/3", "+55 65 9999-3333"),
+                                newCandidate("new1", "node/10", "+55 65 9000-1111"),
+                                newCandidate("new2", "node/11", "+55 65 9000-2222")
+                        ),
+                        5, 5, true
+                ));
+        when(localCatalogProvider.discoverPage(anyString(), anyString(), anyString(), eq(5), eq(5)))
+                .thenReturn(new LocalOsmCatalogProvider.CatalogPage(
+                        List.of(
+                                newCandidate("new3", "node/12", "+55 65 9000-3333"),
+                                newCandidate("new4", "node/13", "+55 65 9000-4444"),
+                                newCandidate("new5", "node/14", "+55 65 9000-5555")
+                        ),
+                        3, 8, false
+                ));
+        Lead ex1 = Lead.builder().id(1L).businessName("dup1").phone("+55 65 9999-1111").build();
+        Lead ex2 = Lead.builder().id(2L).businessName("dup2").phone("+55 65 9999-2222").build();
+        Lead ex3 = Lead.builder().id(3L).businessName("dup3").phone("+55 65 9999-3333").build();
+        when(deduplicationService.check(any()))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(ex1), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(ex2), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.of(ex3), "source_id"))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null))
+                .thenReturn(new DeduplicationService.DuplicateCheck(Optional.empty(), null));
+        when(persistenceService.createLeadForCampaign(any(), any())).thenReturn(Lead.builder().id(10L).build());
+        when(campaignLeadRepository.countByCampaignId(1L)).thenReturn(0L);
+        when(campaignRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var result = service.discoverAndPersist(campaign, 5);
+        assertEquals(5, result.acceptedThisRun());
+        assertEquals(DiscoveryExecutionResult.Outcome.COMPLETE, result.outcome());
+    }
+
+    private LeadCandidate dupCandidate(String name, String sourceId, String phone) {
+        LeadCandidate c = new LeadCandidate(name, "openstreetmap", sourceId);
+        c.setCategory("shop=barber");
+        c.setPhone(phone);
+        return c;
+    }
+
+    private LeadCandidate newCandidate(String name, String sourceId, String phone) {
+        LeadCandidate c = new LeadCandidate(name, "openstreetmap", sourceId);
+        c.setCategory("shop=barber");
+        c.setPhone(phone);
+        return c;
+    }
 }
