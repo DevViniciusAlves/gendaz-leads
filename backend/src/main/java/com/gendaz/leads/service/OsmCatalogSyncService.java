@@ -1,5 +1,6 @@
 package com.gendaz.leads.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.entity.OsmCatalogRegion;
 import com.gendaz.leads.entity.OsmSyncRun;
 import com.gendaz.leads.entity.User;
@@ -9,6 +10,8 @@ import com.gendaz.leads.repository.OsmSyncRunRepository;
 import com.gendaz.leads.service.provider.BrazilGeofabrikRegionResolver;
 import com.gendaz.leads.service.provider.GeoScope;
 import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
+import com.gendaz.leads.service.provider.LocalOsmCatalogProvider;
+import com.gendaz.leads.service.provider.NicheMapper;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.provider.DiscoveryBudget;
 import com.gendaz.leads.util.CountryCodeResolver;
@@ -55,8 +58,10 @@ public class OsmCatalogSyncService {
         this.syncStatusService = syncStatusService;
     }
 
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     @Transactional
-    public OsmSyncRun requestSync(String city, String country, User requestedBy) {
+    public OsmSyncRun requestSync(String city, String country, String niche, User requestedBy) {
         if (!catalogEnabled) {
             throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_DISABLED",
                     "A sincronização do catálogo OSM está desabilitada.");
@@ -68,8 +73,15 @@ public class OsmCatalogSyncService {
                     "A sincronização local V1 suporta apenas Brasil. País informado: " + country);
         }
 
-        // Check if catalog sync is enabled
-        // This will be validated by the configuration
+        // Resolve niche strategy and serialize
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
+        String strategyJson;
+        try {
+            strategyJson = objectMapper.writeValueAsString(strategy);
+        } catch (Exception e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "OSM_NICHE_SERIALIZATION_FAILED",
+                    "Não foi possível preparar a estratégia do nicho.");
+        }
 
         DiscoveryBudget budget = DiscoveryBudget.unlimited();
         LeadDiscoveryRequest request = new LeadDiscoveryRequest(
@@ -127,13 +139,17 @@ public class OsmCatalogSyncService {
         syncRun.setRegion(region);
         syncRun.setRequestedByUser(requestedBy);
         syncRun.setStatus("QUEUED");
+        syncRun.setRequestedNiche(niche.trim());
+        syncRun.setCanonicalNiche(strategy.canonicalName());
+        syncRun.setNicheStrategyJson(strategyJson);
+        syncRun.setTargetValid(50);
         syncRun = syncRunRepository.save(syncRun);
 
         region.setLastAttemptAt(Instant.now());
         regionRepository.save(region);
 
-        log.info("[osm-catalog] sync_requested syncRunId={} regionId={} city={} state={} countryCode={} osmType={} osmId={} geofabrikRegion={}",
-                syncRun.getId(), region.getId(), city, scope.state(), countryCode, scope.osmType(), scope.osmId(), geofabrikRegion);
+        log.info("[osm-catalog] sync_requested syncRunId={} regionId={} city={} state={} countryCode={} osmType={} osmId={} geofabrikRegion={} canonicalNiche={} targetValid=50",
+                syncRun.getId(), region.getId(), city, scope.state(), countryCode, scope.osmType(), scope.osmId(), geofabrikRegion, strategy.canonicalName());
 
         return syncRun;
     }

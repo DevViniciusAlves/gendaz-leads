@@ -21,7 +21,19 @@ public record OsmSyncRunResponse(
         Long githubRunId,
         String errorMessage,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        String requestedNiche,
+        String canonicalNiche,
+        Integer targetValid,
+        Long candidatesScanned,
+        Long nicheMatches,
+        Long discardedNoPhone,
+        Long discardedNoInstagram,
+        Long discardedNotOnWhatsApp,
+        Long discardedDuplicate,
+        Long technicalFailures,
+        Long qualifiedSaved,
+        Boolean datasetExhausted
 ) {
     public static OsmSyncRunResponse from(OsmSyncRun run) {
         return new OsmSyncRunResponse(
@@ -41,7 +53,19 @@ public record OsmSyncRunResponse(
                 run.getGithubRunId(),
                 run.getErrorMessage(),
                 run.getCreatedAt(),
-                run.getUpdatedAt()
+                run.getUpdatedAt(),
+                run.getRequestedNiche(),
+                run.getCanonicalNiche(),
+                run.getTargetValid(),
+                run.getCandidatesScanned(),
+                run.getNicheMatches(),
+                run.getDiscardedNoPhone(),
+                run.getDiscardedNoInstagram(),
+                run.getDiscardedNotOnWhatsApp(),
+                run.getDiscardedDuplicate(),
+                run.getTechnicalFailures(),
+                run.getQualifiedSaved(),
+                run.getDatasetExhausted()
         );
     }
 }

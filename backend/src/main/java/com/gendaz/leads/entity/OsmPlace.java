@@ -57,6 +57,9 @@ public class OsmPlace {
     @Column(name = "phone", length = 100)
     private String phone;
 
+    @Column(name = "normalized_phone", length = 32)
+    private String normalizedPhone;
+
     @Column(name = "email", length = 255)
     private String email;
 
@@ -66,6 +69,9 @@ public class OsmPlace {
     @Column(name = "instagram", length = 255)
     private String instagram;
 
+    @Column(name = "normalized_instagram", length = 255)
+    private String normalizedInstagram;
+
     @Column(name = "tags", columnDefinition = "JSONB")
     private String tags;
 
@@ -73,16 +79,35 @@ public class OsmPlace {
     @Builder.Default
     private Boolean active = true;
 
-    @Column(name = "first_seen_at", nullable = false, columnDefinition = "TIMESTAMPTZ")
+    @Column(name = "qualified", nullable = false)
     @Builder.Default
-    private Instant firstSeenAt = Instant.now();
+    private Boolean qualified = false;
 
-    @Column(name = "last_seen_at", nullable = false, columnDefinition = "TIMESTAMPTZ")
+    @Column(name = "qualified_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant qualifiedAt;
+
+    @Column(name = "whatsapp_verified", nullable = false)
     @Builder.Default
-    private Instant lastSeenAt = Instant.now();
+    private Boolean whatsappVerified = false;
 
-    @Column(name = "source_timestamp", columnDefinition = "TIMESTAMPTZ")
-    private Instant sourceTimestamp;
+    @Column(name = "whatsapp_verified_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant whatsappVerifiedAt;
+
+    @Column(name = "instagram_validated", nullable = false)
+    @Builder.Default
+    private Boolean instagramValidated = false;
+
+    @Column(name = "instagram_validated_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant instagramValidatedAt;
+
+    @Column(name = "instagram_source", length = 100)
+    private String instagramSource;
+
+    @Column(name = "instagram_source_url", columnDefinition = "TEXT")
+    private String instagramSourceUrl;
+
+    @Column(name = "last_qualified_niche", length = 255)
+    private String lastQualifiedNiche;
 
     @Column(name = "contact_status", length = 50)
     private String contactStatus;

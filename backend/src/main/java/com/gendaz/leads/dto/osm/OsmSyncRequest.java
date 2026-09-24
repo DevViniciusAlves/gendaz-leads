@@ -5,5 +5,6 @@ import jakarta.validation.constraints.Size;
 
 public record OsmSyncRequest(
         @NotBlank @Size(max = 255) String city,
-        @NotBlank @Size(max = 120) String country
+        @NotBlank @Size(max = 120) String country,
+        @NotBlank @Size(max = 255) String niche
 ) {}

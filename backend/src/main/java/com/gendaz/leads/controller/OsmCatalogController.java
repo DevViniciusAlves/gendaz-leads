@@ -55,6 +55,7 @@ public class OsmCatalogController {
         OsmSyncRun syncRun = syncService.requestSync(
                 request.city(),
                 request.country(),
+                request.niche(),
                 currentUser
         );
 

@@ -35,6 +35,22 @@ on:
         description: 'Região Geofabrik (centro-oeste, nordeste, norte, sudeste, sul)'
         required: true
         type: string
+      requested_niche:
+        description: 'Nicho solicitado (ex: barbearias, nail designer)'
+        required: true
+        type: string
+      canonical_niche:
+        description: 'Nicho canônico resolvido'
+        required: true
+        type: string
+      target_valid:
+        description: 'Quantidade de novos leads válidos'
+        required: true
+        type: string
+      niche_strategy_json:
+        description: 'Estratégia serializada do NicheMapper'
+        required: true
+        type: string
 
 concurrency:
   group: osm-catalog-sync
@@ -57,11 +73,19 @@ jobs:
       OSM_TYPE: ${{ github.event.inputs.osm_type }}
       OSM_ID: ${{ github.event.inputs.osm_id }}
       GEOFABRIK_REGION: ${{ github.event.inputs.geofabrik_region }}
+      REQUESTED_NICHE: ${{ github.event.inputs.requested_niche }}
+      CANONICAL_NICHE: ${{ github.event.inputs.canonical_niche }}
+      TARGET_VALID: ${{ github.event.inputs.target_valid }}
+      NICHE_STRATEGY_JSON: ${{ github.event.inputs.niche_strategy_json }}
       GITHUB_RUN_ID: ${{ github.run_id }}
       OSM_SYNC_WEBSITE_MAX_WORKERS: "8"
       OSM_SYNC_SOCIAL_MAX_WORKERS: "4"
       OSM_SYNC_SOCIAL_PUBLIC_FETCH_ENABLED: "true"
       OSM_SYNC_CONTACT_HUBS_ENABLED: "true"
+      OSM_SYNC_WHATSAPP_SERVICE_URL: ${{ secrets.OSM_SYNC_WHATSAPP_SERVICE_URL }}
+      OSM_SYNC_WHATSAPP_INTERNAL_TOKEN: ${{ secrets.OSM_SYNC_WHATSAPP_INTERNAL_TOKEN }}
+      OSM_SYNC_WHATSAPP_CHECK_INTERVAL_MS: "350"
+      OSM_SYNC_WHATSAPP_CHECK_MAX_ATTEMPTS: "3"
 
     steps:
       - name: Checkout repository
@@ -238,6 +262,9 @@ jobs:
             --city "$CITY" \
             --state "$STATE" \
             --country-code "$COUNTRY_CODE" \
+            --canonical-niche "$CANONICAL_NICHE" \
+            --target-valid "$TARGET_VALID" \
+            --niche-strategy-json "$NICHE_STRATEGY_JSON" \
             --input city-commercial.geojsonseq
 
       - name: Update sync run SUCCESS

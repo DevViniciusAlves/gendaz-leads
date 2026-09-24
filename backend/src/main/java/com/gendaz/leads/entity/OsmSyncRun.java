@@ -58,8 +58,58 @@ public class OsmSyncRun {
     @Column(name = "github_run_id")
     private Long githubRunId;
 
-    @Column(name = "error_message", columnDefinition = "TEXT")
+@Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
+
+    // New fields for niche-aware sync
+    @Column(name = "requested_niche", length = 255)
+    private String requestedNiche;
+
+    @Column(name = "canonical_niche", length = 255)
+    private String canonicalNiche;
+
+    @Column(name = "niche_strategy_json", columnDefinition = "TEXT")
+    private String nicheStrategyJson;
+
+    @Column(name = "target_valid")
+    @Builder.Default
+    private Integer targetValid = 50;
+
+    @Column(name = "candidates_scanned")
+    @Builder.Default
+    private Long candidatesScanned = 0L;
+
+    @Column(name = "niche_matches")
+    @Builder.Default
+    private Long nicheMatches = 0L;
+
+    @Column(name = "discarded_no_phone")
+    @Builder.Default
+    private Long discardedNoPhone = 0L;
+
+    @Column(name = "discarded_no_instagram")
+    @Builder.Default
+    private Long discardedNoInstagram = 0L;
+
+    @Column(name = "discarded_not_on_whatsapp")
+    @Builder.Default
+    private Long discardedNotOnWhatsApp = 0L;
+
+    @Column(name = "discarded_duplicate")
+    @Builder.Default
+    private Long discardedDuplicate = 0L;
+
+    @Column(name = "technical_failures")
+    @Builder.Default
+    private Long technicalFailures = 0L;
+
+    @Column(name = "qualified_saved")
+    @Builder.Default
+    private Long qualifiedSaved = 0L;
+
+    @Column(name = "dataset_exhausted")
+    @Builder.Default
+    private Boolean datasetExhausted = false;
 
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
     private Instant createdAt;

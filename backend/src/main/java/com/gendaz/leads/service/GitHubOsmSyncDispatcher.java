@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.util.HashMap;
 import java.util.Map;
 
 @Service
@@ -48,21 +49,23 @@ public class GitHubOsmSyncDispatcher {
             throw new IllegalStateException("OSM_SYNC_GITHUB_NOT_CONFIGURED");
         }
 
-        Map<String, Object> inputs = Map.of(
-                "sync_run_id", syncRun.getId().toString(),
-                "region_id", syncRun.getRegion().getId().toString(),
-                "city", scope.city(),
-                "state", scope.state(),
-                "country_code", scope.countryCode(),
-                "osm_type", scope.osmType(),
-                "osm_id", String.valueOf(scope.osmId()),
-                "geofabrik_region", geofabrikRegion
-        );
+        Map<String, Object> inputs = new HashMap<>();
+        inputs.put("sync_run_id", syncRun.getId().toString());
+        inputs.put("region_id", syncRun.getRegion().getId().toString());
+        inputs.put("city", scope.city());
+        inputs.put("state", scope.state());
+        inputs.put("country_code", scope.countryCode());
+        inputs.put("osm_type", scope.osmType());
+        inputs.put("osm_id", String.valueOf(scope.osmId()));
+        inputs.put("geofabrik_region", geofabrikRegion);
+        inputs.put("requested_niche", syncRun.getRequestedNiche());
+        inputs.put("canonical_niche", syncRun.getCanonicalNiche());
+        inputs.put("target_valid", syncRun.getTargetValid().toString());
+        inputs.put("niche_strategy_json", syncRun.getNicheStrategyJson());
 
-        Map<String, Object> body = Map.of(
-                "ref", ref,
-                "inputs", inputs
-        );
+        Map<String, Object> body = new HashMap<>();
+        body.put("ref", ref);
+        body.put("inputs", inputs);
 
         String url = "/repos/" + repository + "/actions/workflows/" + workflow + "/dispatches";
 

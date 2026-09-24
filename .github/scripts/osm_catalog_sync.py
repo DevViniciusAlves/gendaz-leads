@@ -1256,6 +1256,9 @@ def parse_args():
     parser.add_argument('--city', required=True)
     parser.add_argument('--state', required=True)
     parser.add_argument('--country-code', required=True)
+    parser.add_argument('--canonical-niche', required=True)
+    parser.add_argument('--target-valid', required=True, type=int)
+    parser.add_argument('--niche-strategy-json', required=True)
     parser.add_argument('--input', required=True, help='Input GeoJSONSeq file')
     return parser.parse_args()
 
@@ -1420,6 +1423,103 @@ def normalize_name(name: str) -> str:
     s = ''.join(c for c in s if not unicodedata.combining(c))
     s = ' '.join(s.split())
     return s
+
+
+def normalize_name_phrase(value: Optional[str]) -> str:
+    if value is None:
+        return ''
+    value = unicodedata.normalize('NFD', str(value).strip().lower())
+    value = ''.join(ch for ch in value if unicodedata.category(ch) != 'Mn')
+    value = re.sub(r'[^\w]+', ' ', value, flags=re.UNICODE)
+    value = re.sub(r'\s+', ' ', value).strip()
+    return value
+
+
+def match_condition(tags: Dict[str, Any], condition: Dict[str, Any]) -> bool:
+    key = condition.get('key')
+    mode = condition.get('mode')
+    accepted = {
+        str(v).strip().lower()
+        for v in (condition.get('acceptedValues') or [])
+        if str(v).strip()
+    }
+
+    actual = tags.get(key)
+    if actual is None:
+        return False
+
+    actual = str(actual).strip().lower()
+
+    if mode == 'EXACT':
+        return actual in accepted
+
+    if mode == 'SEMICOLON_TOKEN':
+        tokens = {
+            part.strip().lower()
+            for part in actual.split(';')
+            if part.strip()
+        }
+        return bool(tokens.intersection(accepted))
+
+    return False
+
+
+def match_rule(tags: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+    conditions = rule.get('allOf') or []
+    return bool(conditions) and all(
+        match_condition(tags, condition)
+        for condition in conditions
+    )
+
+
+def match_any_rule(tags: Dict[str, Any], rules) -> bool:
+    return any(match_rule(tags, rule) for rule in (rules or []))
+
+
+def name_contains_alias(name: str, alias: str) -> bool:
+    n = normalize_name_phrase(name)
+    a = normalize_name_phrase(alias)
+
+    if not n or not a:
+        return False
+
+    return f' {a} ' in f' {n} '
+
+
+def matches_niche_strategy(
+    tags: Dict[str, Any],
+    strategy: Dict[str, Any],
+) -> Tuple[bool, str, Optional[str]]:
+    """Check if candidate tags match the niche strategy.
+    
+    Returns:
+        (matched, match_type, matched_rule)
+    """
+    structured = strategy.get('structuredRules') or []
+
+    for idx, rule in enumerate(structured):
+        if match_rule(tags, rule):
+            # Build rule description
+            parts = []
+            for cond in rule.get('allOf') or []:
+                mode = '=' if cond.get('mode') == 'EXACT' else '~'
+                vals = ','.join(cond.get('acceptedValues') or [])
+                parts.append(f"{cond.get('key')}{mode}{vals}")
+            return True, 'STRUCTURED_RULE', f"structuredRules[{idx}]: {' + '.join(parts)}"
+
+    # Check name fallback
+    fallback = strategy.get('nameFallback') or {}
+    if fallback and fallback.get('enabled'):
+        context_match = True
+        if fallback.get('requiresContext'):
+            context_match = match_any_rule(tags, fallback.get('contextAnyOf') or [])
+        if context_match:
+            for alias in fallback.get('aliases') or []:
+                name = tags.get('normalized_name') or tags.get('business_name') or ''
+                if name_contains_alias(name, alias):
+                    return True, 'NAME_FALLBACK', alias
+
+    return False, 'NO_MATCH', None
 
 
 def representative_ring_point(ring):
@@ -2550,6 +2650,7 @@ def _empty_catalog_stats(total_rows: int) -> Dict[str, int]:
         'enriched_contact_hub': 0,
         'enriched_social_public': 0,
         'discarded_no_commercial': 0,
+        'discarded_niche_mismatch': 0,
         'website_candidates': 0,
         'website_ok': 0,
         'website_fetch_success': 0,
@@ -2619,6 +2720,9 @@ def _count_catalog_source(stats: Dict[str, int], source: Optional[str]):
 def build_catalog_rows(
     rows,
     radius_meters=50.0,
+    canonical_niche=None,
+    target_valid=50,
+    niche_strategy=None,
 ):
     by_name = defaultdict(list)
 
@@ -2654,6 +2758,15 @@ def build_catalog_rows(
                 continue
 
             stats['commercial_clusters'] += 1
+
+            # Niche matching - only process candidates that match the requested niche
+            if canonical_niche and niche_strategy:
+                merged_tags = row_tags(candidate)
+                if isinstance(merged_tags, dict):
+                    matched, match_type, matched_rule = matches_niche_strategy(merged_tags, niche_strategy)
+                    if not matched:
+                        stats['discarded_niche_mismatch'] += 1
+                        continue
 
             # brand/operator website audit (never qualifies the branch)
             merged_tags = row_tags(candidate)
@@ -3298,10 +3411,24 @@ def main():
 
         log('info', 'contact_coverage_summary', **coverage)
 
+        # Parse niche strategy from JSON
+        niche_strategy_json = os.environ.get('NICHE_STRATEGY_JSON', '{}')
+        try:
+            niche_strategy = json.loads(niche_strategy_json)
+        except json.JSONDecodeError as e:
+            log('error', 'Failed to parse niche strategy JSON', error=str(e))
+            sys.exit(1)
+
+        canonical_niche = os.environ.get('CANONICAL_NICHE', args.canonical_niche)
+        target_valid = int(os.environ.get('TARGET_VALID', args.target_valid))
+
         catalog_rows, catalog_stats = (
             build_catalog_rows(
                 raw_rows,
                 50.0,
+                canonical_niche=canonical_niche,
+                target_valid=target_valid,
+                niche_strategy=niche_strategy,
             )
         )
 
