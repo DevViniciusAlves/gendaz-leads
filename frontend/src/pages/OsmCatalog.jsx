@@ -4,6 +4,7 @@ import { useToast } from '../components/Toast.jsx'
 import { Modal } from '../components/Modal.jsx'
 import { IconDatabase, IconSync, IconRefresh, IconPlus } from '../components/Icons.jsx'
 import { formatNumber } from '../format.js'
+import { buildOsmSyncRequest } from '../lib/osmSyncRequest.js'
 
 const STATUS_COLORS = {
   READY: 'success',
@@ -37,6 +38,9 @@ export function OsmCatalog() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [syncModalMode, setSyncModalMode] = useState(null)
+  // null | 'NEW_CITY' | 'EXISTING_REGION'
+  const [selectedRegion, setSelectedRegion] = useState(null)
   const [countries, setCountries] = useState([])
   const [countriesLoading, setCountriesLoading] = useState(true)
   const [countriesError, setCountriesError] = useState('')
@@ -46,15 +50,35 @@ export function OsmCatalog() {
   const pollingIntervals = useRef({})
   const checkedActiveRuns = useRef(new Set())
 
-  function loadRegions() {
+  async function loadRegions() {
     setLoading(true)
-    api.get('/api/osm-catalog/regions')
-      .then((data) => {
-        setRegions(data)
-        setError('')
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false))
+    try {
+      const data = await api.get('/api/osm-catalog/regions')
+      setRegions(data)
+      setError('')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function closeSyncModal() {
+    setShowForm(false)
+    setSyncModalMode(null)
+    setSelectedRegion(null)
+  }
+
+  function openNewCitySync() {
+    setSelectedRegion(null)
+    setSyncModalMode('NEW_CITY')
+    setShowForm(true)
+  }
+
+  function openExistingRegionSync(region) {
+    setSelectedRegion(region)
+    setSyncModalMode('EXISTING_REGION')
+    setShowForm(true)
   }
 
   useEffect(() => {
@@ -121,33 +145,13 @@ export function OsmCatalog() {
     }
     setFormSubmitting(true)
     try {
-      const response = await api.post('/api/osm-catalog/sync', { city, country, niche })
+      const { url, body } = buildOsmSyncRequest({ mode: 'NEW_CITY', city, country, niche })
+      const response = await api.post(url, body)
       push('Sincronização iniciada. Verifique o status na tabela.', 'success')
-      setShowForm(false)
-      // Insert the new run immediately into the region
-      if (response.syncRunId && response.regionId) {
-        setRegions((prev) =>
-          prev.map((region) =>
-            region.id === response.regionId
-              ? {
-                  ...region,
-                  syncRuns: [
-                    {
-                      id: response.syncRunId,
-                      regionId: response.regionId,
-                      city: response.city,
-                      state: response.state,
-                      country: response.country,
-                      status: response.status || 'QUEUED'
-                    }
-                  ]
-                }
-              : region
-          )
-        )
-
-        checkedActiveRuns.current.add(response.regionId)
-
+      closeSyncModal()
+      await loadRegions()
+      applyAcceptedRun(response)
+      if (response.syncRunId) {
         startPolling(response.syncRunId)
       }
     } catch (err) {
@@ -155,6 +159,38 @@ export function OsmCatalog() {
     } finally {
       setFormSubmitting(false)
     }
+  }
+
+  function applyAcceptedRun(response) {
+    if (!response || !response.syncRunId || !response.regionId) {
+      return
+    }
+    // Limpa erro legado: nova tentativa em andamento nao exibe falha antiga.
+    setRegions((prev) =>
+      prev.map((region) =>
+        region.id === response.regionId
+          ? {
+              ...region,
+              lastError: null,
+              syncRuns: [
+                {
+                  id: response.syncRunId,
+                  regionId: response.regionId,
+                  city: response.city,
+                  state: response.state,
+                  country: response.country,
+                  status: response.status || 'QUEUED',
+                  requestedNiche: response.requestedNiche,
+                  canonicalNiche: response.canonicalNiche,
+                  targetValid: response.targetValid ?? 50
+                }
+              ]
+            }
+          : region
+      )
+    )
+
+    checkedActiveRuns.current.add(response.regionId)
   }
 
   async function requestRegionSync(regionId, niche) {
@@ -166,38 +202,15 @@ export function OsmCatalog() {
     setFormSubmitting(true)
 
     try {
-      const response = await api.post(
-        `/api/osm-catalog/regions/${regionId}/sync`,
-        { niche }
-      )
+      const { url, body } = buildOsmSyncRequest({ mode: 'EXISTING_REGION', regionId, niche })
+      const response = await api.post(url, body)
 
       push('Sincronização iniciada.', 'success')
 
-      setShowForm(false)
-
-      if (response.syncRunId && response.regionId) {
-        setRegions((prev) =>
-          prev.map((region) =>
-            region.id === response.regionId
-              ? {
-                  ...region,
-                  syncRuns: [
-                    {
-                      id: response.syncRunId,
-                      regionId: response.regionId,
-                      city: response.city,
-                      state: response.state,
-                      country: response.country,
-                      status: response.status || 'QUEUED'
-                    }
-                  ]
-                }
-              : region
-          )
-        )
-
-        checkedActiveRuns.current.add(response.regionId)
-
+      closeSyncModal()
+      await loadRegions()
+      applyAcceptedRun(response)
+      if (response.syncRunId) {
         startPolling(response.syncRunId)
       }
     } catch (err) {
@@ -261,15 +274,8 @@ export function OsmCatalog() {
   }, [])
 
   function handleSyncClick(region, isResync) {
-    const currentRun = region.syncRuns?.[0]
-    const niche = currentRun?.requestedNiche || currentRun?.canonicalNiche || ''
-    if (!niche) {
-      push('Informe o nicho no formulário de sincronização.', 'error')
-      setShowForm(true)
-      return
-    }
-    // Resync de região já cadastrada: usa regionId, sem re-geocodificar a cidade.
-    requestRegionSync(region.id, niche)
+    // Linha existente SEMPRE usa regionId: nunca chama o fluxo de cidade nova.
+    openExistingRegionSync(region)
   }
 
   return (
@@ -282,7 +288,7 @@ export function OsmCatalog() {
           </h1>
           <p className="page-sub">Atualize os dados de estabelecimentos antes de gerar novos leads.</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowForm(true)} disabled={countriesLoading}>
+        <button className="btn btn-primary" onClick={openNewCitySync} disabled={countriesLoading}>
           <IconPlus width={15} height={15} />
           Sincronizar Cidade
         </button>
@@ -320,6 +326,10 @@ export function OsmCatalog() {
                 const isRunning = currentRun && (currentRun.status === 'QUEUED' || currentRun.status === 'RUNNING')
                 const displayStatus = currentRun ? currentRun.status : region.catalogStatus
                 const statusColor = STATUS_COLORS[displayStatus] || 'muted'
+                // Erro legado nao aparece durante tentativa ativa.
+                const shouldShowError =
+                  currentRun?.status === 'FAILED'
+                  || (!currentRun && region.lastError)
 
                 return (
                   <tr key={region.id}>
@@ -385,9 +395,9 @@ export function OsmCatalog() {
                           </button>
                         )}
                       </div>
-                      {region.lastError && (
+                      {shouldShowError && (
                         <div className="error-state" style={{ fontSize: 11, marginTop: 4 }}>
-                          Erro: {region.lastError}
+                          Erro: {currentRun?.status === 'FAILED' ? (currentRun.errorMessage || region.lastError) : region.lastError}
                         </div>
                       )}
                       {currentRun && currentRun.status === 'FAILED' && region.catalogStatus === 'READY' && (
@@ -406,11 +416,11 @@ export function OsmCatalog() {
 
       {showForm && (
         <Modal
-          title="Sincronizar Cidade"
-          onClose={() => setShowForm(false)}
+          title={syncModalMode === 'EXISTING_REGION' ? 'Sincronizar Região' : 'Sincronizar Cidade'}
+          onClose={closeSyncModal}
           footer={
             <>
-              <button className="btn" onClick={() => setShowForm(false)}>
+              <button className="btn" onClick={closeSyncModal}>
                 Cancelar
               </button>
               <button type="submit" form="osm-sync-form" className="btn btn-primary" disabled={formSubmitting}>
@@ -419,56 +429,92 @@ export function OsmCatalog() {
             </>
           }
         >
-          {countriesError && (
-            <div className="error-state">Erro ao carregar países: {countriesError}</div>
-          )}
-          <form id="osm-sync-form" onSubmit={(e) => {
-            e.preventDefault()
-            const city = e.target.city.value.trim()
-            const country = e.target.country.value
-            const niche = e.target.niche.value.trim()
-            requestSync(city, country, niche)
-          }}>
-            <div className="field">
-              <label htmlFor="city">Cidade</label>
-              <input id="city" name="city" placeholder="Ex: Cuiabá" required />
-            </div>
-            <div className="field">
-              <label htmlFor="niche">Nicho</label>
-              <input
-                id="niche"
-                name="niche"
-                placeholder="Ex: nail designer"
-                required
-              />
-              <div className="hint">
-                Busca até 50 novos leads qualificados com WhatsApp validado e Instagram oficial.
+          {syncModalMode === 'EXISTING_REGION' && selectedRegion ? (
+            <form id="osm-sync-form" onSubmit={(e) => {
+              e.preventDefault()
+              const niche = e.target.niche.value.trim()
+              requestRegionSync(selectedRegion.id, niche)
+            }}>
+              <div className="field">
+                <label htmlFor="existing-city">Cidade</label>
+                <input id="existing-city" name="city" value={selectedRegion.city || ''} readOnly disabled />
               </div>
-            </div>
-            <div className="field">
-              <label htmlFor="country">País</label>
-              <select
-                id="country"
-                name="country"
-                defaultValue="br"
-                required
-                disabled={countriesLoading || countries.length === 0}
-              >
-                {countries.map((country) => (
-                  <option key={country.code} value={country.code}>
-                    {country.name}
-                  </option>
-                ))}
-              </select>
-              {countriesLoading && <div className="hint">Carregando países...</div>}
-              {countries.length === 0 && !countriesLoading && !countriesError && (
-                <div className="hint">Nenhum país disponível</div>
+              <div className="field">
+                <label htmlFor="existing-state">Estado</label>
+                <input id="existing-state" name="state" value={selectedRegion.state || ''} readOnly disabled />
+              </div>
+              <div className="field">
+                <label htmlFor="existing-country">País</label>
+                <input id="existing-country" name="country" value={selectedRegion.country || ''} readOnly disabled />
+              </div>
+              <div className="field">
+                <label htmlFor="niche">Nicho</label>
+                <input
+                  id="niche"
+                  name="niche"
+                  placeholder="Ex: nail designer"
+                  defaultValue={selectedRegion.syncRuns?.[0]?.requestedNiche || selectedRegion.syncRuns?.[0]?.canonicalNiche || ''}
+                  required
+                />
+                <div className="hint">
+                  Busca até 50 novos leads qualificados com WhatsApp validado e Instagram oficial.
+                </div>
+              </div>
+            </form>
+          ) : (
+            <>
+              {countriesError && (
+                <div className="error-state">Erro ao carregar países: {countriesError}</div>
               )}
-              <div className="hint" style={{ color: 'var(--warning)' }}>
-                V1 suporta apenas Brasil. Selecione Brasil.
-              </div>
-            </div>
-          </form>
+              <form id="osm-sync-form" onSubmit={(e) => {
+                e.preventDefault()
+                const city = e.target.city.value.trim()
+                const country = e.target.country.value
+                const niche = e.target.niche.value.trim()
+                requestSync(city, country, niche)
+              }}>
+                <div className="field">
+                  <label htmlFor="city">Cidade</label>
+                  <input id="city" name="city" placeholder="Ex: Cuiabá" required />
+                </div>
+                <div className="field">
+                  <label htmlFor="niche">Nicho</label>
+                  <input
+                    id="niche"
+                    name="niche"
+                    placeholder="Ex: nail designer"
+                    required
+                  />
+                  <div className="hint">
+                    Busca até 50 novos leads qualificados com WhatsApp validado e Instagram oficial.
+                  </div>
+                </div>
+                <div className="field">
+                  <label htmlFor="country">País</label>
+                  <select
+                    id="country"
+                    name="country"
+                    defaultValue="br"
+                    required
+                    disabled={countriesLoading || countries.length === 0}
+                  >
+                    {countries.map((country) => (
+                      <option key={country.code} value={country.code}>
+                        {country.name}
+                      </option>
+                    ))}
+                  </select>
+                  {countriesLoading && <div className="hint">Carregando países...</div>}
+                  {countries.length === 0 && !countriesLoading && !countriesError && (
+                    <div className="hint">Nenhum país disponível</div>
+                  )}
+                  <div className="hint" style={{ color: 'var(--warning)' }}>
+                    V1 suporta apenas Brasil. Selecione Brasil.
+                  </div>
+                </div>
+              </form>
+            </>
+          )}
         </Modal>
       )}
       <style jsx>{`

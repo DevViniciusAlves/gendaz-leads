@@ -10,7 +10,10 @@ public record OsmSyncResponse(
         String city,
         String state,
         String country,
-        String status
+        String status,
+        String requestedNiche,
+        String canonicalNiche,
+        Integer targetValid
 ) {
     public static OsmSyncResponse from(OsmSyncRun run) {
         return new OsmSyncResponse(
@@ -19,7 +22,10 @@ public record OsmSyncResponse(
                 run.getRegion().getCity(),
                 run.getRegion().getState(),
                 run.getRegion().getCountry(),
-                run.getStatus()
+                run.getStatus(),
+                run.getRequestedNiche(),
+                run.getCanonicalNiche(),
+                run.getTargetValid()
         );
     }
 }

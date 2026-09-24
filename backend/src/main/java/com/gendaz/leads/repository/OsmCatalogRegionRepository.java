@@ -18,6 +18,11 @@ public interface OsmCatalogRegionRepository extends JpaRepository<OsmCatalogRegi
             String countryCode
     );
 
+    List<OsmCatalogRegion> findByNormalizedCityAndCountryCode(
+            String normalizedCity,
+            String countryCode
+    );
+
     Optional<OsmCatalogRegion> findByOsmTypeAndOsmId(
             String osmType,
             Long osmId

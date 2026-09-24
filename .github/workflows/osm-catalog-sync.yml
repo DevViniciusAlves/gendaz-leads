@@ -130,11 +130,11 @@ jobs:
             centro-oeste|nordeste|norte|sudeste|sul) ;;
             *) echo "ERROR: Invalid GEOFABRIK_REGION"; exit 1 ;;
           esac
-          # Validate OSM type
-          case "$OSM_TYPE" in
-            relation|way|node) ;;
-            *) echo "ERROR: OSM_TYPE must be relation, way, or node"; exit 1 ;;
-          esac
+          # Validate OSM type (municipal catalog sync requires a relation)
+          if [[ "$OSM_TYPE" != "relation" ]]; then
+            echo "ERROR: OSM_TYPE must be relation for municipal catalog sync"
+            exit 1
+          fi
           echo "[osm-sync] inputs_validated"
 
       - name: Validate environment
@@ -161,12 +161,23 @@ jobs:
           fi
           echo "[osm-sync] start sync_run_id=$SYNC_RUN_ID region_id=$REGION_ID city=$CITY state=$STATE country_code=$COUNTRY_CODE osm_type=$OSM_TYPE osm_id=$OSM_ID geofabrik_region=$GEOFABRIK_REGION"
 
+      - name: Validate WhatsApp session
+        run: python3 .github/scripts/whatsapp_sync_preflight.py
+
       - name: Update sync run to RUNNING
         run: |
           psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
             UPDATE osm_sync_runs
             SET status = 'RUNNING', started_at = NOW(), github_run_id = $GITHUB_RUN_ID
             WHERE id = $SYNC_RUN_ID;
+          "
+          psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+            UPDATE osm_catalog_regions
+            SET
+                last_error = NULL,
+                last_attempt_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $REGION_ID;
           "
 
       - name: Download PBF extract
@@ -222,11 +233,27 @@ jobs:
             -r \
             "$PBF_FILE" \
             "r${OSM_ID}" \
-            -o boundary.osm.pbf
+            -o boundary.osm.pbf || {
+            echo "[osm-sync] boundary getid failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'OSM boundary relation r${OSM_ID} not found or incomplete in ${GEOFABRIK_REGION} PBF'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
 
           echo "[osm-sync] validating boundary relation"
 
-          osmium fileinfo boundary.osm.pbf
+          osmium fileinfo boundary.osm.pbf || {
+            echo "[osm-sync] boundary fileinfo failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'OSM boundary relation r${OSM_ID} fileinfo validation failed'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
 
           echo "[osm-sync] boundary_relation_ok"
 
@@ -241,7 +268,15 @@ jobs:
             -s smart \
             -S types=multipolygon,boundary \
             "$PBF_FILE" \
-            -o city.osm.pbf
+            -o city.osm.pbf || {
+            echo "[osm-sync] city extract failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'OSM city extraction failed using relation r${OSM_ID}'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
 
           echo "[osm-sync] city_extract_ok"
 

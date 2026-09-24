@@ -12,6 +12,7 @@ import com.gendaz.leads.service.provider.LeadDiscoveryRequest;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.provider.DiscoveryBudget;
 import com.gendaz.leads.util.CountryCodeResolver;
+import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -41,6 +42,8 @@ class OsmCatalogSyncServiceTest {
     private GitHubOsmSyncDispatcher githubDispatcher;
     @Mock
     private OsmCatalogSyncStatusService syncStatusService;
+    @Mock
+    private EntityManager entityManager;
 
     private OsmCatalogSyncService service;
 
@@ -52,7 +55,8 @@ class OsmCatalogSyncServiceTest {
                 osmProvider,
                 geofabrikResolver,
                 githubDispatcher,
-                syncStatusService
+                syncStatusService,
+                entityManager
         );
         // Enable catalog for tests
         var field = OsmCatalogSyncService.class.getDeclaredField("catalogEnabled");
@@ -93,6 +97,7 @@ class OsmCatalogSyncServiceTest {
         GeoScope scope = mock(GeoScope.class);
         when(scope.hasAdminAreaCandidate()).thenReturn(true);
         when(scope.state()).thenReturn("Mato Grosso");
+        when(scope.osmType()).thenReturn("relation");
         when(osmProvider.resolveScope(any(LeadDiscoveryRequest.class), any(DiscoveryBudget.class)))
                 .thenReturn(scope);
         when(geofabrikResolver.resolve("Mato Grosso")).thenThrow(new IllegalArgumentException("Unknown state"));
@@ -111,6 +116,7 @@ class OsmCatalogSyncServiceTest {
         GeoScope scope = mock(GeoScope.class);
         when(scope.hasAdminAreaCandidate()).thenReturn(true);
         when(scope.state()).thenReturn("Mato Grosso");
+        when(scope.osmType()).thenReturn("relation");
         when(osmProvider.resolveScope(any(LeadDiscoveryRequest.class), any(DiscoveryBudget.class)))
                 .thenReturn(scope);
         when(geofabrikResolver.resolve("Mato Grosso")).thenReturn("centro-oeste");
@@ -118,6 +124,10 @@ class OsmCatalogSyncServiceTest {
         OsmCatalogRegion region = new OsmCatalogRegion();
         region.setId(1L);
         region.setCatalogStatus("READY");
+        region.setCountryCode("br");
+        region.setOsmType("relation");
+        region.setOsmId(333734L);
+        region.setGeofabrikRegion("centro-oeste");
         when(regionRepository.findByNormalizedCityAndNormalizedStateAndCountryCode(
                 anyString(), anyString(), anyString())).thenReturn(Optional.of(region));
         
@@ -142,7 +152,6 @@ class OsmCatalogSyncServiceTest {
         when(scope.state()).thenReturn("Mato Grosso");
         when(scope.country()).thenReturn("Brasil");
         when(scope.osmType()).thenReturn("relation");
-        when(scope.osmId()).thenReturn(12345L);
         when(osmProvider.resolveScope(any(LeadDiscoveryRequest.class), any(DiscoveryBudget.class)))
                 .thenReturn(scope);
         when(geofabrikResolver.resolve("Mato Grosso")).thenReturn("centro-oeste");
@@ -152,20 +161,25 @@ class OsmCatalogSyncServiceTest {
         
         OsmCatalogRegion newRegion = new OsmCatalogRegion();
         newRegion.setId(1L);
+        newRegion.setCountryCode("br");
+        newRegion.setOsmType("relation");
+        newRegion.setOsmId(12345L);
+        newRegion.setGeofabrikRegion("centro-oeste");
+        when(regionRepository.saveAndFlush(any(OsmCatalogRegion.class))).thenReturn(newRegion);
+        // save() legado nao e mais usado no fluxo; stub defensivo
         when(regionRepository.save(any(OsmCatalogRegion.class))).thenReturn(newRegion);
-        
+
         OsmSyncRun newRun = new OsmSyncRun();
         newRun.setId(100L);
-        when(syncRunRepository.save(any(OsmSyncRun.class))).thenReturn(newRun);
-        
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class))).thenReturn(newRun);
+
         OsmSyncRun result = service.requestSync("Cuiabá", "Brasil", "barbearia", user);
-        
+
         assertEquals(100L, result.getId());
         assertEquals("QUEUED", result.getStatus());
-        // regionRepository.save is called 3 times: initial save, osmType/osmId update, lastAttemptAt update
-        verify(regionRepository, times(3)).save(any(OsmCatalogRegion.class));
-        // First call should have EMPTY catalogStatus (at least once)
-        verify(regionRepository, atLeastOnce()).save(argThat(r -> "EMPTY".equals(r.getCatalogStatus())));
+        // region create via saveAndFlush once + lastAttemptAt save once
+        verify(regionRepository, times(1)).saveAndFlush(any(OsmCatalogRegion.class));
+        verify(regionRepository, times(1)).save(any(OsmCatalogRegion.class));
     }
 
     private OsmCatalogRegion existingCuiabaRegion() {
@@ -197,7 +211,7 @@ class OsmCatalogSyncServiceTest {
         saved.setId(200L);
         saved.setRegion(region);
         saved.setStatus("QUEUED");
-        when(syncRunRepository.save(any(OsmSyncRun.class))).thenReturn(saved);
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class))).thenReturn(saved);
 
         OsmSyncRun result = service.requestExistingRegionSync(2L, "nail designer", user);
 
@@ -213,7 +227,7 @@ class OsmCatalogSyncServiceTest {
         OsmCatalogRegion region = existingCuiabaRegion();
         when(regionRepository.findById(2L)).thenReturn(Optional.of(region));
         when(syncRunRepository.findActiveByRegionId(eq(2L), anyList())).thenReturn(Optional.empty());
-        when(syncRunRepository.save(any(OsmSyncRun.class)))
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class)))
                 .thenAnswer(inv -> inv.getArgument(0));
 
         OsmSyncRun result = service.requestExistingRegionSync(2L, "nail designer", user);
@@ -329,18 +343,162 @@ class OsmCatalogSyncServiceTest {
 
         OsmCatalogRegion newRegion = new OsmCatalogRegion();
         newRegion.setId(2L);
-        when(regionRepository.save(any(OsmCatalogRegion.class))).thenReturn(newRegion);
+        newRegion.setCountryCode("br");
+        newRegion.setOsmType("relation");
+        newRegion.setOsmId(333734L);
+        newRegion.setGeofabrikRegion("centro-oeste");
+        when(regionRepository.saveAndFlush(any(OsmCatalogRegion.class))).thenReturn(newRegion);
 
         OsmSyncRun newRun = new OsmSyncRun();
         newRun.setId(100L);
-        when(syncRunRepository.save(any(OsmSyncRun.class))).thenReturn(newRun);
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class))).thenReturn(newRun);
 
         service.requestSync("Cuiabá", "Brasil", "nail designer", user);
 
         verify(osmProvider, times(1)).resolveScope(any(LeadDiscoveryRequest.class), any(DiscoveryBudget.class));
-        verify(regionRepository, atLeastOnce()).save(argThat(r ->
+        verify(regionRepository, atLeastOnce()).saveAndFlush(argThat(r ->
                 "relation".equals(r.getOsmType())
                         && Long.valueOf(333734L).equals(r.getOsmId())
                         && "centro-oeste".equals(r.getGeofabrikRegion())));
+    }
+
+    @Test
+    void requestSyncNewCityWithNonRelationScopeReturns409() {
+        User user = new User();
+
+        GeoScope scope = mock(GeoScope.class);
+        when(scope.hasAdminAreaCandidate()).thenReturn(true);
+        when(scope.osmType()).thenReturn("way");
+        when(osmProvider.resolveScope(any(LeadDiscoveryRequest.class), any(DiscoveryBudget.class)))
+                .thenReturn(scope);
+
+        ApiException ex = assertThrows(ApiException.class, () ->
+                service.requestSync("Cuiabá", "Brasil", "nail designer", user));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatus());
+        assertEquals("OSM_REGION_RELATION_REQUIRED", ex.getCode());
+    }
+
+    @Test
+    void requestSyncGenericWithExistingCityReusesRegionWithoutNominatim() {
+        User user = new User();
+        user.setId(1L);
+
+        OsmCatalogRegion region = existingCuiabaRegion();
+        when(regionRepository.findByNormalizedCityAndCountryCode("cuiaba", "br"))
+                .thenReturn(List.of(region));
+        when(syncRunRepository.findActiveByRegionId(eq(2L), anyList())).thenReturn(Optional.empty());
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        OsmSyncRun result = service.requestSync("Cuiabá", "Brasil", "nail designer", user);
+
+        assertEquals("QUEUED", result.getStatus());
+        assertEquals(Integer.valueOf(50), result.getTargetValid());
+        assertEquals(2L, result.getRegion().getId());
+        verify(osmProvider, never()).resolveScope(any(), any());
+        verify(geofabrikResolver, never()).resolve(anyString());
+    }
+
+    @Test
+    void requestSyncGenericWithAmbiguousCityReturns409WithoutNominatim() {
+        User user = new User();
+
+        OsmCatalogRegion r1 = existingCuiabaRegion();
+        OsmCatalogRegion r2 = existingCuiabaRegion();
+        r2.setId(3L);
+        when(regionRepository.findByNormalizedCityAndCountryCode("cuiaba", "br"))
+                .thenReturn(List.of(r1, r2));
+
+        ApiException ex = assertThrows(ApiException.class, () ->
+                service.requestSync("Cuiabá", "Brasil", "nail designer", user));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatus());
+        assertEquals("OSM_REGION_AMBIGUOUS", ex.getCode());
+        verify(osmProvider, never()).resolveScope(any(), any());
+    }
+
+    @Test
+    void requestExistingRegionSyncThrowsWhenNotRelation() {
+        User user = new User();
+
+        OsmCatalogRegion region = existingCuiabaRegion();
+        region.setOsmType("way");
+        when(regionRepository.findById(2L)).thenReturn(Optional.of(region));
+
+        ApiException ex = assertThrows(ApiException.class, () ->
+                service.requestExistingRegionSync(2L, "nail designer", user));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatus());
+        assertEquals("OSM_REGION_RELATION_REQUIRED", ex.getCode());
+        verify(osmProvider, never()).resolveScope(any(), any());
+    }
+
+    @Test
+    void requestExistingRegionSyncRaceOnSaveBecomes409() {
+        User user = new User();
+
+        OsmCatalogRegion region = existingCuiabaRegion();
+        when(regionRepository.findById(2L)).thenReturn(Optional.of(region));
+        when(syncRunRepository.findActiveByRegionId(eq(2L), anyList())).thenReturn(Optional.empty());
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class)))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("uq active run"));
+
+        ApiException ex = assertThrows(ApiException.class, () ->
+                service.requestExistingRegionSync(2L, "nail designer", user));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatus());
+        assertEquals("OSM_SYNC_ALREADY_RUNNING", ex.getCode());
+        verify(osmProvider, never()).resolveScope(any(), any());
+    }
+
+    @Test
+    void requestSyncNewCityRegionRaceReloadsExisting() {
+        User user = new User();
+        user.setId(1L);
+
+        GeoScope scope = mock(GeoScope.class);
+        when(scope.hasAdminAreaCandidate()).thenReturn(true);
+        when(scope.state()).thenReturn("Mato Grosso");
+        when(scope.country()).thenReturn("Brasil");
+        when(scope.osmType()).thenReturn("relation");
+        when(scope.osmId()).thenReturn(333734L);
+        when(osmProvider.resolveScope(any(LeadDiscoveryRequest.class), any(DiscoveryBudget.class)))
+                .thenReturn(scope);
+        when(geofabrikResolver.resolve("Mato Grosso")).thenReturn("centro-oeste");
+
+        when(regionRepository.findByNormalizedCityAndCountryCode(anyString(), anyString()))
+                .thenReturn(List.of());
+        when(regionRepository.findByNormalizedCityAndNormalizedStateAndCountryCode(
+                anyString(), anyString(), anyString()))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(existingCuiabaRegion()));
+        when(regionRepository.saveAndFlush(any(OsmCatalogRegion.class)))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("uq region"));
+        when(syncRunRepository.findActiveByRegionId(eq(2L), anyList())).thenReturn(Optional.empty());
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        OsmSyncRun result = service.requestSync("Cuiabá", "Brasil", "nail designer", user);
+
+        assertEquals("QUEUED", result.getStatus());
+        assertEquals(2L, result.getRegion().getId());
+        verify(entityManager).clear();
+    }
+
+    @Test
+    void requestExistingRegionSyncClearsStaleLastError() {
+        User user = new User();
+
+        OsmCatalogRegion region = existingCuiabaRegion();
+        region.setLastError("Falha antiga");
+        when(regionRepository.findById(2L)).thenReturn(Optional.of(region));
+        when(syncRunRepository.findActiveByRegionId(eq(2L), anyList())).thenReturn(Optional.empty());
+        when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        service.requestExistingRegionSync(2L, "nail designer", user);
+
+        verify(regionRepository).save(argThat(r -> r.getLastError() == null));
     }
 }

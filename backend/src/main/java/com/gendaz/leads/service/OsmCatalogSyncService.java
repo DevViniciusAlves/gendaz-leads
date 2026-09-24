@@ -15,6 +15,7 @@ import com.gendaz.leads.service.provider.NicheMapper;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.provider.DiscoveryBudget;
 import com.gendaz.leads.util.CountryCodeResolver;
+import jakarta.persistence.EntityManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -38,6 +39,7 @@ public class OsmCatalogSyncService {
     private final BrazilGeofabrikRegionResolver geofabrikResolver;
     private final GitHubOsmSyncDispatcher githubDispatcher;
     private final OsmCatalogSyncStatusService syncStatusService;
+    private final EntityManager entityManager;
 
     @Value("${app.osm-catalog.enabled:true}")
     private boolean catalogEnabled;
@@ -48,7 +50,8 @@ public class OsmCatalogSyncService {
             OpenStreetMapProvider osmProvider,
             BrazilGeofabrikRegionResolver geofabrikResolver,
             GitHubOsmSyncDispatcher githubDispatcher,
-            OsmCatalogSyncStatusService syncStatusService
+            OsmCatalogSyncStatusService syncStatusService,
+            EntityManager entityManager
     ) {
         this.regionRepository = regionRepository;
         this.syncRunRepository = syncRunRepository;
@@ -56,6 +59,7 @@ public class OsmCatalogSyncService {
         this.geofabrikResolver = geofabrikResolver;
         this.githubDispatcher = githubDispatcher;
         this.syncStatusService = syncStatusService;
+        this.entityManager = entityManager;
     }
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -71,6 +75,30 @@ public class OsmCatalogSyncService {
         if (!"br".equalsIgnoreCase(countryCode)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "OSM_CATALOG_COUNTRY_NOT_SUPPORTED",
                     "A sincronização local V1 suporta apenas Brasil. País informado: " + country);
+        }
+
+        // Defense-in-depth: cidade já conhecida nunca volta ao Nominatim,
+        // mesmo vinda do endpoint genérico (frontend antigo/cache).
+        String normalizedCity = normalizeForCompare(city);
+
+        List<OsmCatalogRegion> existing =
+                regionRepository.findByNormalizedCityAndCountryCode(
+                        normalizedCity,
+                        countryCode
+                );
+
+        if (existing.size() == 1) {
+            OsmCatalogRegion knownRegion = existing.get(0);
+
+            log.info("[osm-catalog] existing_region_reused_from_city_request regionId={} city={} countryCode={}",
+                    knownRegion.getId(), city, countryCode);
+
+            return createQueuedRunForRegion(knownRegion, niche, requestedBy);
+        }
+
+        if (existing.size() > 1) {
+            throw new ApiException(HttpStatus.CONFLICT, "OSM_REGION_AMBIGUOUS",
+                    "Há mais de uma região sincronizada com este nome. Informe uma localização mais específica.");
         }
 
         // Resolve niche strategy and serialize
@@ -94,6 +122,11 @@ public class OsmCatalogSyncService {
                     "Não foi possível identificar o limite administrativo OSM desta cidade.");
         }
 
+        if (!"relation".equalsIgnoreCase(scope.osmType())) {
+            throw new ApiException(HttpStatus.CONFLICT, "OSM_REGION_RELATION_REQUIRED",
+                    "A cidade não possui relation administrativa OSM válida.");
+        }
+
         String geofabrikRegion;
         try {
             geofabrikRegion = geofabrikResolver.resolve(scope.state());
@@ -101,25 +134,38 @@ public class OsmCatalogSyncService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "GEOFABRIK_REGION_NOT_RESOLVED", e.getMessage());
         }
 
-        String normalizedCity = normalizeForCompare(city);
         String normalizedState = normalizeForCompare(scope.state());
 
-        OsmCatalogRegion region = regionRepository
-                .findByNormalizedCityAndNormalizedStateAndCountryCode(normalizedCity, normalizedState, countryCode)
-                .orElseGet(() -> {
-                    OsmCatalogRegion r = new OsmCatalogRegion();
-                    r.setCity(city);
-                    r.setNormalizedCity(normalizedCity);
-                    r.setState(scope.state());
-                    r.setNormalizedState(normalizedState);
-                    r.setCountry(scope.country());
-                    r.setCountryCode(countryCode);
-                    r.setOsmType(scope.osmType());
-                    r.setOsmId(scope.osmId());
-                    r.setGeofabrikRegion(geofabrikRegion);
-                    r.setCatalogStatus("EMPTY");
-                    return regionRepository.save(r);
-                });
+        OsmCatalogRegion region;
+        Optional<OsmCatalogRegion> rechecked = regionRepository
+                .findByNormalizedCityAndNormalizedStateAndCountryCode(normalizedCity, normalizedState, countryCode);
+        if (rechecked.isPresent()) {
+            region = rechecked.get();
+        } else {
+            OsmCatalogRegion candidate = new OsmCatalogRegion();
+            candidate.setCity(city);
+            candidate.setNormalizedCity(normalizedCity);
+            candidate.setState(scope.state());
+            candidate.setNormalizedState(normalizedState);
+            candidate.setCountry(scope.country());
+            candidate.setCountryCode(countryCode);
+            candidate.setOsmType(scope.osmType());
+            candidate.setOsmId(scope.osmId());
+            candidate.setGeofabrikRegion(geofabrikRegion);
+            candidate.setCatalogStatus("EMPTY");
+            try {
+                region = regionRepository.saveAndFlush(candidate);
+            } catch (DataIntegrityViolationException race) {
+                // Criação concorrente: recarrega a região vencedora sem duplicar.
+                entityManager.clear();
+                log.info("[osm-catalog] region_race_reused city={} countryCode={}",
+                        city, countryCode);
+                region = regionRepository
+                        .findByNormalizedCityAndNormalizedStateAndCountryCode(normalizedCity, normalizedState, countryCode)
+                        .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
+                                "Já existe uma sincronização em andamento para esta região."));
+            }
+        }
 
         if (region.getOsmType() == null || region.getOsmId() == null) {
             region.setOsmType(scope.osmType());
@@ -128,25 +174,7 @@ public class OsmCatalogSyncService {
             regionRepository.save(region);
         }
 
-        List<String> activeStatuses = List.of("QUEUED", "RUNNING");
-        Optional<OsmSyncRun> activeRun = syncRunRepository.findActiveByRegionId(region.getId(), activeStatuses);
-        if (activeRun.isPresent()) {
-            throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
-                    "Já existe uma sincronização em andamento para esta região.");
-        }
-
-        OsmSyncRun syncRun = new OsmSyncRun();
-        syncRun.setRegion(region);
-        syncRun.setRequestedByUser(requestedBy);
-        syncRun.setStatus("QUEUED");
-        syncRun.setRequestedNiche(niche.trim());
-        syncRun.setCanonicalNiche(strategy.canonicalName());
-        syncRun.setNicheStrategyJson(strategyJson);
-        syncRun.setTargetValid(50);
-        syncRun = syncRunRepository.save(syncRun);
-
-        region.setLastAttemptAt(Instant.now());
-        regionRepository.save(region);
+        OsmSyncRun syncRun = createQueuedRunForRegion(region, niche, requestedBy, strategy, strategyJson);
 
         log.info("[osm-catalog] sync_requested syncRunId={} regionId={} city={} state={} countryCode={} osmType={} osmId={} geofabrikRegion={} canonicalNiche={} targetValid=50",
                 syncRun.getId(), region.getId(), city, scope.state(), countryCode, scope.osmType(), scope.osmId(), geofabrikRegion, strategy.canonicalName());
@@ -176,6 +204,39 @@ public class OsmCatalogSyncService {
                                 )
                         );
 
+        // ZERO resolveScope(): região já conhecida usa dados persistidos.
+        OsmSyncRun syncRun = createQueuedRunForRegion(region, niche, requestedBy);
+
+        log.info("[osm-catalog] existing_region_sync_requested syncRunId={} regionId={} city={} state={} countryCode={} osmType={} osmId={} geofabrikRegion={} canonicalNiche={} targetValid=50",
+                syncRun.getId(), region.getId(), region.getCity(), region.getState(), region.getCountryCode(),
+                region.getOsmType(), region.getOsmId(), region.getGeofabrikRegion(), syncRun.getCanonicalNiche());
+
+        return syncRun;
+    }
+
+    private OsmSyncRun createQueuedRunForRegion(
+            OsmCatalogRegion region,
+            String niche,
+            User requestedBy
+    ) {
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
+        String strategyJson;
+        try {
+            strategyJson = objectMapper.writeValueAsString(strategy);
+        } catch (Exception e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "OSM_NICHE_SERIALIZATION_FAILED",
+                    "Não foi possível preparar a estratégia do nicho.");
+        }
+        return createQueuedRunForRegion(region, niche, requestedBy, strategy, strategyJson);
+    }
+
+    private OsmSyncRun createQueuedRunForRegion(
+            OsmCatalogRegion region,
+            String niche,
+            User requestedBy,
+            NicheMapper.NicheStrategy strategy,
+            String strategyJson
+    ) {
         if (
                 !"br".equalsIgnoreCase(
                         region.getCountryCode()
@@ -201,6 +262,14 @@ public class OsmCatalogSyncService {
             );
         }
 
+        if (!"relation".equalsIgnoreCase(region.getOsmType())) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "OSM_REGION_RELATION_REQUIRED",
+                    "A região não possui relation administrativa OSM válida."
+            );
+        }
+
         if (
                 region.getGeofabrikRegion() == null
                         || region.getGeofabrikRegion().isBlank()
@@ -210,16 +279,6 @@ public class OsmCatalogSyncService {
                     "OSM_REGION_GEOFABRIK_MISSING",
                     "A região não possui mapeamento Geofabrik."
             );
-        }
-
-        // Resolve niche strategy and serialize (same logic as first-time sync)
-        NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
-        String strategyJson;
-        try {
-            strategyJson = objectMapper.writeValueAsString(strategy);
-        } catch (Exception e) {
-            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "OSM_NICHE_SERIALIZATION_FAILED",
-                    "Não foi possível preparar a estratégia do nicho.");
         }
 
         List<String> activeStatuses = List.of("QUEUED", "RUNNING");
@@ -237,14 +296,17 @@ public class OsmCatalogSyncService {
         syncRun.setCanonicalNiche(strategy.canonicalName());
         syncRun.setNicheStrategyJson(strategyJson);
         syncRun.setTargetValid(50);
-        syncRun = syncRunRepository.save(syncRun);
+        try {
+            syncRun = syncRunRepository.saveAndFlush(syncRun);
+        } catch (DataIntegrityViolationException race) {
+            // Corrida contra outra tentativa: unique de active run venceu.
+            throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
+                    "Já existe uma sincronização em andamento para esta região.");
+        }
 
+        region.setLastError(null);
         region.setLastAttemptAt(Instant.now());
         regionRepository.save(region);
-
-        log.info("[osm-catalog] existing_region_sync_requested syncRunId={} regionId={} city={} state={} countryCode={} osmType={} osmId={} geofabrikRegion={} canonicalNiche={} targetValid=50",
-                syncRun.getId(), region.getId(), region.getCity(), region.getState(), region.getCountryCode(),
-                region.getOsmType(), region.getOsmId(), region.getGeofabrikRegion(), strategy.canonicalName());
 
         return syncRun;
     }

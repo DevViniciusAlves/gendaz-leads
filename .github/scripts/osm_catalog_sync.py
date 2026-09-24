@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 import psycopg2
 from psycopg2.extras import execute_batch
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from math import radians, sin, cos, sqrt, atan2
 from collections import defaultdict
@@ -1191,8 +1191,22 @@ def check_whatsapp_recipient(recipient: str, country_code: str = '') -> bool:
         },
         method='POST',
     )
-    max_attempts = 3
-    interval_sec = 0.35
+    max_attempts = max(
+        1,
+        _env_int(
+            'OSM_SYNC_WHATSAPP_CHECK_MAX_ATTEMPTS',
+            3,
+        ),
+    )
+
+    interval_ms = max(
+        0,
+        _env_int(
+            'OSM_SYNC_WHATSAPP_CHECK_INTERVAL_MS',
+            350,
+        ),
+    )
+    interval_sec = interval_ms / 1000.0
     for attempt in range(1, max_attempts + 1):
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1203,12 +1217,12 @@ def check_whatsapp_recipient(recipient: str, country_code: str = '') -> bool:
                 raise WhatsAppInfrastructureError(f'WhatsApp check HTTP {e.code}')
             if e.code == 400:
                 return False  # invalid recipient
-            if attempt < 3:
-                time.sleep(0.35)
+            if attempt < max_attempts and interval_sec > 0:
+                time.sleep(interval_sec)
             continue
         except Exception as e:
-            if attempt < 3:
-                time.sleep(0.35)
+            if attempt < max_attempts and interval_sec > 0:
+                time.sleep(interval_sec)
             continue
     raise WhatsAppInfrastructureError('WhatsApp check retries exhausted')
 
@@ -1382,7 +1396,7 @@ def mark_failed(
                 finished_at = NOW(),
                 error_message = %s
             WHERE id = %s
-              AND status <> 'SUCCESS'
+              AND status IN ('QUEUED', 'RUNNING')
             """,
             (safe_error, sync_run_id),
         )
@@ -2310,6 +2324,7 @@ def _empty_qualified_pool_stats(total_rows: int) -> Dict[str, int]:
         'discarded_no_instagram': 0,
         'discarded_not_on_whatsapp': 0,
         'discarded_duplicate': 0,
+        'scan_state_skips': 0,
         'whatsapp_checks': 0,
         'whatsapp_verified': 0,
         'qualified_saved': 0,
@@ -2498,16 +2513,25 @@ def _enrich_candidate_for_missing(
                     break
 
 
-def _load_qualified_pool_dedup_sets(conn, region_id) -> Tuple[set, set]:
+def osm_source_key(row):
+    osm_type = row.get('osm_type')
+    osm_id = row.get('osm_id')
+    if not osm_type or osm_id is None:
+        return None
+    return f'{osm_type}/{osm_id}'
+
+
+def _load_qualified_pool_dedup_sets(conn, region_id) -> Tuple[set, set, set]:
+    sources: set = set()
     phones: set = set()
     instagrams: set = set()
     if conn is None or region_id is None:
-        return phones, instagrams
+        return sources, phones, instagrams
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT normalized_phone, normalized_instagram
+                SELECT osm_type, osm_id, normalized_phone, normalized_instagram
                 FROM osm_places
                 WHERE region_id = %s
                   AND qualified = TRUE
@@ -2515,14 +2539,153 @@ def _load_qualified_pool_dedup_sets(conn, region_id) -> Tuple[set, set]:
                 """,
                 (region_id,),
             )
-            for phone, insta in cur.fetchall():
+            for osm_type, osm_id, phone, insta in cur.fetchall():
+                key = osm_source_key({'osm_type': osm_type, 'osm_id': osm_id})
+                if key:
+                    sources.add(key)
                 if phone:
                     phones.add(str(phone).strip())
                 if insta:
                     instagrams.add(str(insta).strip().lower())
     except Exception:
         pass
-    return phones, instagrams
+    return sources, phones, instagrams
+
+
+SCAN_STATE_RETRY_DAYS = 30
+
+SCAN_OUTCOME_TO_DISCARD = {
+    'NO_PHONE': 'discarded_no_phone',
+    'NO_INSTAGRAM': 'discarded_no_instagram',
+    'NOT_ON_WHATSAPP': 'discarded_not_on_whatsapp',
+    'DUPLICATE': 'discarded_duplicate',
+    'QUALIFIED': 'discarded_duplicate',
+}
+
+
+def load_scan_states(conn, region_id, canonical_niche) -> Dict[Tuple[str, Any], Dict[str, Any]]:
+    """Load previous candidate outcomes for region+niche.
+
+    Returns {(osm_type, osm_id): record}. Empty when conn is None or the
+    table is unavailable. Never raises.
+    """
+    states: Dict[Tuple[str, Any], Dict[str, Any]] = {}
+    if conn is None or region_id is None or not canonical_niche:
+        return states
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT osm_type, osm_id, outcome, source_timestamp,
+                       normalized_phone, normalized_instagram,
+                       last_checked_at, retry_after
+                FROM osm_candidate_scan_state
+                WHERE region_id = %s
+                  AND canonical_niche = %s
+                """,
+                (region_id, canonical_niche),
+            )
+            for osm_type, osm_id, outcome, source_ts, phone, insta, checked_at, retry_after in cur.fetchall():
+                states[(osm_type, osm_id)] = {
+                    'outcome': outcome,
+                    'source_timestamp': source_ts,
+                    'normalized_phone': phone,
+                    'normalized_instagram': insta,
+                    'last_checked_at': checked_at,
+                    'retry_after': retry_after,
+                }
+    except Exception:
+        pass
+    return states
+
+
+def _scan_retry_after_for(outcome: Optional[str]):
+    if outcome in ('NO_PHONE', 'NO_INSTAGRAM', 'NOT_ON_WHATSAPP'):
+        return datetime.now(timezone.utc) + timedelta(days=SCAN_STATE_RETRY_DAYS)
+    return None
+
+
+def scan_state_allows(record: Optional[Dict[str, Any]], current_source_timestamp) -> bool:
+    """True when the candidate must be (re-)evaluated.
+
+    Skips only dead outcomes with unchanged source_timestamp and a
+    future retry_after. Timestamp changes or expired retries re-evaluate.
+    """
+    if not record:
+        return True
+    if record.get('outcome') not in SCAN_OUTCOME_TO_DISCARD:
+        return True
+    rec_ts = record.get('source_timestamp')
+    if rec_ts is None or current_source_timestamp is None:
+        return True
+    if str(rec_ts) != str(current_source_timestamp):
+        return True
+    retry_after = record.get('retry_after')
+    if retry_after is None:
+        return False
+    try:
+        ra = retry_after
+        if isinstance(ra, str):
+            ra = datetime.fromisoformat(ra)
+        if not isinstance(ra, datetime):
+            return True
+        if ra.tzinfo is None:
+            ra = ra.replace(tzinfo=timezone.utc)
+        return ra <= datetime.now(timezone.utc)
+    except Exception:
+        return True
+
+
+def save_scan_state(
+    conn,
+    region_id,
+    canonical_niche,
+    osm_type,
+    osm_id,
+    outcome: str,
+    source_timestamp=None,
+    normalized_phone=None,
+    normalized_instagram=None,
+    retry_after=None,
+):
+    """Persist a candidate outcome. Technical failures must never be saved
+    as invalid — callers simply do not call this for infra errors."""
+    if conn is None or region_id is None or not canonical_niche:
+        return
+    if outcome not in SCAN_OUTCOME_TO_DISCARD:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO osm_candidate_scan_state (
+                    region_id, canonical_niche, osm_type, osm_id,
+                    source_timestamp, outcome,
+                    normalized_phone, normalized_instagram,
+                    last_checked_at, retry_after
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+                ON CONFLICT (region_id, canonical_niche, osm_type, osm_id)
+                DO UPDATE SET
+                    source_timestamp = EXCLUDED.source_timestamp,
+                    outcome = EXCLUDED.outcome,
+                    normalized_phone = EXCLUDED.normalized_phone,
+                    normalized_instagram = EXCLUDED.normalized_instagram,
+                    last_checked_at = NOW(),
+                    retry_after = EXCLUDED.retry_after
+                """,
+                (
+                    region_id, canonical_niche, osm_type, osm_id,
+                    source_timestamp, outcome,
+                    normalized_phone, normalized_instagram,
+                    retry_after,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 def build_qualified_pool_rows(
@@ -2552,7 +2715,9 @@ def build_qualified_pool_rows(
 
     seen_phones: set = set()
     seen_instagrams: set = set()
-    db_phones, db_instagrams = _load_qualified_pool_dedup_sets(conn, region_id)
+    seen_sources: set = set()
+    db_sources, db_phones, db_instagrams = _load_qualified_pool_dedup_sets(conn, region_id)
+    scan_states = load_scan_states(conn, region_id, canonical_niche)
 
     website_cache: Dict[str, WebsiteContactResult] = {}
     hub_cache: Dict[str, WebsiteContactResult] = {}
@@ -2601,6 +2766,32 @@ def build_qualified_pool_rows(
                     continue
             stats['niche_matches'] += 1
 
+            def _record_scan(outcome, phone=None, insta=None):
+                save_scan_state(
+                    conn, region_id, canonical_niche,
+                    candidate.get('osm_type'), candidate.get('osm_id'),
+                    outcome,
+                    source_timestamp=candidate.get('source_timestamp'),
+                    normalized_phone=phone,
+                    normalized_instagram=insta,
+                    retry_after=_scan_retry_after_for(outcome),
+                )
+
+            scan_key = (candidate.get('osm_type'), candidate.get('osm_id'))
+            scan_record = scan_states.get(scan_key)
+            if not scan_state_allows(scan_record, candidate.get('source_timestamp')):
+                stats['scan_state_skips'] += 1
+                mapped = SCAN_OUTCOME_TO_DISCARD.get((scan_record or {}).get('outcome'))
+                if mapped:
+                    stats[mapped] += 1
+                continue
+
+            cluster_sources = {k for k in (osm_source_key(r) for r in cluster) if k}
+            if cluster_sources and (cluster_sources & seen_sources or cluster_sources & db_sources):
+                stats['discarded_duplicate'] += 1
+                _record_scan('DUPLICATE')
+                continue
+
             country_code = candidate.get('country_code') or ''
             direct_phone = normalize_phone_for_catalog(candidate.get('phone'), country_code)
             if direct_phone:
@@ -2625,6 +2816,7 @@ def build_qualified_pool_rows(
             normalized_phone = normalize_phone_for_catalog(candidate.get('phone'), country_code)
             if not normalized_phone:
                 stats['discarded_no_phone'] += 1
+                _record_scan('NO_PHONE')
                 continue
             if not had_phone_before:
                 stats['recovered_phone'] += 1
@@ -2636,6 +2828,7 @@ def build_qualified_pool_rows(
             if not final_ig_handle or final_ig_source not in ACCEPTED_INSTAGRAM_SOURCES:
                 # enrichment may have recovered instagram without provenance: keep only official
                 stats['discarded_no_instagram'] += 1
+                _record_scan('NO_INSTAGRAM', normalized_phone, None)
                 continue
             if not had_ig_before:
                 stats['recovered_instagram'] += 1
@@ -2648,17 +2841,21 @@ def build_qualified_pool_rows(
             ig_key = final_ig_handle.lower()
             if phone_key in seen_phones or ig_key in seen_instagrams or phone_key in db_phones or ig_key in db_instagrams:
                 stats['discarded_duplicate'] += 1
+                _record_scan('DUPLICATE', normalized_phone, final_ig_handle)
                 continue
 
             stats['whatsapp_checks'] += 1
             exists = check_whatsapp_recipient(normalized_phone)
             if not exists:
                 stats['discarded_not_on_whatsapp'] += 1
+                _record_scan('NOT_ON_WHATSAPP', normalized_phone, final_ig_handle)
                 continue
             stats['whatsapp_verified'] += 1
 
             seen_phones.add(phone_key)
             seen_instagrams.add(ig_key)
+            seen_sources.update(cluster_sources)
+            _record_scan('QUALIFIED', normalized_phone, final_ig_handle)
 
             qualified_row = dict(candidate)
             qualified_row['phone'] = normalized_phone

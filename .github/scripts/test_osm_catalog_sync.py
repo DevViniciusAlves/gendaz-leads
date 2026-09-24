@@ -1307,5 +1307,189 @@ class TestQualifiedStagingInvariant(unittest.TestCase):
         self.assertNotIn('extreme drop', main_src)
 
 
+class _DbFakeCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, query, params=None):
+        self._conn.statements.append((query, params))
+        self._last_query = query
+
+    def fetchall(self):
+        if 'osm_candidate_scan_state' in self._last_query:
+            return self._conn.scan_rows
+        if 'FROM osm_places' in self._last_query:
+            return self._conn.pool_rows
+        return []
+
+    def fetchone(self):
+        return [0]
+
+
+class _DbFakeConn:
+    def __init__(self, scan_rows=None, pool_rows=None):
+        self.scan_rows = scan_rows or []
+        self.pool_rows = pool_rows or []
+        self.statements = []
+        self.committed = 0
+
+    def cursor(self):
+        return _DbFakeCursor(self)
+
+    def commit(self):
+        self.committed += 1
+
+    def rollback(self):
+        pass
+
+
+def _scan_row(osm_type='node', osm_id=2001, outcome='NOT_ON_WHATSAPP',
+              ts='2026-01-01T00:00:00Z', retry_after=None):
+    return (osm_type, osm_id, outcome, ts, None, None, None, retry_after)
+
+
+class TestWhatsAppCheckEnv(unittest.TestCase):
+    def _env(self, **extra):
+        base = {
+            'OSM_SYNC_WHATSAPP_SERVICE_URL': 'http://wpp:3000',
+            'OSM_SYNC_WHATSAPP_INTERNAL_TOKEN': 'tok',
+        }
+        base.update(extra)
+        return patch.dict('os.environ', base)
+
+    def test_max_attempts_override(self):
+        import urllib.request
+        calls = []
+        with self._env(OSM_SYNC_WHATSAPP_CHECK_MAX_ATTEMPTS='1'):
+            with patch.object(urllib.request, 'urlopen',
+                              side_effect=lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(Exception('down')))[1]):
+                with self.assertRaises(sync.WhatsAppInfrastructureError):
+                    sync.check_whatsapp_recipient('5565999991111')
+        self.assertEqual(len(calls), 1)
+
+    def test_interval_override(self):
+        import io
+        import urllib.request
+        body = json.dumps({'recipient': '5565999991111', 'exists': True}).encode('utf-8')
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = body
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = False
+        with self._env(OSM_SYNC_WHATSAPP_CHECK_MAX_ATTEMPTS='3',
+                       OSM_SYNC_WHATSAPP_CHECK_INTERVAL_MS='500'):
+            with patch.object(urllib.request, 'urlopen',
+                              side_effect=[Exception('flaky'), mock_resp]):
+                with patch.object(sync.time, 'sleep') as mock_sleep:
+                    self.assertTrue(sync.check_whatsapp_recipient('5565999991111'))
+                    mock_sleep.assert_called_once_with(0.5)
+
+
+class TestMarkFailedTerminalProtection(unittest.TestCase):
+    def test_guard_only_queued_running(self):
+        conn = _DbFakeConn()
+        sync.mark_failed(conn, 9, 2, 'boom')
+        update = [q for q, _ in conn.statements if 'osm_sync_runs' in q][0]
+        self.assertIn("status IN ('QUEUED', 'RUNNING')", update)
+        self.assertNotIn('<>', update)
+
+
+class TestSourceDedup(unittest.TestCase):
+    def _row(self, osm_id, name, phone, insta, lat):
+        tags = {'shop': 'beauty', 'name': name,
+                'contact:instagram': f'https://www.instagram.com/{insta}/'}
+        return make_row(osm_id=osm_id, name=name, lat=lat, lon=-56.1,
+                        phone=phone,
+                        instagram=f'https://www.instagram.com/{insta}/',
+                        tags=tags)
+
+    def test_same_source_new_contacts_still_duplicate(self):
+        conn = _DbFakeConn(pool_rows=[('node', 1, '5565000000001', 'oldhandle')])
+        rows = [
+            self._row(1, 'Salao Alpha', '+55 65 91111-1111', 'newhandlea', -15.6),
+            self._row(1, 'Salao Beta', '+55 65 92222-2222', 'newhandleb', -15.7),
+        ]
+        with patch.object(sync, 'check_whatsapp_recipient', return_value=True) as mock_wpp:
+            qualified, stats = sync.build_qualified_pool_rows(
+                conn, rows, 2, 'nails', _nails_strategy(), target_valid=50)
+            self.assertEqual(stats['qualified_saved'], 0)
+            self.assertEqual(stats['discarded_duplicate'], 2)
+            mock_wpp.assert_not_called()
+
+    def test_duplicate_source_does_not_consume_target(self):
+        conn = _DbFakeConn()
+        rows = [
+            self._row(11, 'Salao Um', '+55 65 99999-1101', 'handleum', -15.6),
+            self._row(11, 'Salao Dois', '+55 65 99999-1102', 'handledois', -15.7),
+        ]
+        with patch.object(sync, 'check_whatsapp_recipient', return_value=True) as mock_wpp:
+            qualified, stats = sync.build_qualified_pool_rows(
+                conn, rows, 2, 'nails', _nails_strategy(), target_valid=50)
+            self.assertEqual(stats['qualified_saved'], 1)
+            self.assertEqual(stats['discarded_duplicate'], 1)
+            self.assertEqual(mock_wpp.call_count, 1)
+
+
+class TestScanState(unittest.TestCase):
+    def _ts_row(self, i, ts):
+        row = _qualified_row(i)
+        row['source_timestamp'] = ts
+        return row
+
+    def test_skip_future_retry_same_timestamp(self):
+        import datetime as _dt
+        future = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=10)
+        conn = _DbFakeConn(scan_rows=[_scan_row(osm_id=1001, ts='2026-01-01T00:00:00Z',
+                                                retry_after=future)])
+        rows = [self._ts_row(1, '2026-01-01T00:00:00Z')]
+        with patch.object(sync, 'check_whatsapp_recipient', return_value=True) as mock_wpp:
+            qualified, stats = sync.build_qualified_pool_rows(
+                conn, rows, 2, 'nails', _nails_strategy(), target_valid=50)
+            self.assertEqual(len(qualified), 0)
+            self.assertEqual(stats['scan_state_skips'], 1)
+            mock_wpp.assert_not_called()
+
+    def test_timestamp_changed_reevaluates(self):
+        import datetime as _dt
+        future = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=10)
+        conn = _DbFakeConn(scan_rows=[_scan_row(osm_id=1001, ts='2025-01-01T00:00:00Z',
+                                                retry_after=future)])
+        rows = [self._ts_row(1, '2026-06-01T00:00:00Z')]
+        with patch.object(sync, 'check_whatsapp_recipient', return_value=True) as mock_wpp:
+            qualified, stats = sync.build_qualified_pool_rows(
+                conn, rows, 2, 'nails', _nails_strategy(), target_valid=50)
+            self.assertEqual(len(qualified), 1)
+            mock_wpp.assert_called_once()
+
+    def test_retry_expired_reevaluates(self):
+        import datetime as _dt
+        past = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1)
+        conn = _DbFakeConn(scan_rows=[_scan_row(osm_id=1001, ts='2026-01-01T00:00:00Z',
+                                                retry_after=past)])
+        rows = [self._ts_row(1, '2026-01-01T00:00:00Z')]
+        with patch.object(sync, 'check_whatsapp_recipient', return_value=True) as mock_wpp:
+            qualified, stats = sync.build_qualified_pool_rows(
+                conn, rows, 2, 'nails', _nails_strategy(), target_valid=50)
+            self.assertEqual(len(qualified), 1)
+            mock_wpp.assert_called_once()
+
+    def test_technical_failure_not_cached_invalid(self):
+        conn = _DbFakeConn()
+        rows = [self._ts_row(1, '2026-01-01T00:00:00Z')]
+        with patch.object(sync, 'check_whatsapp_recipient',
+                          side_effect=sync.WhatsAppInfrastructureError('down')):
+            with self.assertRaises(sync.WhatsAppInfrastructureError):
+                sync.build_qualified_pool_rows(
+                    conn, rows, 2, 'nails', _nails_strategy(), target_valid=50)
+        inserts = [q for q, _ in conn.statements
+                   if 'osm_candidate_scan_state' in q and 'INSERT' in q.upper()]
+        self.assertEqual(inserts, [])
+
+
 if __name__ == '__main__':
     unittest.main()
