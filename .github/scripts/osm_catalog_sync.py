@@ -6,6 +6,7 @@ Processes GeoJSONSeq output from osmium and imports into Neon PostgreSQL staging
 then atomically publishes to osm_places.
 """
 
+import time
 import argparse
 import html
 import ipaddress
@@ -1153,6 +1154,47 @@ def fetch_contact_hub_result(hub_url: str, country_code: str, cache: Optional[Di
     return result
 
 
+def check_whatsapp_recipient(recipient: str, country_code: str) -> Optional[bool]:
+    """Check if a phone number exists on WhatsApp via the whatsapp-service.
+    Returns True if exists, False if not, None if technical failure."""
+    base_url = os.environ.get('OSM_SYNC_WHATSAPP_SERVICE_URL', '').rstrip('/')
+    token = os.environ.get('OSM_SYNC_WHATSAPP_INTERNAL_TOKEN', '').strip()
+    if not base_url or not token:
+        return None
+    url = base_url + '/internal/whatsapp/session/recipients/check'
+    payload = json.dumps({'recipient': recipient}).encode('utf-8')
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        },
+        method='POST',
+    )
+    max_attempts = 3
+    interval_sec = 0.35
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                return data.get('exists') is True
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403, 409, 502):
+                return None  # technical failure
+            if e.code == 400:
+                return False  # invalid recipient
+            if attempt < 3:
+                time.sleep(0.35)
+            continue
+        except Exception:
+            if attempt < 3:
+                time.sleep(0.35)
+            continue
+    return None
+
+
 def fetch_public_social_contact(url: str, country_code: str) -> WebsiteContactResult:
     """Best-effort public fetch of an official social profile. No auth/JS/crawl."""
     if not SOCIAL_PUBLIC_FETCH_ENABLED:
@@ -2273,6 +2315,9 @@ def _empty_qualification_stats(total_rows: int) -> Dict[str, int]:
         'qualified_social_public': 0,
         'discarded_no_commercial': 0,
         'discarded_no_phone': 0,
+        'discarded_no_instagram': 0,
+        'discarded_not_on_whatsapp': 0,
+        'discarded_duplicate': 0,
         'website_candidates': 0,
         'website_ok': 0,
         'website_fetch_success': 0,
