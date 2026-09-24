@@ -17,6 +17,11 @@ public class LeadCandidate {
     private String source;
     private String sourceId;
 
+    // Contact metadata for diagnostics
+    private String contactStatus;
+    private String contactSource;
+    private String contactSourceUrl;
+
     public LeadCandidate() {
     }
 
@@ -24,6 +29,31 @@ public class LeadCandidate {
         this.businessName = businessName;
         this.source = source;
         this.sourceId = sourceId;
+    }
+
+    // Getters and setters for contact metadata
+    public String getContactStatus() {
+        return contactStatus;
+    }
+
+    public void setContactStatus(String contactStatus) {
+        this.contactStatus = contactStatus;
+    }
+
+    public String getContactSource() {
+        return contactSource;
+    }
+
+    public void setContactSource(String contactSource) {
+        this.contactSource = contactSource;
+    }
+
+    public String getContactSourceUrl() {
+        return contactSourceUrl;
+    }
+
+    public void setContactSourceUrl(String contactSourceUrl) {
+        this.contactSourceUrl = contactSourceUrl;
     }
 
     public String getBusinessName() {

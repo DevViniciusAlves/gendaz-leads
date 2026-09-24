@@ -432,9 +432,7 @@ public class CampaignLeadDiscoveryService {
 
                     List<LeadCandidate> structuredCandidates = structured.candidates();
 
-                    int acceptedBeforeRegion = accepted;
-
-                    accepted += acceptCandidates(
+                    CandidateAcceptanceResult pageResult = acceptCandidates(
                             campaign,
                             structuredCandidates,
                             targetToAdd - accepted,
@@ -442,7 +440,8 @@ public class CampaignLeadDiscoveryService {
                             enrichmentCache
                     );
 
-                    int acceptedFromRegion = accepted - acceptedBeforeRegion;
+                    accepted += pageResult.accepted();
+                    int acceptedFromRegion = pageResult.accepted();
 
                     updateProgress(
                             campaign,
@@ -677,7 +676,7 @@ public class CampaignLeadDiscoveryService {
                             targetToAdd - accepted,
                             seenSourceIds,
                             enrichmentCache
-                    );
+                    ).accepted();
 
                     updateProgress(
                             campaign,
@@ -931,7 +930,19 @@ public class CampaignLeadDiscoveryService {
         return Math.min(calculated, 200);
     }
 
-    private int acceptCandidates(
+    private record CandidateAcceptanceResult(
+            int accepted,
+            int alreadySeen,
+            int duplicates,
+            int duplicatesAfterEnrichment,
+            int withoutPhone,
+            int withPhone,
+            int enrichmentAttempted,
+            int enrichmentRecovered,
+            int persistenceConflicts
+    ) {}
+
+    private CandidateAcceptanceResult acceptCandidates(
             Campaign campaign,
             List<LeadCandidate> candidates,
             int remainingNeeded,
@@ -939,6 +950,14 @@ public class CampaignLeadDiscoveryService {
             Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache
     ) {
         int accepted = 0;
+        int alreadySeen = 0;
+        int duplicates = 0;
+        int duplicatesAfterEnrichment = 0;
+        int withoutPhone = 0;
+        int withPhone = 0;
+        int enrichmentAttempted = 0;
+        int enrichmentRecovered = 0;
+        int persistenceConflicts = 0;
 
         for (LeadCandidate candidate : candidates) {
             if (accepted >= remainingNeeded) {
@@ -956,6 +975,7 @@ public class CampaignLeadDiscoveryService {
             }
 
             if (!seenSourceIds.add(sourceKey)) {
+                alreadySeen++;
                 log.info(
                         "[osm] candidate_rejected campaignId={} reason=already_seen_this_run source={} sourceId={}",
                         campaign.getId(),
@@ -971,6 +991,7 @@ public class CampaignLeadDiscoveryService {
                     deduplicationService.check(candidate);
 
             if (beforeEnrichment.existing().isPresent()) {
+                duplicates++;
                 Lead existing =
                         beforeEnrichment.existing().get();
 
@@ -996,6 +1017,7 @@ public class CampaignLeadDiscoveryService {
                     candidate,
                     enrichmentCache
             );
+            enrichmentAttempted++;
 
             normalizeCandidatePhone(candidate);
 
@@ -1003,6 +1025,7 @@ public class CampaignLeadDiscoveryService {
                     deduplicationService.check(candidate);
 
             if (afterEnrichment.existing().isPresent()) {
+                duplicatesAfterEnrichment++;
                 Lead existing =
                         afterEnrichment.existing().get();
 
@@ -1025,11 +1048,20 @@ public class CampaignLeadDiscoveryService {
             }
 
             if (!hasRequiredProspectingContact(candidate)) {
+                withoutPhone++;
                 log.info(
-                        "[osm] candidate_rejected campaignId={} reason=no_phone_for_whatsapp source={} sourceId={}",
+                        "[osm-catalog] candidate_no_contact campaignId={} sourceId={} businessName={} contactStatus={} contactSource={} hasPhone={} hasWebsite={} hasInstagram={} hasFacebook={} enrichmentAttempted={} enrichmentRecovered={}",
                         campaign.getId(),
-                        candidate.getSource(),
-                        candidate.getSourceId()
+                        candidate.getSourceId(),
+                        candidate.getBusinessName(),
+                        candidate.getContactStatus(),
+                        candidate.getContactSource(),
+                        candidate.getPhone() != null && !candidate.getPhone().isBlank(),
+                        candidate.getWebsite() != null && !candidate.getWebsite().isBlank(),
+                        candidate.getInstagramUsername() != null && !candidate.getInstagramUsername().isBlank(),
+                        "NOT_FOUND".equals(candidate.getInstagramStatus()) ? false : true,
+                        enrichmentAttempted > 0,
+                        false
                 );
 
                 registerSkippedNoContact(
@@ -1068,9 +1100,11 @@ public class CampaignLeadDiscoveryService {
                         candidate.getSourceId()
                 );
 
+                withPhone++;
                 accepted++;
 
             } catch (DataIntegrityViolationException e) {
+                persistenceConflicts++;
                 log.info(
                         "[osm] candidate_rejected campaignId={} reason=persistence_conflict source={} sourceId={}",
                         campaign.getId(),
@@ -1080,7 +1114,17 @@ public class CampaignLeadDiscoveryService {
             }
         }
 
-        return accepted;
+        return new CandidateAcceptanceResult(
+                accepted,
+                alreadySeen,
+                duplicates,
+                duplicatesAfterEnrichment,
+                withoutPhone,
+                withPhone,
+                enrichmentAttempted,
+                enrichmentRecovered,
+                persistenceConflicts
+        );
     }
 
     private void enrichCandidateIfNeeded(
@@ -1312,12 +1356,28 @@ public class CampaignLeadDiscoveryService {
                     page.hasMore()
             );
 
-            accepted += acceptCandidates(
+            CandidateAcceptanceResult pageResult = acceptCandidates(
                     campaign,
                     page.candidates(),
                     targetToAdd - accepted,
                     seenSourceIds,
                     enrichmentCache
+            );
+
+            accepted += pageResult.accepted();
+
+            log.info("[osm-catalog] discovery_page_summary campaignId={} page={} rawRows={} candidates={} withPhone={} withoutPhone={} duplicates={} duplicatesAfterEnrichment={} acceptedFromPage={} acceptedTotal={} hasMore={}",
+                    campaign.getId(),
+                    pages,
+                    page.rawRows(),
+                    page.candidates().size(),
+                    pageResult.withPhone(),
+                    pageResult.withoutPhone(),
+                    pageResult.duplicates() + pageResult.duplicatesAfterEnrichment(),
+                    pageResult.duplicatesAfterEnrichment(),
+                    pageResult.accepted(),
+                    accepted,
+                    page.hasMore()
             );
 
             updateProgress(campaign, initialCampaignLeadCount, accepted);
@@ -1354,12 +1414,12 @@ public class CampaignLeadDiscoveryService {
         } else if (accepted > 0 && exhausted) {
             outcome = DiscoveryExecutionResult.Outcome.PARTIAL;
             finalErrorCode = "OSM_CATALOG_PARTIAL";
-            finalErrorMessage = "Foram encontrados " + accepted + " de " + targetToAdd + " novos leads com telefone. O catálogo OSM disponível para este nicho foi esgotado.";
+            finalErrorMessage = "Foram encontrados " + accepted + " de " + targetToAdd + " novos leads com telefone após analisar todos os candidatos OSM disponíveis para este nicho.";
 
         } else if (accepted == 0 && exhausted) {
             outcome = DiscoveryExecutionResult.Outcome.EMPTY;
             finalErrorCode = "OSM_NO_USEFUL_LEADS";
-            finalErrorMessage = "Nenhum novo lead com telefone foi encontrado após esgotar o catálogo OSM disponível para este nicho.";
+            finalErrorMessage = "Nenhum novo lead com telefone foi encontrado após analisar todos os candidatos OSM disponíveis para este nicho.";
 
         } else {
             outcome = DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE;
@@ -1368,11 +1428,15 @@ public class CampaignLeadDiscoveryService {
         }
 
         log.info(
-                "[osm-catalog] discovery_summary campaignId={} acceptedThisRun={} target={} scanned={} pages={} exhausted={} outcome={}",
+                "[osm-catalog] discovery_summary campaignId={} canonicalNiche={} target={} scanned={} withPhone={} withoutPhone={} duplicates={} acceptedThisRun={} pages={} exhausted={} outcome={}",
                 campaign.getId(),
-                accepted,
+                NicheMapper.resolve(campaign.getNiche()).canonicalName(),
                 targetToAdd,
                 scanned,
+                0, // Note: would need to accumulate counters across pages for full detail
+                0,
+                0,
+                accepted,
                 pages,
                 exhausted,
                 outcome

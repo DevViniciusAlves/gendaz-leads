@@ -1,7 +1,10 @@
 package com.gendaz.leads.service.provider;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -961,6 +964,169 @@ public final class NicheMapper {
                         "advocacia"
                 )
         );
+    }
+
+    public record NicheMatchDiagnostic(
+            boolean matched,
+            String matchType,
+            String matchedRule,
+            Map<String, String> relevantTags
+    ) {}
+
+    public static NicheMatchDiagnostic diagnoseMatch(
+            NicheStrategy strategy,
+            JsonNode tags,
+            String normalizedName
+    ) {
+        if (strategy == null) {
+            return new NicheMatchDiagnostic(false, "NO_STRATEGY", null, Map.of());
+        }
+
+        // Check structured rules
+        if (strategy.structuredRules() != null) {
+            for (NicheRule rule : strategy.structuredRules()) {
+                boolean allMatch = true;
+                StringBuilder ruleDesc = new StringBuilder();
+                for (int i = 0; i < rule.allOf().size(); i++) {
+                    TagCondition cond = rule.allOf().get(i);
+                    if (i > 0) ruleDesc.append(" + ");
+                    ruleDesc.append(cond.key()).append(cond.mode() == MatchMode.EXACT ? "=" : "~").append(String.join(",", cond.acceptedValues()));
+                    if (!matchesCondition(tags, cond)) {
+                        allMatch = false;
+                    }
+                }
+                if (allMatch) {
+                    Map<String, String> relevant = extractRelevantTags(tags);
+                    return new NicheMatchDiagnostic(true, "STRUCTURED_RULE", ruleDesc.toString(), relevant);
+                }
+            }
+        }
+
+        // Check name fallback
+        if (strategy.nameFallback() != null && strategy.nameFallback().enabled()) {
+            boolean contextMatch = true;
+            if (strategy.nameFallback().requiresContext()) {
+                contextMatch = matchesAnyRule(tags, strategy.nameFallback().contextAnyOf());
+            }
+            if (contextMatch) {
+                for (String alias : strategy.nameFallback().aliases()) {
+                    if (containsNamePhrase(normalizedName, alias)) {
+                        Map<String, String> relevant = extractRelevantTags(tags);
+                        return new NicheMatchDiagnostic(true, "NAME_FALLBACK", alias, relevant);
+                    }
+                }
+            }
+        }
+
+        Map<String, String> relevant = extractRelevantTags(tags);
+        return new NicheMatchDiagnostic(false, "NO_MATCH", null, relevant);
+    }
+
+    private static Map<String, String> extractRelevantTags(JsonNode tags) {
+        if (tags == null || !tags.isObject()) return Map.of();
+        Map<String, String> relevant = new LinkedHashMap<>();
+        String[] keys = {"shop", "beauty", "hairdresser", "barber", "craft", "amenity", "healthcare", "leisure", "office", "tourism"};
+        for (String key : keys) {
+            if (tags.has(key)) {
+                relevant.put(key, tags.get(key).asText());
+            }
+        }
+        return relevant;
+    }
+
+    private static boolean matchesCondition(JsonNode tags, TagCondition condition) {
+        String actual = tag(tags, condition.key());
+
+        if (actual == null || actual.isBlank()) {
+            return false;
+        }
+
+        if (condition.mode() == MatchMode.EXACT) {
+            return condition
+                    .acceptedValues()
+                    .stream()
+                    .anyMatch(
+                            expected ->
+                                    actual.trim()
+                                            .equalsIgnoreCase(
+                                                    expected
+                                            )
+                    );
+        } else if (condition.mode() == MatchMode.SEMICOLON_TOKEN) {
+            java.util.Set<String> tokens =
+                    java.util.Arrays
+                            .stream(
+                                    actual.split(";")
+                            )
+                            .map(String::trim)
+                            .filter(v ->
+                                    !v.isBlank()
+                            )
+                            .map(v ->
+                                    v.toLowerCase(
+                                            Locale.ROOT
+                                    )
+                            )
+                            .collect(
+                                    java.util.stream.Collectors
+                                            .toSet()
+                            );
+
+            return condition
+                    .acceptedValues()
+                    .stream()
+                    .anyMatch(tokens::contains);
+        } else {
+            return false;
+        }
+    }
+
+    private static boolean matchesAnyRule(JsonNode tags, List<NicheRule> rules) {
+        return rules != null
+                && rules.stream()
+                .anyMatch(
+                        rule ->
+                                matchesRule(tags, rule)
+                );
+    }
+
+    private static boolean matchesRule(JsonNode tags, NicheRule rule) {
+        return rule
+                .allOf()
+                .stream()
+                .allMatch(
+                        condition ->
+                                matchesCondition(tags, condition)
+                );
+    }
+
+    private static boolean containsNamePhrase(String normalizedName, String alias) {
+        String name = normalizeNamePhrase(normalizedName);
+        String normalizedAlias = normalizeNamePhrase(alias);
+
+        if (name.isBlank() || normalizedAlias.isBlank()) {
+            return false;
+        }
+
+        return (" " + name + " ").contains(" " + normalizedAlias + " ");
+    }
+
+    private static String tag(JsonNode tags, String key) {
+        if (tags == null || key == null) {
+            return null;
+        }
+
+        JsonNode value = tags.get(key);
+
+        if (value == null || value.isNull()) {
+            return null;
+        }
+
+        String text = value.asText();
+
+        return text == null || text.isBlank()
+                ? null
+                : text.trim();
     }
 
     /** Resolve a estrategia de busca para um nicho livre. Nunca retorna null. */

@@ -8,6 +8,7 @@ import { IconPlus } from '../components/Icons.jsx'
 import { formatNumber } from '../format.js'
 
 const PROCESSING = ['CREATED', 'DISCOVERING', 'ANALYZING', 'GENERATING']
+const FINAL = ['COMPLETED', 'PARTIAL', 'FAILED', 'EXHAUSTED']
 
 export function Campaigns() {
   const [items, setItems] = useState([])
@@ -110,9 +111,7 @@ export function Campaigns() {
                 const pct =
                   c.progressTotal > 0
                     ? Math.round((c.progressCurrent / c.progressTotal) * 100)
-                    : c.status === 'COMPLETED' ||
-                      c.status === 'PARTIAL' ||
-                      c.status === 'FAILED'
+                    : FINAL.includes(c.status)
                     ? 100
                     : 0
                 return (
@@ -142,6 +141,8 @@ export function Campaigns() {
                       <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
                         {PROCESSING.includes(c.status)
                           ? `${c.progressCurrent}/${c.progressTotal}`
+                          : FINAL.includes(c.status)
+                          ? c.status
                           : c.status}
                       </div>
                     </td>

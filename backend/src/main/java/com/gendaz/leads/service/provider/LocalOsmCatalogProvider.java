@@ -494,6 +494,9 @@ public class LocalOsmCatalogProvider {
         p.setInstagram(rs.getString("instagram"));
         p.setTags(rs.getString("tags"));
         p.setActive(rs.getBoolean("active"));
+        p.setContactStatus(rs.getString("contact_status"));
+        p.setContactSource(rs.getString("contact_source"));
+        p.setContactSourceUrl(rs.getString("contact_source_url"));
 
         return p;
     }
@@ -763,6 +766,11 @@ public class LocalOsmCatalogProvider {
                 candidate.setInstagramStatus("FOUND");
             }
         }
+
+        // Map contact metadata for diagnostics
+        candidate.setContactStatus(place.getContactStatus());
+        candidate.setContactSource(place.getContactSource());
+        candidate.setContactSourceUrl(place.getContactSourceUrl());
 
         return candidate;
     }

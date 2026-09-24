@@ -306,9 +306,25 @@ export function CampaignDetail() {
         </div>
       )}
 
-      {c.errorMessage && (
+      {c.errorMessage && c.status === 'FAILED' && (
         <div className="error-state" style={{ marginBottom: 20 }}>
           Erro: {c.errorMessage}
+        </div>
+      )}
+      {c.errorMessage && c.status === 'EXHAUSTED' && (
+        <div className="info-state" style={{ marginBottom: 20 }}>
+          <strong>Sem novos leads</strong>
+          <div style={{ marginTop: 8 }}>
+            {c.errorMessage}
+          </div>
+        </div>
+      )}
+      {c.errorMessage && c.status === 'PARTIAL' && (
+        <div className="warning-state" style={{ marginBottom: 20 }}>
+          <strong>Resultado parcial</strong>
+          <div style={{ marginTop: 8 }}>
+            {c.errorMessage}
+          </div>
         </div>
       )}
 
