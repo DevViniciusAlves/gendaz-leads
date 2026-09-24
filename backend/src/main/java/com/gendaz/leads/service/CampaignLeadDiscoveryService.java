@@ -942,6 +942,12 @@ public class CampaignLeadDiscoveryService {
             int persistenceConflicts
     ) {}
 
+    private record EnrichmentResult(
+            boolean attempted,
+            boolean recoveredPhone,
+            boolean recoveredAnyData
+    ) {}
+
     private CandidateAcceptanceResult acceptCandidates(
             Campaign campaign,
             List<LeadCandidate> candidates,
@@ -1013,11 +1019,17 @@ public class CampaignLeadDiscoveryService {
                 continue;
             }
 
-            enrichCandidateIfNeeded(
+            EnrichmentResult enrichmentResult = enrichCandidateIfNeeded(
                     candidate,
                     enrichmentCache
             );
-            enrichmentAttempted++;
+
+            if (enrichmentResult.attempted()) {
+                enrichmentAttempted++;
+            }
+            if (enrichmentResult.recoveredPhone()) {
+                enrichmentRecovered++;
+            }
 
             normalizeCandidatePhone(candidate);
 
@@ -1060,8 +1072,8 @@ public class CampaignLeadDiscoveryService {
                         candidate.getWebsite() != null && !candidate.getWebsite().isBlank(),
                         candidate.getInstagramUsername() != null && !candidate.getInstagramUsername().isBlank(),
                         "NOT_FOUND".equals(candidate.getInstagramStatus()) ? false : true,
-                        enrichmentAttempted > 0,
-                        false
+                        enrichmentResult.attempted(),
+                        enrichmentResult.recoveredPhone()
                 );
 
                 registerSkippedNoContact(
@@ -1127,12 +1139,14 @@ public class CampaignLeadDiscoveryService {
         );
     }
 
-    private void enrichCandidateIfNeeded(
+    private EnrichmentResult enrichCandidateIfNeeded(
             LeadCandidate candidate,
             Map<String, WebsiteContactEnricher.WebsiteContactData> cache
     ) {
+        boolean hadPhoneBefore = hasText(candidate.getPhone());
+
         if (!needsEnrichment(candidate)) {
-            return;
+            return new EnrichmentResult(false, false, false);
         }
 
         String website =
@@ -1141,7 +1155,7 @@ public class CampaignLeadDiscoveryService {
                 );
 
         if (website == null) {
-            return;
+            return new EnrichmentResult(false, false, false);
         }
 
         WebsiteContactEnricher.WebsiteContactData data =
@@ -1151,17 +1165,23 @@ public class CampaignLeadDiscoveryService {
                 );
 
         if (data == null) {
-            return;
+            return new EnrichmentResult(true, false, false);
         }
+
+        boolean phoneRecovered = false;
+        boolean anyDataRecovered = false;
 
         if (!hasText(candidate.getPhone())
                 && hasText(data.phone())) {
             candidate.setPhone(data.phone());
+            phoneRecovered = true;
+            anyDataRecovered = true;
         }
 
         if (!hasText(candidate.getEmail())
                 && hasText(data.email())) {
             candidate.setEmail(data.email());
+            anyDataRecovered = true;
         }
 
         if (!hasText(candidate.getInstagramUsername())
@@ -1177,7 +1197,10 @@ public class CampaignLeadDiscoveryService {
             );
 
             candidate.setInstagramStatus("FOUND");
+            anyDataRecovered = true;
         }
+
+        return new EnrichmentResult(true, phoneRecovered, anyDataRecovered);
     }
 
     private boolean needsEnrichment(LeadCandidate c) {
@@ -1291,6 +1314,16 @@ public class CampaignLeadDiscoveryService {
         int pages = 0;
         boolean exhausted = false;
 
+        // Accumulators for final summary
+        int totalWithPhone = 0;
+        int totalWithoutPhone = 0;
+        int totalDuplicates = 0;
+        int totalDuplicatesAfterEnrichment = 0;
+        int totalAlreadySeen = 0;
+        int totalEnrichmentAttempted = 0;
+        int totalEnrichmentRecovered = 0;
+        int totalPersistenceConflicts = 0;
+
         Set<String> seenSourceIds = new HashSet<>();
         Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache = new HashMap<>();
 
@@ -1366,6 +1399,16 @@ public class CampaignLeadDiscoveryService {
 
             accepted += pageResult.accepted();
 
+            // Accumulate counters for final summary
+            totalWithPhone += pageResult.withPhone();
+            totalWithoutPhone += pageResult.withoutPhone();
+            totalDuplicates += pageResult.duplicates();
+            totalDuplicatesAfterEnrichment += pageResult.duplicatesAfterEnrichment();
+            totalAlreadySeen += pageResult.alreadySeen();
+            totalEnrichmentAttempted += pageResult.enrichmentAttempted();
+            totalEnrichmentRecovered += pageResult.enrichmentRecovered();
+            totalPersistenceConflicts += pageResult.persistenceConflicts();
+
             log.info("[osm-catalog] discovery_page_summary campaignId={} page={} rawRows={} candidates={} withPhone={} withoutPhone={} duplicates={} duplicatesAfterEnrichment={} acceptedFromPage={} acceptedTotal={} hasMore={}",
                     campaign.getId(),
                     pages,
@@ -1428,14 +1471,19 @@ public class CampaignLeadDiscoveryService {
         }
 
         log.info(
-                "[osm-catalog] discovery_summary campaignId={} canonicalNiche={} target={} scanned={} withPhone={} withoutPhone={} duplicates={} acceptedThisRun={} pages={} exhausted={} outcome={}",
+                "[osm-catalog] discovery_summary campaignId={} canonicalNiche={} target={} scanned={} withPhone={} withoutPhone={} duplicates={} duplicatesAfterEnrichment={} alreadySeen={} enrichmentAttempted={} enrichmentRecovered={} persistenceConflicts={} acceptedThisRun={} pages={} exhausted={} outcome={}",
                 campaign.getId(),
                 NicheMapper.resolve(campaign.getNiche()).canonicalName(),
                 targetToAdd,
                 scanned,
-                0, // Note: would need to accumulate counters across pages for full detail
-                0,
-                0,
+                totalWithPhone,
+                totalWithoutPhone,
+                totalDuplicates,
+                totalDuplicatesAfterEnrichment,
+                totalAlreadySeen,
+                totalEnrichmentAttempted,
+                totalEnrichmentRecovered,
+                totalPersistenceConflicts,
                 accepted,
                 pages,
                 exhausted,
@@ -1448,8 +1496,8 @@ public class CampaignLeadDiscoveryService {
                 totalCampaignLeads,
                 scanned,
                 pages,
-                0,
-                0,
+                totalWithPhone + totalWithoutPhone + totalDuplicates + totalAlreadySeen, // candidates examined
+                totalWithPhone, // leads with phone found
                 exhausted,
                 finalErrorCode,
                 finalErrorMessage

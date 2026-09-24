@@ -114,6 +114,7 @@ public class LocalOsmCatalogProvider {
             int target
     ) {
         return discoverPage(
+                0L,
                 niche,
                 city,
                 country,
@@ -123,6 +124,17 @@ public class LocalOsmCatalogProvider {
     }
 
     public CatalogPage discoverPage(
+            String niche,
+            String city,
+            String country,
+            int target,
+            int offset
+    ) {
+        return discoverPage(0L, niche, city, country, target, offset);
+    }
+
+    public CatalogPage discoverPage(
+            Long campaignId,
             String niche,
             String city,
             String country,
@@ -188,6 +200,26 @@ public class LocalOsmCatalogProvider {
             }
             LeadCandidate candidate = mapToCandidate(place);
             if (candidate != null) {
+                // Add niche diagnostics
+                JsonNode tags = parseTags(place.getTags());
+                String normalizedName = candidate.getBusinessName();
+                NicheMapper.NicheMatchDiagnostic diagnostic = NicheMapper.diagnoseMatch(strategy, tags, normalizedName);
+                candidate.setNicheMatchType(diagnostic.matchType());
+                candidate.setNicheMatchedRule(diagnostic.matchedRule());
+                candidate.setNicheRelevantTags(diagnostic.relevantTags());
+
+                log.info(
+                        "[osm-catalog] niche_candidate campaignId={} canonicalNiche={} sourceId={}/{} businessName={} matchType={} matchedRule={} relevantTags={}",
+                        campaignId,
+                        strategy.canonicalName(),
+                        place.getOsmType(),
+                        place.getOsmId(),
+                        place.getBusinessName(),
+                        diagnostic.matchType(),
+                        diagnostic.matchedRule(),
+                        diagnostic.relevantTags()
+                );
+
                 candidates.add(candidate);
             }
         }

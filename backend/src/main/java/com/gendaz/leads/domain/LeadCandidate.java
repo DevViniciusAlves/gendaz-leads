@@ -1,5 +1,7 @@
 package com.gendaz.leads.domain;
 
+import java.util.Map;
+
 public class LeadCandidate {
 
     private String businessName;
@@ -16,6 +18,11 @@ public class LeadCandidate {
     private String instagramStatus = "NOT_FOUND";
     private String source;
     private String sourceId;
+
+    // Niche diagnostics
+    private String nicheMatchType;
+    private String nicheMatchedRule;
+    private Map<String, String> nicheRelevantTags;
 
     // Contact metadata for diagnostics
     private String contactStatus;
@@ -166,5 +173,30 @@ public class LeadCandidate {
 
     public void setInstagramStatus(String instagramStatus) {
         this.instagramStatus = instagramStatus;
+    }
+
+    // Getters and setters for niche diagnostics
+    public String getNicheMatchType() {
+        return nicheMatchType;
+    }
+
+    public void setNicheMatchType(String nicheMatchType) {
+        this.nicheMatchType = nicheMatchType;
+    }
+
+    public String getNicheMatchedRule() {
+        return nicheMatchedRule;
+    }
+
+    public void setNicheMatchedRule(String nicheMatchedRule) {
+        this.nicheMatchedRule = nicheMatchedRule;
+    }
+
+    public Map<String, String> getNicheRelevantTags() {
+        return nicheRelevantTags;
+    }
+
+    public void setNicheRelevantTags(Map<String, String> nicheRelevantTags) {
+        this.nicheRelevantTags = nicheRelevantTags;
     }
 }
