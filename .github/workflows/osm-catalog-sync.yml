@@ -212,13 +212,23 @@ jobs:
             exit 1
           }
 
-      - name: Fetch administrative boundary
+      - name: Extract administrative boundary from PBF
         run: |
-          echo "[osm-sync] fetching boundary for relation $OSM_ID"
+          PBF_FILE="${GEOFABRIK_REGION}-latest.osm.pbf"
 
-          python3 .github/scripts/fetch_osm_boundary.py \
-            --osm-id "$OSM_ID" \
-            --output boundary.geojson
+          echo "[osm-sync] extracting boundary relation from PBF osm_id=$OSM_ID"
+
+          osmium getid \
+            -r \
+            "$PBF_FILE" \
+            "r${OSM_ID}" \
+            -o boundary.osm.pbf
+
+          echo "[osm-sync] validating boundary relation"
+
+          osmium fileinfo boundary.osm.pbf
+
+          echo "[osm-sync] boundary_relation_ok"
 
       - name: Extract city from PBF
         run: |
@@ -227,7 +237,7 @@ jobs:
           echo "[osm-sync] extracting city with osmium"
 
           osmium extract \
-            -p boundary.geojson \
+            -p boundary.osm.pbf \
             -s smart \
             -S types=multipolygon,boundary \
             "$PBF_FILE" \

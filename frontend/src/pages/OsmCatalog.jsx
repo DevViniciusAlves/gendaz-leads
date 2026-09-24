@@ -157,6 +157,56 @@ export function OsmCatalog() {
     }
   }
 
+  async function requestRegionSync(regionId, niche) {
+    if (!regionId || !niche) {
+      push('Informe o nicho para sincronizar novamente.', 'error')
+      return
+    }
+
+    setFormSubmitting(true)
+
+    try {
+      const response = await api.post(
+        `/api/osm-catalog/regions/${regionId}/sync`,
+        { niche }
+      )
+
+      push('Sincronização iniciada.', 'success')
+
+      setShowForm(false)
+
+      if (response.syncRunId && response.regionId) {
+        setRegions((prev) =>
+          prev.map((region) =>
+            region.id === response.regionId
+              ? {
+                  ...region,
+                  syncRuns: [
+                    {
+                      id: response.syncRunId,
+                      regionId: response.regionId,
+                      city: response.city,
+                      state: response.state,
+                      country: response.country,
+                      status: response.status || 'QUEUED'
+                    }
+                  ]
+                }
+              : region
+          )
+        )
+
+        checkedActiveRuns.current.add(response.regionId)
+
+        startPolling(response.syncRunId)
+      }
+    } catch (err) {
+      push(err.message, 'error')
+    } finally {
+      setFormSubmitting(false)
+    }
+  }
+
   function startPolling(syncRunId) {
     if (pollingIntervals.current[syncRunId]) {
       return // Already polling
@@ -211,8 +261,6 @@ export function OsmCatalog() {
   }, [])
 
   function handleSyncClick(region, isResync) {
-    const city = region.city
-    const country = region.countryCode || 'br'
     const currentRun = region.syncRuns?.[0]
     const niche = currentRun?.requestedNiche || currentRun?.canonicalNiche || ''
     if (!niche) {
@@ -220,7 +268,8 @@ export function OsmCatalog() {
       setShowForm(true)
       return
     }
-    requestSync(city, country, niche)
+    // Resync de região já cadastrada: usa regionId, sem re-geocodificar a cidade.
+    requestRegionSync(region.id, niche)
   }
 
   return (

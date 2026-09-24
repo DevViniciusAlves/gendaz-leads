@@ -476,6 +476,28 @@ public class OpenStreetMapProvider implements LeadDiscoveryProvider {
                 log.warn("[osm] geocode_failed campaignId={} attempt={}/{} errorType={} rootCauseType={} rootCauseMessage={} retryable={}",
                         request.campaignId(), attempt, nominatimMaxAttempts, e.getClass().getSimpleName(), fd.rootCauseType(), fd.safeMessage(), retryable);
                 if (!retryable) throw new ApiException(HttpStatus.BAD_GATEWAY, "OSM_GEOCODE_ERROR", "Falha não recuperável: " + fd.safeMessage());
+                if (
+                        retryable
+                                && attempt < nominatimMaxAttempts
+                ) {
+                    long delay =
+                            Math.max(
+                                    retryDelayMs,
+                                    nominatim429BackoffMs
+                            );
+
+                    try {
+                        cooldownSleeper.sleep(delay);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+
+                        throw new ApiException(
+                                HttpStatus.BAD_GATEWAY,
+                                "OSM_GEOCODE_INTERRUPTED",
+                                "Geocodificação interrompida."
+                        );
+                    }
+                }
             }
         }
 

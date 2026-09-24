@@ -149,3 +149,41 @@ jobs:
           python3 \
             .github/scripts/verify_osmium_fixture.py \
             /tmp/exported.geojsonseq
+
+      - name: Run boundary fixture pipeline (offline, no Nominatim)
+        run: |
+          osmium cat \
+            .github/fixtures/boundary-test.osm \
+            -o /tmp/boundary-fixture.osm.pbf
+
+          osmium getid \
+            -r \
+            /tmp/boundary-fixture.osm.pbf \
+            r100 \
+            -o /tmp/boundary.osm.pbf
+
+          osmium fileinfo /tmp/boundary.osm.pbf
+
+          osmium cat \
+            /tmp/boundary.osm.pbf \
+            -o /tmp/boundary.osm
+
+          osmium extract \
+            -p /tmp/boundary.osm.pbf \
+            -s smart \
+            -S types=multipolygon,boundary \
+            /tmp/boundary-fixture.osm.pbf \
+            -o /tmp/boundary-city.osm.pbf
+
+          osmium export \
+            /tmp/boundary-city.osm.pbf \
+            --geometry-types=point,linestring,polygon \
+            --attributes=type,id,timestamp \
+            --format-option=print_record_separator=false \
+            -f geojsonseq \
+            -o /tmp/boundary-city.geojsonseq
+
+          python3 \
+            .github/scripts/verify_boundary_fixture.py \
+            /tmp/boundary.osm \
+            /tmp/boundary-city.geojsonseq

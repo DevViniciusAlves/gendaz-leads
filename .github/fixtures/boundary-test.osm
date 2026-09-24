@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+  <node id="101" lat="-15.62" lon="-56.13" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="102" lat="-15.62" lon="-56.10" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="103" lat="-15.59" lon="-56.10" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="104" lat="-15.59" lon="-56.13" version="1" timestamp="2026-01-01T00:00:00Z"/>
+  <node id="110" lat="-15.605" lon="-56.115" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Barbearia Dentro"/>
+    <tag k="shop" v="barber"/>
+  </node>
+  <node id="111" lat="-15.60" lon="-56.12" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Beleza Dentro"/>
+    <tag k="shop" v="beauty"/>
+  </node>
+  <node id="112" lat="-15.50" lon="-56.00" version="1" timestamp="2026-01-01T00:00:00Z">
+    <tag k="name" v="Barbearia Fora"/>
+    <tag k="shop" v="barber"/>
+  </node>
+  <way id="200" version="1" timestamp="2026-01-01T00:00:00Z">
+    <nd ref="101"/>
+    <nd ref="102"/>
+    <nd ref="103"/>
+    <nd ref="104"/>
+    <nd ref="101"/>
+  </way>
+  <relation id="100" version="1" timestamp="2026-01-01T00:00:00Z">
+    <member type="way" ref="200" role="outer"/>
+    <tag k="type" v="boundary"/>
+    <tag k="boundary" v="administrative"/>
+    <tag k="name" v="Boundary Teste"/>
+  </relation>
+</osm>

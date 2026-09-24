@@ -1,6 +1,7 @@
 package com.gendaz.leads.controller;
 
 import com.gendaz.leads.dto.osm.OsmCatalogRegionResponse;
+import com.gendaz.leads.dto.osm.OsmRegionSyncRequest;
 import com.gendaz.leads.dto.osm.OsmSyncRequest;
 import com.gendaz.leads.dto.osm.OsmSyncResponse;
 import com.gendaz.leads.dto.osm.OsmSyncRunResponse;
@@ -55,6 +56,33 @@ public class OsmCatalogController {
         OsmSyncRun syncRun = syncService.requestSync(
                 request.city(),
                 request.country(),
+                request.niche(),
+                currentUser
+        );
+
+        syncService.dispatchSync(syncRun);
+
+        return ResponseEntity
+                .status(HttpStatus.ACCEPTED)
+                .body(OsmSyncResponse.from(syncRun));
+    }
+
+    @PostMapping("/regions/{regionId}/sync")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<OsmSyncResponse> requestRegionSync(
+            @PathVariable Long regionId,
+            @Valid @RequestBody OsmRegionSyncRequest request) {
+        String email = securityService.currentEmail();
+
+        User currentUser = userRepository.findByEmail(email)
+                .orElseThrow(() -> new com.gendaz.leads.exception.ApiException(
+                        HttpStatus.UNAUTHORIZED,
+                        "UNAUTHENTICATED",
+                        "Não autenticado"
+                ));
+
+        OsmSyncRun syncRun = syncService.requestExistingRegionSync(
+                regionId,
                 request.niche(),
                 currentUser
         );

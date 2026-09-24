@@ -154,6 +154,101 @@ public class OsmCatalogSyncService {
         return syncRun;
     }
 
+    @Transactional
+    public OsmSyncRun requestExistingRegionSync(
+            Long regionId,
+            String niche,
+            User requestedBy
+    ) {
+        if (!catalogEnabled) {
+            throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_DISABLED",
+                    "A sincronização do catálogo OSM está desabilitada.");
+        }
+
+        OsmCatalogRegion region =
+                regionRepository
+                        .findById(regionId)
+                        .orElseThrow(() ->
+                                new ApiException(
+                                        HttpStatus.NOT_FOUND,
+                                        "OSM_REGION_NOT_FOUND",
+                                        "Região OSM não encontrada."
+                                )
+                        );
+
+        if (
+                !"br".equalsIgnoreCase(
+                        region.getCountryCode()
+                )
+        ) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "OSM_CATALOG_COUNTRY_NOT_SUPPORTED",
+                    "A sincronização local V1 suporta apenas Brasil."
+            );
+        }
+
+        if (
+                region.getOsmType() == null
+                        || region.getOsmType().isBlank()
+                        || region.getOsmId() == null
+                        || region.getOsmId() <= 0
+        ) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "OSM_REGION_BOUNDARY_MISSING",
+                    "A região não possui identificador OSM válido."
+            );
+        }
+
+        if (
+                region.getGeofabrikRegion() == null
+                        || region.getGeofabrikRegion().isBlank()
+        ) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "OSM_REGION_GEOFABRIK_MISSING",
+                    "A região não possui mapeamento Geofabrik."
+            );
+        }
+
+        // Resolve niche strategy and serialize (same logic as first-time sync)
+        NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
+        String strategyJson;
+        try {
+            strategyJson = objectMapper.writeValueAsString(strategy);
+        } catch (Exception e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "OSM_NICHE_SERIALIZATION_FAILED",
+                    "Não foi possível preparar a estratégia do nicho.");
+        }
+
+        List<String> activeStatuses = List.of("QUEUED", "RUNNING");
+        Optional<OsmSyncRun> activeRun = syncRunRepository.findActiveByRegionId(region.getId(), activeStatuses);
+        if (activeRun.isPresent()) {
+            throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
+                    "Já existe uma sincronização em andamento para esta região.");
+        }
+
+        OsmSyncRun syncRun = new OsmSyncRun();
+        syncRun.setRegion(region);
+        syncRun.setRequestedByUser(requestedBy);
+        syncRun.setStatus("QUEUED");
+        syncRun.setRequestedNiche(niche.trim());
+        syncRun.setCanonicalNiche(strategy.canonicalName());
+        syncRun.setNicheStrategyJson(strategyJson);
+        syncRun.setTargetValid(50);
+        syncRun = syncRunRepository.save(syncRun);
+
+        region.setLastAttemptAt(Instant.now());
+        regionRepository.save(region);
+
+        log.info("[osm-catalog] existing_region_sync_requested syncRunId={} regionId={} city={} state={} countryCode={} osmType={} osmId={} geofabrikRegion={} canonicalNiche={} targetValid=50",
+                syncRun.getId(), region.getId(), region.getCity(), region.getState(), region.getCountryCode(),
+                region.getOsmType(), region.getOsmId(), region.getGeofabrikRegion(), strategy.canonicalName());
+
+        return syncRun;
+    }
+
     public void dispatchSync(OsmSyncRun syncRun) {
         try {
             GeoScope scope = buildScopeFromSyncRun(syncRun);
