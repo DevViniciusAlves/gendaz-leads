@@ -3644,45 +3644,31 @@ def validate_staging(conn, sync_run_id: int) -> int:
         return cur.fetchone()[0]
 
 
-def get_previous_count(conn, region_id: int) -> int:
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT COUNT(*) FROM osm_places WHERE region_id = %s AND active = true
-        """, (region_id,))
-        return cur.fetchone()[0]
-
-
-def get_previous_qualified_count(
-    conn,
-    region_id,
-):
+def validate_qualified_staging(conn, sync_run_id: int) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT COUNT(*)
-            FROM osm_places
-            WHERE region_id = %s
-              AND active = true
-              AND phone IS NOT NULL
-              AND BTRIM(phone) <> ''
+            FROM osm_place_staging
+            WHERE sync_run_id = %s
+              AND (
+                   qualified IS NOT TRUE
+                   OR phone IS NULL
+                   OR BTRIM(phone) = ''
+                   OR normalized_phone IS NULL
+                   OR BTRIM(normalized_phone) = ''
+                   OR instagram IS NULL
+                   OR BTRIM(instagram) = ''
+                   OR normalized_instagram IS NULL
+                   OR BTRIM(normalized_instagram) = ''
+                   OR whatsapp_verified IS NOT TRUE
+                   OR instagram_validated IS NOT TRUE
+              )
             """,
-            (region_id,),
+            (sync_run_id,),
         )
 
         return cur.fetchone()[0]
-
-
-def sanity_check(conn, sync_run_id: int, region_id: int, staged_count: int) -> bool:
-    previous_count = get_previous_qualified_count(conn, region_id)
-    if previous_count > 50 and staged_count == 0:
-        log('error', 'Sanity check failed: previous qualified count > 50 but staged count is 0',
-            previous=previous_count, staged=staged_count)
-        return False
-    if previous_count > 50 and staged_count < previous_count * SANITY_DROP_THRESHOLD:
-        log('error', 'Sanity check failed: staged count dropped below 10% of previous qualified',
-            previous=previous_count, staged=staged_count, threshold=SANITY_DROP_THRESHOLD)
-        return False
-    return True
 
 
 def publish_staging(
@@ -4068,11 +4054,23 @@ def main():
 
         stats['staged'] = qualified_count
 
-        # Sanity check on the qualified staging count
-        if not sanity_check(conn, args.sync_run_id, args.region_id, qualified_count):
-            raise ValueError('Sanity check failed: extreme drop in place count')
+        invalid_qualified = validate_qualified_staging(
+            conn,
+            args.sync_run_id,
+        )
 
-        final_status, dataset_exhausted = resolve_qualified_final_status(qualified_stats, target_valid)
+        if invalid_qualified > 0:
+            raise ValueError(
+                f'Qualified staging invariant failed: '
+                f'{invalid_qualified} invalid rows'
+            )
+
+        final_status, dataset_exhausted = (
+            resolve_qualified_final_status(
+                qualified_stats,
+                target_valid,
+            )
+        )
 
         log(
             'info',

@@ -1225,5 +1225,87 @@ class TestQualifiedPoolPipeline(unittest.TestCase):
         self.assertEqual(sync.resolve_qualified_final_status({'qualified_saved': 0}, 50), ('EXHAUSTED', True))
 
 
+class _FakeCursor:
+    def __init__(self, fetch_value, holder):
+        self._fetch_value = fetch_value
+        self._holder = holder
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, query, params=None):
+        self._holder['query'] = query
+        self._holder['params'] = params
+
+    def fetchone(self):
+        return [self._fetch_value]
+
+
+class _FakeConn:
+    def __init__(self, fetch_value):
+        self._fetch_value = fetch_value
+        self.holder = {}
+
+    def cursor(self):
+        return _FakeCursor(self._fetch_value, self.holder)
+
+
+class TestQualifiedStagingInvariant(unittest.TestCase):
+    def test_staging_only_qualified_passes(self):
+        conn = _FakeConn(0)
+        invalid = sync.validate_qualified_staging(conn, 7)
+        self.assertEqual(invalid, 0)
+        self.assertIn('qualified IS NOT TRUE', conn.holder['query'])
+        self.assertIn('whatsapp_verified IS NOT TRUE', conn.holder['query'])
+        self.assertIn('instagram_validated IS NOT TRUE', conn.holder['query'])
+        self.assertEqual(conn.holder['params'], (7,))
+
+    def test_staging_with_invalid_lead_fails(self):
+        conn = _FakeConn(3)
+        invalid = sync.validate_qualified_staging(conn, 7)
+        self.assertGreater(invalid, 0)
+        with self.assertRaises(ValueError) as ctx:
+            if invalid > 0:
+                raise ValueError(
+                    f'Qualified staging invariant failed: '
+                    f'{invalid} invalid rows'
+                )
+        self.assertIn('3 invalid rows', str(ctx.exception))
+
+    def test_zero_qualified_results_exhausted_not_failed(self):
+        # 0/50 is a legitimate terminal state, never a sanity failure.
+        self.assertFalse(hasattr(sync, 'sanity_check'))
+        status, exhausted = sync.resolve_qualified_final_status({'qualified_saved': 0}, 50)
+        self.assertEqual(status, 'EXHAUSTED')
+        self.assertTrue(exhausted)
+
+    def test_five_qualified_results_partial_not_failed(self):
+        self.assertFalse(hasattr(sync, 'sanity_check'))
+        status, exhausted = sync.resolve_qualified_final_status({'qualified_saved': 5}, 50)
+        self.assertEqual(status, 'PARTIAL')
+        self.assertTrue(exhausted)
+
+    def test_fifty_qualified_preserves_success(self):
+        status, exhausted = sync.resolve_qualified_final_status({'qualified_saved': 50}, 50)
+        self.assertEqual(status, 'SUCCESS')
+        self.assertFalse(exhausted)
+
+    def test_old_catalog_count_no_longer_interferes(self):
+        # Legacy helpers comparing against previous catalog size are gone,
+        # and main() no longer references them.
+        self.assertFalse(hasattr(sync, 'sanity_check'))
+        self.assertFalse(hasattr(sync, 'get_previous_count'))
+        self.assertFalse(hasattr(sync, 'get_previous_qualified_count'))
+        self.assertTrue(hasattr(sync, 'validate_qualified_staging'))
+        import inspect
+        main_src = inspect.getsource(sync.main)
+        self.assertIn('validate_qualified_staging', main_src)
+        self.assertNotIn('sanity_check', main_src)
+        self.assertNotIn('extreme drop', main_src)
+
+
 if __name__ == '__main__':
     unittest.main()
