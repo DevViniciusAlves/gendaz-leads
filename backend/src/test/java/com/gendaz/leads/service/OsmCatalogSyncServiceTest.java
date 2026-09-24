@@ -64,7 +64,7 @@ class OsmCatalogSyncServiceTest {
     void requestSyncThrowsWhenCountryNotBrazil() {
         User user = new User();
         ApiException ex = assertThrows(ApiException.class, () ->
-                service.requestSync("Cuiabá", "USA", user));
+                service.requestSync("Cuiabá", "USA", "barbearia", user));
         
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
         assertEquals("OSM_CATALOG_COUNTRY_NOT_SUPPORTED", ex.getCode());
@@ -80,7 +80,7 @@ class OsmCatalogSyncServiceTest {
                 .thenReturn(scope);
         
         ApiException ex = assertThrows(ApiException.class, () ->
-                service.requestSync("Cuiabá", "Brasil", user));
+                service.requestSync("Cuiabá", "Brasil", "barbearia", user));
         
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
         assertEquals("OSM_ADMIN_BOUNDARY_REQUIRED", ex.getCode());
@@ -98,7 +98,7 @@ class OsmCatalogSyncServiceTest {
         when(geofabrikResolver.resolve("Mato Grosso")).thenThrow(new IllegalArgumentException("Unknown state"));
         
         ApiException ex = assertThrows(ApiException.class, () ->
-                service.requestSync("Cuiabá", "Brasil", user));
+                service.requestSync("Cuiabá", "Brasil", "barbearia", user));
         
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
         assertEquals("GEOFABRIK_REGION_NOT_RESOLVED", ex.getCode());
@@ -126,7 +126,7 @@ class OsmCatalogSyncServiceTest {
         when(syncRunRepository.findActiveByRegionId(eq(1L), anyList())).thenReturn(Optional.of(activeRun));
         
         ApiException ex = assertThrows(ApiException.class, () ->
-                service.requestSync("Cuiabá", "Brasil", user));
+                service.requestSync("Cuiabá", "Brasil", "barbearia", user));
         
         assertEquals(HttpStatus.CONFLICT, ex.getStatus());
         assertEquals("OSM_SYNC_ALREADY_RUNNING", ex.getCode());
@@ -158,7 +158,7 @@ class OsmCatalogSyncServiceTest {
         newRun.setId(100L);
         when(syncRunRepository.save(any(OsmSyncRun.class))).thenReturn(newRun);
         
-        OsmSyncRun result = service.requestSync("Cuiabá", "Brasil", user);
+        OsmSyncRun result = service.requestSync("Cuiabá", "Brasil", "barbearia", user);
         
         assertEquals(100L, result.getId());
         assertEquals("QUEUED", result.getStatus());
