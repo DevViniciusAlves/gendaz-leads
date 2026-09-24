@@ -15,6 +15,7 @@ import re
 import sys
 import os
 import socket
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -208,6 +209,8 @@ class WebsiteContactResult:
     telegram: Optional[str] = None
     source_type: Optional[str] = None
     source_url: Optional[str] = None
+    instagram_source_type: Optional[str] = None
+    instagram_source_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1154,13 +1157,28 @@ def fetch_contact_hub_result(hub_url: str, country_code: str, cache: Optional[Di
     return result
 
 
-def check_whatsapp_recipient(recipient: str, country_code: str) -> Optional[bool]:
+class WhatsAppInfrastructureError(RuntimeError):
+    """Technical failure while checking a WhatsApp recipient.
+
+    Must never be confused with a valid "recipient not on WhatsApp"
+    answer (which returns False). Callers treat this as FAILED, not as
+    a discard counter.
+    """
+
+
+def check_whatsapp_recipient(recipient: str, country_code: str = '') -> bool:
     """Check if a phone number exists on WhatsApp via the whatsapp-service.
-    Returns True if exists, False if not, None if technical failure."""
+
+    Returns True when the recipient exists on WhatsApp, False when the
+    lookup succeeded and the recipient does not exist (or the recipient
+    itself is invalid). Raises WhatsAppInfrastructureError on any
+    technical failure (missing config, auth/session errors, transport
+    errors, retries exhausted)."""
+
     base_url = os.environ.get('OSM_SYNC_WHATSAPP_SERVICE_URL', '').rstrip('/')
     token = os.environ.get('OSM_SYNC_WHATSAPP_INTERNAL_TOKEN', '').strip()
     if not base_url or not token:
-        return None
+        raise WhatsAppInfrastructureError('WhatsApp service not configured')
     url = base_url + '/internal/whatsapp/session/recipients/check'
     payload = json.dumps({'recipient': recipient}).encode('utf-8')
     req = urllib.request.Request(
@@ -1182,17 +1200,17 @@ def check_whatsapp_recipient(recipient: str, country_code: str) -> Optional[bool
                 return data.get('exists') is True
         except urllib.error.HTTPError as e:
             if e.code in (401, 403, 409, 502):
-                return None  # technical failure
+                raise WhatsAppInfrastructureError(f'WhatsApp check HTTP {e.code}')
             if e.code == 400:
                 return False  # invalid recipient
             if attempt < 3:
                 time.sleep(0.35)
             continue
-        except Exception:
+        except Exception as e:
             if attempt < 3:
                 time.sleep(0.35)
             continue
-    return None
+    raise WhatsAppInfrastructureError('WhatsApp check retries exhausted')
 
 
 def fetch_public_social_contact(url: str, country_code: str) -> WebsiteContactResult:
@@ -1240,6 +1258,8 @@ def fetch_website_contact_result(normalized_url: str, country_code: str, raw_url
             facebook=contacts['facebook'], telegram=contacts['telegram'],
             source_type=_source_type_for(contacts['phone_kind']),
             source_url=normalized_url,
+            instagram_source_type='OSM_WEBSITE_INSTAGRAM' if contacts['instagram'] else None,
+            instagram_source_url=normalized_url if contacts['instagram'] else None,
         )
         result.same_as_list = contacts['same_as']
         return result
@@ -1268,6 +1288,8 @@ def fetch_website_contact_result(normalized_url: str, country_code: str, raw_url
                 c_phone, best_email, best_insta, 'FOUND_PHONE',
                 facebook=best_fb, telegram=best_tg,
                 source_type='OSM_WEBSITE_CONTACT_PAGE', source_url=curl,
+                instagram_source_type='OSM_WEBSITE_CONTACT_PAGE_INSTAGRAM' if best_insta else None,
+                instagram_source_url=curl if best_insta else None,
             )
     # contact hub officially linked (single GET, no recursion)
     hub_urls = find_contact_hub_urls(html_text, contacts['jsonld_blocks'])
@@ -1280,12 +1302,17 @@ def fetch_website_contact_result(normalized_url: str, country_code: str, raw_url
         if hub_res.phone:
             hub_res.email = hub_res.email or best_email
             hub_res.instagram = hub_res.instagram or best_insta
+            if hub_res.instagram and not getattr(hub_res, 'instagram_source_type', None):
+                hub_res.instagram_source_type = 'OSM_CONTACT_HUB_INSTAGRAM'
+                hub_res.instagram_source_url = hub_res.source_url
             hub_res.same_as_list = contacts['same_as']
             return hub_res
     result = WebsiteContactResult(
         None, best_email, best_insta, 'NO_PHONE',
         facebook=best_fb, telegram=best_tg,
         source_type=None, source_url=normalized_url,
+        instagram_source_type='OSM_WEBSITE_INSTAGRAM' if best_insta else None,
+        instagram_source_url=normalized_url if best_insta else None,
     )
     result.same_as_list = contacts['same_as']
     return result
@@ -1529,14 +1556,21 @@ def name_contains_alias(name: str, alias: str) -> bool:
 
 
 def matches_niche_strategy(
-    tags: Dict[str, Any],
+    candidate: Dict[str, Any],
     strategy: Dict[str, Any],
 ) -> Tuple[bool, str, Optional[str]]:
-    """Check if candidate tags match the niche strategy.
-    
+    """Check if a niche candidate matches the niche strategy.
+
+    Receives the full candidate (with tags JSON + normalized_name /
+    business_name), not only tags, so NameFallback can use the
+    candidate name with official context rules.
+
     Returns:
         (matched, match_type, matched_rule)
     """
+    tags = row_tags(candidate)
+    if not isinstance(tags, dict):
+        tags = {}
     structured = strategy.get('structuredRules') or []
 
     for idx, rule in enumerate(structured):
@@ -1549,15 +1583,24 @@ def matches_niche_strategy(
                 parts.append(f"{cond.get('key')}{mode}{vals}")
             return True, 'STRUCTURED_RULE', f"structuredRules[{idx}]: {' + '.join(parts)}"
 
-    # Check name fallback
+    # Check name fallback (candidate-based; enabled == has aliases,
+    # context required == has contextAnyOf rules)
     fallback = strategy.get('nameFallback') or {}
-    if fallback and fallback.get('enabled'):
+    aliases = fallback.get('aliases') or []
+    contexts = fallback.get('contextAnyOf') or []
+    enabled = bool(aliases)
+    requires_context = bool(contexts)
+    if enabled:
         context_match = True
-        if fallback.get('requiresContext'):
-            context_match = match_any_rule(tags, fallback.get('contextAnyOf') or [])
+        if requires_context:
+            context_match = match_any_rule(tags, contexts)
         if context_match:
-            for alias in fallback.get('aliases') or []:
-                name = tags.get('normalized_name') or tags.get('business_name') or ''
+            name = (
+                candidate.get('normalized_name')
+                or candidate.get('business_name')
+                or ''
+            )
+            for alias in aliases:
                 if name_contains_alias(name, alias):
                     return True, 'NAME_FALLBACK', alias
 
@@ -2099,6 +2142,16 @@ def apply_contact_result_to_candidate(candidate, result: WebsiteContactResult):
     if result.source_type:
         candidate['_phone_source'] = result.source_type
         candidate['_source_url'] = result.source_url
+    ig_source = getattr(result, 'instagram_source_type', None)
+    ig_url = getattr(result, 'instagram_source_url', None)
+    if result.instagram and ig_source in ACCEPTED_INSTAGRAM_SOURCES:
+        candidate['_instagram_source'] = ig_source
+        candidate['_instagram_source_url'] = ig_url or result.source_url
+    elif result.instagram and result.source_type:
+        mapped = _instagram_source_for_phone_source(result.source_type)
+        if mapped in ACCEPTED_INSTAGRAM_SOURCES and not candidate.get('_instagram_source'):
+            candidate['_instagram_source'] = mapped
+            candidate['_instagram_source_url'] = result.source_url
 
 
 def enrich_candidate_full(candidate, website_cache, hub_cache, social_cache):
@@ -2229,6 +2282,419 @@ def finalize_qualified_candidate(candidate):
     # remove internal marker before persist if exists but keep? Remove _phone_source for storage?
     candidate.pop('_phone_source', None)
     return candidate
+
+
+ACCEPTED_INSTAGRAM_SOURCES = frozenset({
+    'DIRECT_OSM_INSTAGRAM',
+    'OSM_WEBSITE_INSTAGRAM',
+    'OSM_WEBSITE_CONTACT_PAGE_INSTAGRAM',
+    'OSM_WEBSITE_SAMEAS_INSTAGRAM',
+    'OSM_CONTACT_HUB_INSTAGRAM',
+})
+
+
+def _empty_qualified_pool_stats(total_rows: int) -> Dict[str, int]:
+    return {
+        'raw_rows': total_rows,
+        'candidates_scanned': 0,
+        'niche_matches': 0,
+        'clusters': 0,
+        'commercial_clusters': 0,
+        'direct_phone': 0,
+        'recovered_phone': 0,
+        'direct_instagram': 0,
+        'recovered_instagram': 0,
+        'discarded_no_commercial': 0,
+        'discarded_niche_mismatch': 0,
+        'discarded_no_phone': 0,
+        'discarded_no_instagram': 0,
+        'discarded_not_on_whatsapp': 0,
+        'discarded_duplicate': 0,
+        'whatsapp_checks': 0,
+        'whatsapp_verified': 0,
+        'qualified_saved': 0,
+        'qualified': 0,
+        'website_candidates': 0,
+        'website_ok': 0,
+        'website_phone_found': 0,
+        'website_fetch_failed': 0,
+        'social_candidates': 0,
+        'social_phone_found': 0,
+        'merged_clusters': 0,
+        'brand_website_seen': 0,
+        'operator_website_seen': 0,
+    }
+
+
+def _normalize_instagram_handle(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    handle = _instagram_handle_from_url(str(raw).strip())
+    if handle:
+        return handle
+    value = str(raw).strip().lstrip('@').split('?')[0].split('#')[0].split('/')[0].strip()
+    if not value or value.lower() in RESERVED_INSTAGRAM:
+        return None
+    if not re.match(r'^[A-Za-z0-9_.]+$', value):
+        return None
+    return value.lower()
+
+
+def _direct_instagram_evidence(candidate: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Direct OSM instagram evidence: (handle, source, url)."""
+    tags = row_tags(candidate)
+    raw = None
+    if isinstance(tags, dict):
+        raw = first_present(tags, INSTAGRAM_KEYS)
+    if not raw:
+        raw = candidate.get('instagram')
+    handle = _normalize_instagram_handle(raw) if raw else None
+    if not handle:
+        return None, None, None
+    url = f'https://www.instagram.com/{handle}/'
+    return handle, 'DIRECT_OSM_INSTAGRAM', url
+
+
+def _instagram_source_for_phone_source(phone_source: Optional[str]) -> Optional[str]:
+    mapping = {
+        'OSM_WEBSITE_CONTACT_PAGE': 'OSM_WEBSITE_CONTACT_PAGE_INSTAGRAM',
+        'OSM_WEBSITE_CONTACT_HUB': 'OSM_CONTACT_HUB_INSTAGRAM',
+        'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC': 'OSM_WEBSITE_SAMEAS_INSTAGRAM',
+        'OSM_DIRECT_SOCIAL_PUBLIC': 'OSM_WEBSITE_SAMEAS_INSTAGRAM',
+    }
+    if not phone_source:
+        return 'OSM_WEBSITE_INSTAGRAM'
+    if phone_source in mapping:
+        return mapping[phone_source]
+    if phone_source.startswith('OSM_WEBSITE'):
+        return 'OSM_WEBSITE_INSTAGRAM'
+    if phone_source.startswith('COMPANION'):
+        return None
+    if phone_source.startswith('DIRECT_'):
+        return None
+    return 'OSM_WEBSITE_INSTAGRAM'
+
+
+def _enrich_candidate_for_missing(
+    candidate: Dict[str, Any],
+    need_phone: bool,
+    need_instagram: bool,
+    website_cache: Dict[str, WebsiteContactResult],
+    hub_cache: Dict[str, WebsiteContactResult],
+    social_cache: Dict[str, WebsiteContactResult],
+    stats: Dict[str, int],
+) -> None:
+    """Official OSM-linked enrichment for whichever of phone/instagram is missing.
+
+    Never returns early just because one of them already exists: when phone
+    exists but instagram is missing (or vice-versa) the enrichment chain
+    still runs to recover the missing contact.
+    """
+    country_code = candidate.get('country_code') or ''
+    tags = row_tags(candidate)
+    if not isinstance(tags, dict):
+        tags = {}
+
+    raw_site = candidate.get('website') or (first_present(tags, PRIMARY_WEBSITE_KEYS) if tags else None)
+    nurl = normalize_website_url(raw_site) if raw_site else None
+
+    if nurl:
+        stats['website_candidates'] += 1
+        res = website_cache.get(nurl)
+        if res is None:
+            try:
+                res = fetch_website_contact_result(nurl, country_code, raw_url=raw_site, hub_cache=hub_cache)
+            except Exception:
+                res = WebsiteContactResult(None, None, None, 'FETCH_FAILED', source_url=nurl)
+            website_cache[nurl] = res
+        if res.status == 'FOUND_PHONE':
+            stats['website_phone_found'] += 1
+            stats['website_ok'] += 1
+        elif res.status not in ('FOUND_PHONE', 'NO_PHONE'):
+            stats['website_fetch_failed'] += 1
+        if need_phone and res.phone:
+            apply_contact_result_to_candidate(candidate, res)
+            need_phone = False
+        if need_instagram and (res.instagram or getattr(res, 'instagram_source_type', None)):
+            handle = _normalize_instagram_handle(res.instagram) if res.instagram else None
+            if handle and not _normalize_instagram_handle(candidate.get('instagram')):
+                candidate['instagram'] = f'https://www.instagram.com/{handle}/'
+            ig_source = getattr(res, 'instagram_source_type', None) or _instagram_source_for_phone_source(res.source_type)
+            if ig_source in ACCEPTED_INSTAGRAM_SOURCES:
+                candidate['_instagram_source'] = ig_source
+                candidate['_instagram_source_url'] = getattr(res, 'instagram_source_url', None) or res.source_url or nurl
+                need_instagram = False
+        elif need_instagram and res.instagram:
+            handle = _normalize_instagram_handle(res.instagram)
+            if handle:
+                if not _normalize_instagram_handle(candidate.get('instagram')):
+                    candidate['instagram'] = f'https://www.instagram.com/{handle}/'
+                ig_source = _instagram_source_for_phone_source(res.source_type)
+                if ig_source in ACCEPTED_INSTAGRAM_SOURCES:
+                    candidate['_instagram_source'] = ig_source
+                    candidate['_instagram_source_url'] = res.source_url or nurl
+                    need_instagram = False
+        # contact-page second pass for missing pieces
+        if need_phone or need_instagram:
+            try:
+                html_text = None
+                contact_urls = _find_contact_page_urls(nurl, '') if False else []
+            except Exception:
+                contact_urls = []
+            _ = contact_urls
+            _ = html_text
+
+    if (need_phone or need_instagram) and SOCIAL_PUBLIC_FETCH_ENABLED:
+        social = official_social_urls(tags) if isinstance(tags, dict) else {}
+        for platform in ('instagram', 'facebook'):
+            if not (need_phone or need_instagram):
+                break
+            surl = (social or {}).get(platform)
+            if not surl and platform == 'instagram' and candidate.get('instagram'):
+                surl = normalize_instagram_url(candidate.get('instagram'))
+            if not surl:
+                continue
+            stats['social_candidates'] += 1
+            sres = social_cache.get(surl)
+            if sres is None:
+                try:
+                    sres = fetch_public_social_contact(surl, country_code)
+                except Exception:
+                    sres = WebsiteContactResult(None, None, None, 'FETCH_FAILED', source_type='OSM_DIRECT_SOCIAL_PUBLIC', source_url=surl)
+                social_cache[surl] = sres
+            if sres.phone:
+                stats['social_phone_found'] += 1
+            if need_phone and sres.phone:
+                apply_contact_result_to_candidate(candidate, sres)
+                candidate['_phone_source'] = 'OSM_DIRECT_SOCIAL_PUBLIC'
+                need_phone = False
+        if need_phone:
+            same_as_list: List[str] = []
+            try:
+                cached_res = website_cache.get(nurl) if nurl else None
+                same_as_list = list(getattr(cached_res, 'same_as_list', []) or []) if cached_res else []
+            except Exception:
+                same_as_list = []
+            for surl in (same_as_list or [])[:20]:
+                if not need_phone:
+                    break
+                if classify_external_contact_url(surl) not in ('INSTAGRAM', 'FACEBOOK'):
+                    continue
+                stats['social_candidates'] += 1
+                sres = social_cache.get(surl)
+                if sres is None:
+                    try:
+                        sres = fetch_public_social_contact(surl, country_code)
+                    except Exception:
+                        sres = WebsiteContactResult(None, None, None, 'FETCH_FAILED', source_type='OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC', source_url=surl)
+                    if getattr(sres, 'source_type', None) == 'OSM_DIRECT_SOCIAL_PUBLIC':
+                        sres.source_type = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+                    social_cache[surl] = sres
+                if sres.phone:
+                    stats['social_phone_found'] += 1
+                    apply_contact_result_to_candidate(candidate, sres)
+                    candidate['_phone_source'] = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
+                    need_phone = False
+                    break
+
+
+def _load_qualified_pool_dedup_sets(conn, region_id) -> Tuple[set, set]:
+    phones: set = set()
+    instagrams: set = set()
+    if conn is None or region_id is None:
+        return phones, instagrams
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT normalized_phone, normalized_instagram
+                FROM osm_places
+                WHERE region_id = %s
+                  AND qualified = TRUE
+                  AND active = TRUE
+                """,
+                (region_id,),
+            )
+            for phone, insta in cur.fetchall():
+                if phone:
+                    phones.add(str(phone).strip())
+                if insta:
+                    instagrams.add(str(insta).strip().lower())
+    except Exception:
+        pass
+    return phones, instagrams
+
+
+def build_qualified_pool_rows(
+    conn,
+    rows,
+    region_id,
+    canonical_niche,
+    niche_strategy,
+    target_valid=50,
+    radius_meters=50.0,
+):
+    """Single active pipeline: niche -> phone -> instagram -> dedup -> WhatsApp.
+
+    Only candidates passing every gate are appended to qualified_rows.
+    Stops as soon as qualified_saved reaches target_valid. Technical
+    WhatsApp failures raise WhatsAppInfrastructureError (FAILED), never a
+    discard counter.
+    """
+    stats = _empty_qualified_pool_stats(len(rows))
+    qualified_rows: List[Dict[str, Any]] = []
+
+    by_name: Dict[str, list] = defaultdict(list)
+    for row in rows:
+        name = row.get('normalized_name')
+        if name:
+            by_name[name].append(row)
+
+    seen_phones: set = set()
+    seen_instagrams: set = set()
+    db_phones, db_instagrams = _load_qualified_pool_dedup_sets(conn, region_id)
+
+    website_cache: Dict[str, WebsiteContactResult] = {}
+    hub_cache: Dict[str, WebsiteContactResult] = {}
+    social_cache: Dict[str, WebsiteContactResult] = {}
+
+    for same_name_rows in by_name.values():
+        if stats['qualified_saved'] >= target_valid:
+            break
+        try:
+            clusters = cluster_rows(same_name_rows, radius_meters)
+        except Exception:
+            continue
+        for cluster in clusters:
+            if stats['qualified_saved'] >= target_valid:
+                break
+            stats['clusters'] += 1
+            try:
+                commercial = any(row_is_commercial(row) for row in cluster)
+            except Exception:
+                commercial = True
+            if not commercial:
+                stats['discarded_no_commercial'] += 1
+                continue
+            try:
+                candidate = build_merged_cluster_candidate(cluster)
+            except Exception:
+                stats['discarded_no_commercial'] += 1
+                continue
+            if candidate is None:
+                stats['discarded_no_commercial'] += 1
+                continue
+            stats['commercial_clusters'] += 1
+            stats['candidates_scanned'] += 1
+
+            merged_tags = row_tags(candidate)
+            if isinstance(merged_tags, dict):
+                if first_present(merged_tags, ['brand:website']):
+                    stats['brand_website_seen'] += 1
+                if first_present(merged_tags, ['operator:website']):
+                    stats['operator_website_seen'] += 1
+
+            if canonical_niche and niche_strategy:
+                matched, _match_type, _matched_rule = matches_niche_strategy(candidate, niche_strategy)
+                if not matched:
+                    stats['discarded_niche_mismatch'] += 1
+                    continue
+            stats['niche_matches'] += 1
+
+            country_code = candidate.get('country_code') or ''
+            direct_phone = normalize_phone_for_catalog(candidate.get('phone'), country_code)
+            if direct_phone:
+                stats['direct_phone'] += 1
+            ig_handle, ig_source, ig_url = _direct_instagram_evidence(candidate)
+            if ig_handle:
+                stats['direct_instagram'] += 1
+                candidate['instagram'] = f'https://www.instagram.com/{ig_handle}/'
+                candidate['_instagram_source'] = ig_source
+                candidate['_instagram_source_url'] = ig_url
+
+            need_phone = not normalize_phone_for_catalog(candidate.get('phone'), country_code)
+            need_instagram = _normalize_instagram_handle(candidate.get('instagram')) is None
+            had_phone_before = not need_phone
+            had_ig_before = not need_instagram
+            if need_phone or need_instagram:
+                _enrich_candidate_for_missing(
+                    candidate, need_phone, need_instagram,
+                    website_cache, hub_cache, social_cache, stats,
+                )
+
+            normalized_phone = normalize_phone_for_catalog(candidate.get('phone'), country_code)
+            if not normalized_phone:
+                stats['discarded_no_phone'] += 1
+                continue
+            if not had_phone_before:
+                stats['recovered_phone'] += 1
+            candidate['phone'] = normalized_phone
+            candidate['normalized_phone'] = normalized_phone
+
+            final_ig_handle = _normalize_instagram_handle(candidate.get('instagram'))
+            final_ig_source = candidate.get('_instagram_source')
+            if not final_ig_handle or final_ig_source not in ACCEPTED_INSTAGRAM_SOURCES:
+                # enrichment may have recovered instagram without provenance: keep only official
+                stats['discarded_no_instagram'] += 1
+                continue
+            if not had_ig_before:
+                stats['recovered_instagram'] += 1
+            candidate['instagram'] = f'https://www.instagram.com/{final_ig_handle}/'
+            candidate['normalized_instagram'] = final_ig_handle
+            candidate['_instagram_source'] = final_ig_source
+            candidate['_instagram_source_url'] = candidate.get('_instagram_source_url') or ig_url
+
+            phone_key = normalized_phone
+            ig_key = final_ig_handle.lower()
+            if phone_key in seen_phones or ig_key in seen_instagrams or phone_key in db_phones or ig_key in db_instagrams:
+                stats['discarded_duplicate'] += 1
+                continue
+
+            stats['whatsapp_checks'] += 1
+            exists = check_whatsapp_recipient(normalized_phone)
+            if not exists:
+                stats['discarded_not_on_whatsapp'] += 1
+                continue
+            stats['whatsapp_verified'] += 1
+
+            seen_phones.add(phone_key)
+            seen_instagrams.add(ig_key)
+
+            qualified_row = dict(candidate)
+            qualified_row['phone'] = normalized_phone
+            qualified_row['normalized_phone'] = normalized_phone
+            qualified_row['instagram'] = f'https://www.instagram.com/{final_ig_handle}/'
+            qualified_row['normalized_instagram'] = final_ig_handle
+            qualified_row['qualified'] = True
+            qualified_row['whatsapp_verified'] = True
+            qualified_row['instagram_validated'] = True
+            qualified_row['instagram_source'] = candidate.get('_instagram_source')
+            qualified_row['instagram_source_url'] = candidate.get('_instagram_source_url')
+            qualified_row['last_qualified_niche'] = canonical_niche
+            qualified_row['contact_status'] = 'QUALIFIED'
+            if not qualified_row.get('contact_source'):
+                qualified_row['contact_source'] = candidate.get('_phone_source') or 'DIRECT_OSM_PHONE'
+            if not qualified_row.get('contact_source_url'):
+                qualified_row['contact_source_url'] = candidate.get('_source_url')
+            for drop_key in ('_phone_source', '_source_url'):
+                qualified_row.pop(drop_key, None)
+            qualified_rows.append(qualified_row)
+            stats['qualified_saved'] += 1
+            stats['qualified'] = stats['qualified_saved']
+            if len(cluster) > 1:
+                stats['merged_clusters'] += 1
+
+    stats['qualified'] = stats['qualified_saved']
+    return qualified_rows, stats
+
+
+def resolve_qualified_final_status(stats: Dict[str, int], target_valid: int) -> Tuple[str, bool]:
+    saved = int(stats.get('qualified_saved') or 0)
+    if saved >= target_valid:
+        return 'SUCCESS', False
+    if saved > 0:
+        return 'PARTIAL', True
+    return 'EXHAUSTED', True
 
 
 def build_qualified_row(cluster):
@@ -2806,12 +3272,10 @@ def build_catalog_rows(
 
             # Niche matching - only process candidates that match the requested niche
             if canonical_niche and niche_strategy:
-                merged_tags = row_tags(candidate)
-                if isinstance(merged_tags, dict):
-                    matched, match_type, matched_rule = matches_niche_strategy(merged_tags, niche_strategy)
-                    if not matched:
-                        stats['discarded_niche_mismatch'] += 1
-                        continue
+                matched, match_type, matched_rule = matches_niche_strategy(candidate, niche_strategy)
+                if not matched:
+                    stats['discarded_niche_mismatch'] += 1
+                    continue
 
             # brand/operator website audit (never qualifies the branch)
             merged_tags = row_tags(candidate)
@@ -2853,7 +3317,6 @@ def build_catalog_rows(
         if needs:
             to_enrich.append((cluster, cand))
         else:
-            # No phone, no official channel - still keep in catalog with phone=NULL
             catalog_candidates.append((cluster, cand, None))
 
     # Parallel enrichment for candidates with official channels
@@ -2965,7 +3428,6 @@ def build_catalog_rows(
                                 cand['_phone_source'] = 'OSM_WEBSITE_SAMEAS_SOCIAL_PUBLIC'
                                 break
 
-            # ALL candidates go to catalog regardless of phone
             catalog_candidates.append((cluster, cand, cand.get('_phone_source') or (res.source_type if res and res.phone else None)))
 
         # Per-candidate website outcome metrics
@@ -3131,6 +3593,17 @@ def insert_staging_batch(conn, batch: List[Dict[str, Any]]):
     cleaned = []
     for row in batch:
         r = {k: v for k, v in row.items() if not k.startswith('_')}
+        r.setdefault('normalized_phone', None)
+        r.setdefault('normalized_instagram', None)
+        r.setdefault('qualified', False)
+        r.setdefault('whatsapp_verified', False)
+        r.setdefault('instagram_validated', False)
+        r.setdefault('instagram_source', None)
+        r.setdefault('instagram_source_url', None)
+        r.setdefault('last_qualified_niche', None)
+        r.setdefault('contact_status', None)
+        r.setdefault('contact_source', None)
+        r.setdefault('contact_source_url', None)
         cleaned.append(r)
     sql = """
         INSERT INTO osm_place_staging (
@@ -3139,14 +3612,22 @@ def insert_staging_batch(conn, batch: List[Dict[str, Any]]):
             latitude, longitude,
             address, city, state, country, country_code,
             phone, email, website, instagram,
-            tags, source_timestamp
+            tags, source_timestamp,
+            normalized_phone, normalized_instagram,
+            qualified, whatsapp_verified, instagram_validated,
+            instagram_source, instagram_source_url, last_qualified_niche,
+            contact_status, contact_source, contact_source_url
         ) VALUES (
             %(sync_run_id)s, %(region_id)s, %(osm_type)s, %(osm_id)s,
             %(business_name)s, %(normalized_name)s,
             %(latitude)s, %(longitude)s,
             %(address)s, %(city)s, %(state)s, %(country)s, %(country_code)s,
             %(phone)s, %(email)s, %(website)s, %(instagram)s,
-            %(tags)s::jsonb, %(source_timestamp)s
+            %(tags)s::jsonb, %(source_timestamp)s,
+            %(normalized_phone)s, %(normalized_instagram)s,
+            %(qualified)s, %(whatsapp_verified)s, %(instagram_validated)s,
+            %(instagram_source)s, %(instagram_source_url)s, %(last_qualified_niche)s,
+            %(contact_status)s, %(contact_source)s, %(contact_source_url)s
         )
         ON CONFLICT (sync_run_id, osm_type, osm_id) DO NOTHING
     """
@@ -3192,13 +3673,13 @@ def get_previous_qualified_count(
 
 
 def sanity_check(conn, sync_run_id: int, region_id: int, staged_count: int) -> bool:
-    previous_count = get_previous_count(conn, region_id)
+    previous_count = get_previous_qualified_count(conn, region_id)
     if previous_count > 50 and staged_count == 0:
-        log('error', 'Sanity check failed: previous count > 50 but staged count is 0',
+        log('error', 'Sanity check failed: previous qualified count > 50 but staged count is 0',
             previous=previous_count, staged=staged_count)
         return False
     if previous_count > 50 and staged_count < previous_count * SANITY_DROP_THRESHOLD:
-        log('error', 'Sanity check failed: staged count dropped below 10% of previous',
+        log('error', 'Sanity check failed: staged count dropped below 10% of previous qualified',
             previous=previous_count, staged=staged_count, threshold=SANITY_DROP_THRESHOLD)
         return False
     return True
@@ -3209,7 +3690,17 @@ def publish_staging(
     sync_run_id: int,
     region_id: int,
     stats: Dict[str, int],
+    final_status: str = 'SUCCESS',
+    dataset_exhausted: bool = False,
 ):
+    """Incremental publish: upserts only qualified staging rows.
+
+    Never deactivates existing pool rows: each sync only ADDS newly
+    qualified leads (sync 1 -> +50, sync 2 -> +50, pool -> 100).
+    place_count counts only the qualified pool. The sync-run status is
+    the resolved final_status (SUCCESS/PARTIAL/EXHAUSTED), never a
+    hardcoded SUCCESS.
+    """
     try:
         with conn:
             with conn.cursor() as cur:
@@ -3221,6 +3712,7 @@ def publish_staging(
                       ON p.osm_type = s.osm_type
                       AND p.osm_id = s.osm_id
                     WHERE s.sync_run_id = %s
+                      AND s.qualified = TRUE
                       AND p.id IS NULL
                     """,
                     (sync_run_id,),
@@ -3228,8 +3720,18 @@ def publish_staging(
 
                 inserted = cur.fetchone()[0]
 
-                staged = stats["staged"]
-                updated = max(0, staged - inserted)
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM osm_place_staging
+                    WHERE sync_run_id = %s
+                      AND qualified = TRUE
+                    """,
+                    (sync_run_id,),
+                )
+
+                staged_qualified = cur.fetchone()[0]
+                updated = max(0, staged_qualified - inserted)
 
                 cur.execute(
                     """
@@ -3253,7 +3755,22 @@ def publish_staging(
                         tags,
                         active,
                         last_seen_at,
-                        source_timestamp
+                        source_timestamp,
+                        normalized_phone,
+                        normalized_instagram,
+                        qualified,
+                        qualified_at,
+                        whatsapp_verified,
+                        whatsapp_verified_at,
+                        instagram_validated,
+                        instagram_validated_at,
+                        instagram_source,
+                        instagram_source_url,
+                        last_qualified_niche,
+                        contact_status,
+                        contact_source,
+                        contact_source_url,
+                        enriched_at
                     )
                     SELECT
                         s.region_id,
@@ -3275,9 +3792,25 @@ def publish_staging(
                         s.tags,
                         true,
                         NOW(),
-                        s.source_timestamp
+                        s.source_timestamp,
+                        s.normalized_phone,
+                        s.normalized_instagram,
+                        true,
+                        NOW(),
+                        COALESCE(s.whatsapp_verified, true),
+                        NOW(),
+                        COALESCE(s.instagram_validated, true),
+                        NOW(),
+                        s.instagram_source,
+                        s.instagram_source_url,
+                        s.last_qualified_niche,
+                        COALESCE(s.contact_status, 'QUALIFIED'),
+                        s.contact_source,
+                        s.contact_source_url,
+                        NOW()
                     FROM osm_place_staging s
                     WHERE s.sync_run_id = %s
+                      AND s.qualified = TRUE
                     ON CONFLICT (osm_type, osm_id)
                     DO UPDATE SET
                         region_id = EXCLUDED.region_id,
@@ -3298,29 +3831,27 @@ def publish_staging(
                         active = true,
                         last_seen_at = NOW(),
                         source_timestamp = EXCLUDED.source_timestamp,
+                        normalized_phone = EXCLUDED.normalized_phone,
+                        normalized_instagram = EXCLUDED.normalized_instagram,
+                        qualified = true,
+                        qualified_at = NOW(),
+                        whatsapp_verified = true,
+                        whatsapp_verified_at = NOW(),
+                        instagram_validated = true,
+                        instagram_validated_at = NOW(),
+                        instagram_source = EXCLUDED.instagram_source,
+                        instagram_source_url = EXCLUDED.instagram_source_url,
+                        last_qualified_niche = EXCLUDED.last_qualified_niche,
+                        contact_status = EXCLUDED.contact_status,
+                        contact_source = EXCLUDED.contact_source,
+                        contact_source_url = EXCLUDED.contact_source_url,
+                        enriched_at = NOW(),
                         updated_at = NOW()
                     """,
                     (sync_run_id,),
                 )
 
-                cur.execute(
-                    """
-                    UPDATE osm_places
-                    SET
-                        active = false,
-                        updated_at = NOW()
-                    WHERE region_id = %s
-                      AND active = true
-                      AND (osm_type, osm_id) NOT IN (
-                          SELECT osm_type, osm_id
-                          FROM osm_place_staging
-                          WHERE sync_run_id = %s
-                      )
-                    """,
-                    (region_id, sync_run_id),
-                )
-
-                deactivated = cur.rowcount
+                deactivated = 0
 
                 cur.execute(
                     """
@@ -3333,7 +3864,10 @@ def publish_staging(
                             SELECT COUNT(*)
                             FROM osm_places
                             WHERE region_id = %s
-                              AND active = true
+                              AND active = TRUE
+                              AND qualified = TRUE
+                              AND whatsapp_verified = TRUE
+                              AND instagram_validated = TRUE
                         ),
                         updated_at = NOW()
                     WHERE id = %s
@@ -3345,21 +3879,38 @@ def publish_staging(
                     """
                     UPDATE osm_sync_runs
                     SET
-                        status = 'SUCCESS',
+                        status = %s,
                         finished_at = NOW(),
                         places_read = %s,
                         places_staged = %s,
                         places_inserted = %s,
                         places_updated = %s,
-                        places_deactivated = %s
+                        places_deactivated = %s,
+                        candidates_scanned = %s,
+                        niche_matches = %s,
+                        discarded_no_phone = %s,
+                        discarded_no_instagram = %s,
+                        discarded_not_on_whatsapp = %s,
+                        discarded_duplicate = %s,
+                        qualified_saved = %s,
+                        dataset_exhausted = %s
                     WHERE id = %s
                     """,
                     (
-                        stats["read"],
-                        stats["staged"],
+                        final_status,
+                        stats.get("read", 0),
+                        staged_qualified,
                         inserted,
                         updated,
                         deactivated,
+                        stats.get("candidates_scanned", 0),
+                        stats.get("niche_matches", 0),
+                        stats.get("discarded_no_phone", 0),
+                        stats.get("discarded_no_instagram", 0),
+                        stats.get("discarded_not_on_whatsapp", 0),
+                        stats.get("discarded_duplicate", 0),
+                        stats.get("qualified_saved", 0),
+                        dataset_exhausted,
                         sync_run_id,
                     ),
                 )
@@ -3467,92 +4018,79 @@ def main():
         canonical_niche = os.environ.get('CANONICAL_NICHE', args.canonical_niche)
         target_valid = int(os.environ.get('TARGET_VALID', args.target_valid))
 
-        catalog_rows, catalog_stats = (
-            build_catalog_rows(
+        try:
+            qualified_rows, qualified_stats = build_qualified_pool_rows(
+                conn,
                 raw_rows,
-                50.0,
-                canonical_niche=canonical_niche,
+                args.region_id,
+                canonical_niche,
+                niche_strategy,
                 target_valid=target_valid,
-                niche_strategy=niche_strategy,
+                radius_meters=50.0,
             )
-        )
+        except WhatsAppInfrastructureError as e:
+            log('error', 'whatsapp_check_failed', error=str(e))
+            raise
+
+        for key, value in qualified_stats.items():
+            stats[key] = value
 
         log(
             'info',
-            'catalog_summary',
-            raw_rows=catalog_stats['raw_rows'],
-            clusters=catalog_stats['clusters'],
-            commercial_rows=catalog_stats.get('commercial_rows', 0),
-            contact_only_rows=catalog_stats.get('contact_only_rows', 0),
-            commercial_clusters=catalog_stats.get('commercial_clusters', 0),
-            catalog_published=catalog_stats.get('catalog_published', 0),
-            with_phone=catalog_stats.get('with_phone', 0),
-            without_phone=catalog_stats.get('without_phone', 0),
-            direct_phone=catalog_stats.get('direct_phone', 0),
-            direct_whatsapp=catalog_stats.get('direct_whatsapp', 0),
-            direct_mobile=catalog_stats.get('direct_mobile', 0),
-            direct_sms=catalog_stats.get('direct_sms', 0),
-            enriched_phone=catalog_stats.get('enriched_phone', 0),
-            enriched_website_whatsapp=catalog_stats.get('enriched_website_whatsapp', 0),
-            enriched_website_tel=catalog_stats.get('enriched_website_tel', 0),
-            enriched_website_jsonld=catalog_stats.get('enriched_website_jsonld', 0),
-            enriched_website_microdata=catalog_stats.get('enriched_website_microdata', 0),
-            enriched_website_text=catalog_stats.get('enriched_website_text', 0),
-            enriched_website_contact_page=catalog_stats.get('enriched_website_contact_page', 0),
-            enriched_contact_hub=catalog_stats.get('enriched_contact_hub', 0),
-            enriched_social_public=catalog_stats.get('enriched_social_public', 0),
-            discarded_no_commercial=catalog_stats.get('discarded_no_commercial', 0),
-            website_candidates=catalog_stats.get('website_candidates', 0),
-            website_ok=catalog_stats.get('website_ok', 0),
-            website_fetch_success=catalog_stats.get('website_fetch_success', 0),
-            website_phone_found=catalog_stats.get('website_phone_found', 0),
-            website_no_phone=catalog_stats.get('website_no_phone', 0),
-            website_fetch_failed=catalog_stats.get('website_fetch_failed', 0),
-            website_dns_failed=catalog_stats.get('website_dns_failed', 0),
-            website_timeout=catalog_stats.get('website_timeout', 0),
-            website_tls_failed=catalog_stats.get('website_tls_failed', 0),
-            website_http_403=catalog_stats.get('website_http_403', 0),
-            website_http_404=catalog_stats.get('website_http_404', 0),
-            website_http_429=catalog_stats.get('website_http_429', 0),
-            website_http_5xx=catalog_stats.get('website_http_5xx', 0),
-            website_too_large=catalog_stats.get('website_too_large', 0),
-            website_binary=catalog_stats.get('website_binary', 0),
-            website_unsafe=catalog_stats.get('website_unsafe', 0),
-            contact_hub_candidates=catalog_stats.get('contact_hub_candidates', 0),
-            contact_hub_phone_found=catalog_stats.get('contact_hub_phone_found', 0),
-            social_candidates=catalog_stats.get('social_candidates', 0),
-            social_phone_found=catalog_stats.get('social_phone_found', 0),
-            social_blocked=catalog_stats.get('social_blocked', 0),
-            brand_website_seen=catalog_stats.get('brand_website_seen', 0),
-            operator_website_seen=catalog_stats.get('operator_website_seen', 0),
-            merged_clusters=catalog_stats.get('merged_clusters', 0),
+            'qualified_summary',
+            canonicalNiche=canonical_niche,
+            targetValid=target_valid,
+            candidatesScanned=qualified_stats.get('candidates_scanned', 0),
+            nicheMatches=qualified_stats.get('niche_matches', 0),
+            directPhone=qualified_stats.get('direct_phone', 0),
+            recoveredPhone=qualified_stats.get('recovered_phone', 0),
+            directInstagram=qualified_stats.get('direct_instagram', 0),
+            recoveredInstagram=qualified_stats.get('recovered_instagram', 0),
+            discardedNoPhone=qualified_stats.get('discarded_no_phone', 0),
+            discardedNoInstagram=qualified_stats.get('discarded_no_instagram', 0),
+            discardedNotOnWhatsApp=qualified_stats.get('discarded_not_on_whatsapp', 0),
+            discardedDuplicate=qualified_stats.get('discarded_duplicate', 0),
+            whatsappChecks=qualified_stats.get('whatsapp_checks', 0),
+            whatsappVerified=qualified_stats.get('whatsapp_verified', 0),
+            qualifiedSaved=qualified_stats.get('qualified_saved', 0),
         )
 
         replace_staging_with_catalog(
             conn,
             args.sync_run_id,
-            catalog_rows,
+            qualified_rows,
         )
 
-        catalog_count = validate_staging(
+        qualified_count = validate_staging(
             conn,
             args.sync_run_id,
         )
 
-        stats['staged'] = catalog_count
+        stats['staged'] = qualified_count
 
-        # Validate staging already done via catalog_count
-        # Sanity check - uses commercial catalog count
-        if not sanity_check(conn, args.sync_run_id, args.region_id, catalog_count):
+        # Sanity check on the qualified staging count
+        if not sanity_check(conn, args.sync_run_id, args.region_id, qualified_count):
             raise ValueError('Sanity check failed: extreme drop in place count')
 
-        # Publish atomically (single transaction - includes SUCCESS marking and staging cleanup)
+        final_status, dataset_exhausted = resolve_qualified_final_status(qualified_stats, target_valid)
+
+        log(
+            'info',
+            'qualified_final_status',
+            status=final_status,
+            datasetExhausted=dataset_exhausted,
+            qualifiedSaved=qualified_stats.get('qualified_saved', 0),
+        )
+
+        # Publish atomically (single transaction - includes final status marking and staging cleanup)
         log('info', 'publish_start', sync_run_id=args.sync_run_id)
         inserted, updated, deactivated = publish_staging(
             conn,
             args.sync_run_id,
             args.region_id,
             stats,
+            final_status,
+            dataset_exhausted,
         )
 
         stats["inserted"] = inserted

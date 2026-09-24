@@ -143,6 +143,22 @@ jobs:
             echo "ERROR: OSM_SYNC_DATABASE_URL secret not configured"
             exit 1
           fi
+          if [ -z "$OSM_SYNC_WHATSAPP_SERVICE_URL" ]; then
+            echo "ERROR: OSM_SYNC_WHATSAPP_SERVICE_URL secret not configured (qualified pool requires WhatsApp check)"
+            exit 1
+          fi
+          if [ -z "$OSM_SYNC_WHATSAPP_INTERNAL_TOKEN" ]; then
+            echo "ERROR: OSM_SYNC_WHATSAPP_INTERNAL_TOKEN secret not configured (qualified pool requires WhatsApp check)"
+            exit 1
+          fi
+          if [ -z "$CANONICAL_NICHE" ]; then
+            echo "ERROR: CANONICAL_NICHE must be provided (qualified pool is niche-scoped)"
+            exit 1
+          fi
+          if ! [[ "$TARGET_VALID" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: TARGET_VALID must be numeric"
+            exit 1
+          fi
           echo "[osm-sync] start sync_run_id=$SYNC_RUN_ID region_id=$REGION_ID city=$CITY state=$STATE country_code=$COUNTRY_CODE osm_type=$OSM_TYPE osm_id=$OSM_ID geofabrik_region=$GEOFABRIK_REGION"
 
       - name: Update sync run to RUNNING
@@ -290,7 +306,7 @@ jobs:
                   'GitHub Actions workflow failed before catalog publish'
               )
           WHERE id = $SYNC_RUN_ID
-            AND status <> 'SUCCESS';
+            AND status NOT IN ('SUCCESS', 'PARTIAL', 'EXHAUSTED');
 
           UPDATE osm_catalog_regions
           SET

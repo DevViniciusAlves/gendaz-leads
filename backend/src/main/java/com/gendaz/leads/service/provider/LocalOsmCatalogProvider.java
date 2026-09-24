@@ -269,6 +269,13 @@ public class LocalOsmCatalogProvider {
                 "SELECT * FROM osm_places "
                         + "WHERE region_id = :regionId "
                         + "AND active = true "
+                        + "AND qualified = true "
+                        + "AND whatsapp_verified = true "
+                        + "AND instagram_validated = true "
+                        + "AND phone IS NOT NULL "
+                        + "AND BTRIM(phone) <> '' "
+                        + "AND instagram IS NOT NULL "
+                        + "AND BTRIM(instagram) <> '' "
                         + "AND business_name IS NOT NULL "
                         + "AND BTRIM(business_name) <> '' "
                         + "AND ("
@@ -529,6 +536,14 @@ public class LocalOsmCatalogProvider {
         p.setContactStatus(rs.getString("contact_status"));
         p.setContactSource(rs.getString("contact_source"));
         p.setContactSourceUrl(rs.getString("contact_source_url"));
+        try { p.setQualified(rs.getBoolean("qualified")); } catch (Exception ignored) {}
+        try { p.setNormalizedPhone(rs.getString("normalized_phone")); } catch (Exception ignored) {}
+        try { p.setNormalizedInstagram(rs.getString("normalized_instagram")); } catch (Exception ignored) {}
+        try { p.setWhatsappVerified(rs.getBoolean("whatsapp_verified")); } catch (Exception ignored) {}
+        try { p.setInstagramValidated(rs.getBoolean("instagram_validated")); } catch (Exception ignored) {}
+        try { p.setInstagramSource(rs.getString("instagram_source")); } catch (Exception ignored) {}
+        try { p.setInstagramSourceUrl(rs.getString("instagram_source_url")); } catch (Exception ignored) {}
+        try { p.setLastQualifiedNiche(rs.getString("last_qualified_niche")); } catch (Exception ignored) {}
 
         return p;
     }

@@ -37,6 +37,24 @@ function messagesRouter({ sessionManager, config, auth }) {
     return handleSend(req, res);
   });
 
+  router.post('/internal/whatsapp/session/recipients/check', async (req, res) => {
+    const { recipient } = req.body || {};
+
+    try {
+      const normalizedRecipient = String(recipient ?? '').replace(/\D/g, '');
+      const result = await sessionManager.checkRecipient({ recipient: normalizedRecipient });
+
+      return res.json({
+        recipient: normalizedRecipient,
+        exists: result.exists === true,
+      });
+    } catch (e) {
+      return res.status(e.httpStatus || 502).json({
+        error: e.code || 'recipient_check_failed',
+      });
+    }
+  });
+
   return router;
 }
 

@@ -97,7 +97,7 @@ class LocalOsmCatalogProviderTest {
     }
 
     @Test
-    void queryDoesNotRequirePhone() {
+    void queryRequiresQualifiedPoolFilters() {
         OsmCatalogRegion region = new OsmCatalogRegion();
         region.setId(1L);
         region.setCatalogStatus("READY");
@@ -111,8 +111,13 @@ class LocalOsmCatalogProviderTest {
         ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
         verify(jdbcTemplate).query(sqlCaptor.capture(), any(SqlParameterSource.class), any(RowMapper.class));
         String sql = sqlCaptor.getValue();
-        assertFalse(sql.contains("phone IS NOT NULL"), "SQL must NOT require phone IS NOT NULL");
-        assertFalse(sql.contains("BTRIM(phone) <> ''"), "SQL must NOT require BTRIM(phone) <> ''");
+        assertTrue(sql.contains("qualified = true"), "SQL must filter qualified = true");
+        assertTrue(sql.contains("whatsapp_verified = true"), "SQL must filter whatsapp_verified = true");
+        assertTrue(sql.contains("instagram_validated = true"), "SQL must filter instagram_validated = true");
+        assertTrue(sql.contains("phone IS NOT NULL"), "SQL must require phone IS NOT NULL");
+        assertTrue(sql.contains("BTRIM(phone) <> ''"), "SQL must require BTRIM(phone) <> ''");
+        assertTrue(sql.contains("instagram IS NOT NULL"), "SQL must require instagram IS NOT NULL");
+        assertTrue(sql.contains("BTRIM(instagram) <> ''"), "SQL must require BTRIM(instagram) <> ''");
         assertTrue(sql.contains("ORDER BY normalized_name, id"), "SQL must order by normalized_name, id");
         assertTrue(sql.contains("region_id = :regionId"));
         assertTrue(sql.contains("active = true"));

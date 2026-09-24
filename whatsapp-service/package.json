@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test test/whatsapp.test.js test/whatsapp-session.test.js"
+    "test": "node --test test/whatsapp.test.js test/whatsapp-session.test.js test/recipients-check.test.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.24",

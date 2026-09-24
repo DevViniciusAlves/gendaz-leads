@@ -386,28 +386,54 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     });
   }
 
-  async function defaultSender({ recipient, text }) {
-    const jid = `${recipient}@s.whatsapp.net`;
-    if (typeof state.sock.onWhatsApp === 'function') {
-      let check;
-      try {
-        check = await state.sock.onWhatsApp(jid);
-      } catch (e) {
-        // Falha técnica no lookup: não continuar para sendMessage.
-        const err = new Error('Falha tecnica ao verificar destinatario.');
-        err.code = 'recipient_check_failed';
-        err.httpStatus = 502;
-        err.cause = e;
-        throw err;
-      }
-      const exists = Array.isArray(check) ? check.some((c) => c && c.exists === true) : false;
-      if (!exists) {
-        const err = new Error('Destinatario nao possui WhatsApp.');
-        err.code = 'recipient_not_on_whatsapp';
-        err.httpStatus = 400;
-        throw err;
-      }
+  async function checkRecipient({ recipient }) {
+    if (!isValidRecipient(recipient)) {
+      const err = new Error('recipient invalido: somente digitos (8-15).');
+      err.code = 'invalid_recipient';
+      err.httpStatus = 400;
+      throw err;
     }
+
+    if (state.status !== STATES.CONNECTED || !state.sock) {
+      const err = new Error('Sessao WhatsApp nao conectada.');
+      err.code = 'session_not_connected';
+      err.httpStatus = 409;
+      throw err;
+    }
+
+    if (typeof state.sock.onWhatsApp !== 'function') {
+      const err = new Error('Lookup de destinatario indisponivel.');
+      err.code = 'recipient_check_unavailable';
+      err.httpStatus = 502;
+      throw err;
+    }
+
+    const jid = `${recipient}@s.whatsapp.net`;
+
+    try {
+      const check = await state.sock.onWhatsApp(jid);
+      const exists = Array.isArray(check) && check.some((item) => item && item.exists === true);
+      return { recipient, exists };
+    } catch (cause) {
+      const err = new Error('Falha tecnica ao verificar destinatario.');
+      err.code = 'recipient_check_failed';
+      err.httpStatus = 502;
+      err.cause = cause;
+      throw err;
+    }
+  }
+
+  async function defaultSender({ recipient, text }) {
+    const check = await checkRecipient({ recipient });
+
+    if (!check.exists) {
+      const err = new Error('Destinatario nao possui WhatsApp.');
+      err.code = 'recipient_not_on_whatsapp';
+      err.httpStatus = 400;
+      throw err;
+    }
+
+    const jid = `${recipient}@s.whatsapp.net`;
     const sent = await state.sock.sendMessage(jid, { text });
     const messageId = sent?.key?.id || null;
     return { status: 'sent', messageId, requestId: undefined };
@@ -440,6 +466,7 @@ function createSessionManager({ config: cfg, authStore, socketFactory, baileysLi
     getQr,
     publicStatus,
     sendText,
+    checkRecipient,
     enqueueCredsWrite,
     flushCredsWrites,
     backoffDelay,

@@ -1297,6 +1297,149 @@ public class CampaignLeadDiscoveryService {
         candidate.setPhone(normalized);
     }
 
+    private CandidateAcceptanceResult acceptQualifiedCatalogCandidates(
+            Campaign campaign,
+            List<LeadCandidate> candidates,
+            int remainingNeeded,
+            Set<String> seenSourceIds
+    ) {
+        // Qualified-pool path: the pool already guarantees validated phone,
+        // official Instagram and WhatsApp verification. No website fetching,
+        // no Instagram discovery, no WhatsApp lookup here — only
+        // seen/dedup bookkeeping, persistence, progress and events.
+        int accepted = 0;
+        int alreadySeen = 0;
+        int duplicates = 0;
+        int withoutPhone = 0;
+        int withPhone = 0;
+        int persistenceConflicts = 0;
+
+        for (LeadCandidate candidate : candidates) {
+            if (accepted >= remainingNeeded) {
+                break;
+            }
+
+            String sourceKey =
+                    normalizer.normalizeSourceId(
+                            candidate.getSource(),
+                            candidate.getSourceId()
+                    );
+
+            if (sourceKey == null) {
+                continue;
+            }
+
+            if (!seenSourceIds.add(sourceKey)) {
+                alreadySeen++;
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=already_seen_this_run source={} sourceId={}",
+                        campaign.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+                continue;
+            }
+
+            normalizeCandidatePhone(candidate);
+
+            var duplicateCheck =
+                    deduplicationService.check(candidate);
+
+            if (duplicateCheck.existing().isPresent()) {
+                duplicates++;
+                Lead existing =
+                        duplicateCheck.existing().get();
+
+                registerDuplicateEvent(
+                        campaign,
+                        duplicateCheck,
+                        candidate
+                );
+
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=duplicate_global duplicateReason={} existingLeadId={} source={} sourceId={}",
+                        campaign.getId(),
+                        duplicateCheck.reason(),
+                        existing.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+
+                continue;
+            }
+
+            if (!hasRequiredProspectingContact(candidate)) {
+                withoutPhone++;
+                log.info(
+                        "[osm-catalog] candidate_no_contact campaignId={} sourceId={} businessName={}",
+                        campaign.getId(),
+                        candidate.getSourceId(),
+                        candidate.getBusinessName()
+                );
+
+                registerSkippedNoContact(
+                        campaign,
+                        candidate
+                );
+
+                continue;
+            }
+
+            try {
+                Lead lead =
+                        persistenceService
+                                .createLeadForCampaign(
+                                        candidate,
+                                        campaign
+                                );
+
+                leadEventRepository.save(
+                        LeadEvent.builder()
+                                .leadId(lead.getId())
+                                .campaignId(campaign.getId())
+                                .eventType("lead_found")
+                                .eventMetadata(
+                                        "source="
+                                                + candidate.getSource()
+                                )
+                                .build()
+                );
+
+                log.info(
+                        "[osm-catalog] candidate_accepted campaignId={} reason=new_qualified_lead leadId={} source={} sourceId={}",
+                        campaign.getId(),
+                        lead.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+
+                withPhone++;
+                accepted++;
+
+            } catch (DataIntegrityViolationException e) {
+                persistenceConflicts++;
+                log.info(
+                        "[osm-catalog] candidate_rejected campaignId={} reason=persistence_conflict source={} sourceId={}",
+                        campaign.getId(),
+                        candidate.getSource(),
+                        candidate.getSourceId()
+                );
+            }
+        }
+
+        return new CandidateAcceptanceResult(
+                accepted,
+                alreadySeen,
+                duplicates,
+                0,
+                withoutPhone,
+                withPhone,
+                0,
+                0,
+                persistenceConflicts
+        );
+    }
+
     private DiscoveryExecutionResult discoverFromLocalCatalog(
             Campaign campaign,
             int targetToAdd
@@ -1325,12 +1468,12 @@ public class CampaignLeadDiscoveryService {
         int totalPersistenceConflicts = 0;
 
         Set<String> seenSourceIds = new HashSet<>();
-        Map<String, WebsiteContactEnricher.WebsiteContactData> enrichmentCache = new HashMap<>();
 
         while (accepted < targetToAdd) {
             LocalOsmCatalogProvider.CatalogPage page;
             try {
                 page = localCatalogProvider.discoverPage(
+                        campaign.getId(),
                         campaign.getNiche(),
                         campaign.getCity(),
                         campaign.getCountry(),
@@ -1389,12 +1532,11 @@ public class CampaignLeadDiscoveryService {
                     page.hasMore()
             );
 
-            CandidateAcceptanceResult pageResult = acceptCandidates(
+            CandidateAcceptanceResult pageResult = acceptQualifiedCatalogCandidates(
                     campaign,
                     page.candidates(),
                     targetToAdd - accepted,
-                    seenSourceIds,
-                    enrichmentCache
+                    seenSourceIds
             );
 
             accepted += pageResult.accepted();

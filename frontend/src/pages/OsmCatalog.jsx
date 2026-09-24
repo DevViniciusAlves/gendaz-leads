@@ -11,6 +11,8 @@ const STATUS_COLORS = {
   QUEUED: 'warning',
   RUNNING: 'info',
   SUCCESS: 'success',
+  PARTIAL: 'warning',
+  EXHAUSTED: 'muted',
   FAILED: 'error'
 }
 
@@ -21,10 +23,14 @@ function statusLabel(status) {
     case 'QUEUED': return 'Na fila'
     case 'RUNNING': return 'Executando'
     case 'SUCCESS': return 'Sucesso'
+    case 'PARTIAL': return 'Parcial'
+    case 'EXHAUSTED': return 'Esgotado'
     case 'FAILED': return 'Falhou'
     default: return status
   }
 }
+
+const TERMINAL_SYNC_STATUSES = ['SUCCESS', 'PARTIAL', 'EXHAUSTED', 'FAILED']
 
 export function OsmCatalog() {
   const [regions, setRegions] = useState([])
@@ -104,9 +110,9 @@ export function OsmCatalog() {
     })
   }, [regions])
 
-  async function requestSync(city, country) {
-    if (!city || !country) {
-      push('Preencha cidade e país.', 'error')
+  async function requestSync(city, country, niche) {
+    if (!city || !country || !niche) {
+      push('Preencha cidade, país e nicho.', 'error')
       return
     }
     if (country !== 'br') {
@@ -115,7 +121,7 @@ export function OsmCatalog() {
     }
     setFormSubmitting(true)
     try {
-      const response = await api.post('/api/osm-catalog/sync', { city, country })
+      const response = await api.post('/api/osm-catalog/sync', { city, country, niche })
       push('Sincronização iniciada. Verifique o status na tabela.', 'success')
       setShowForm(false)
       // Insert the new run immediately into the region
@@ -170,7 +176,7 @@ export function OsmCatalog() {
           )
         )
 
-        if (data.status === 'SUCCESS' || data.status === 'FAILED') {
+        if (TERMINAL_SYNC_STATUSES.includes(data.status)) {
           clearInterval(pollingIntervals.current[syncRunId])
           delete pollingIntervals.current[syncRunId]
 
@@ -207,7 +213,14 @@ export function OsmCatalog() {
   function handleSyncClick(region, isResync) {
     const city = region.city
     const country = region.countryCode || 'br'
-    requestSync(city, country)
+    const currentRun = region.syncRuns?.[0]
+    const niche = currentRun?.requestedNiche || currentRun?.canonicalNiche || ''
+    if (!niche) {
+      push('Informe o nicho no formulário de sincronização.', 'error')
+      setShowForm(true)
+      return
+    }
+    requestSync(city, country, niche)
   }
 
   return (
@@ -244,7 +257,8 @@ export function OsmCatalog() {
                 <th>Estado</th>
                 <th>País</th>
                 <th>Status</th>
-                <th>Estabelecimentos</th>
+                <th>Leads qualificados</th>
+                <th>Progresso (50)</th>
                 <th>Última Sincronização</th>
                 <th>Última Tentativa</th>
                 <th>Sync Atual</th>
@@ -271,6 +285,14 @@ export function OsmCatalog() {
                       </span>
                     </td>
                     <td>{formatNumber(region.placeCount)}</td>
+                    <td>
+                      {currentRun && currentRun.qualifiedSaved != null
+                        ? `${formatNumber(currentRun.qualifiedSaved)} / ${formatNumber(currentRun.targetValid ?? 50)}`
+                        : '—'}
+                      {currentRun?.requestedNiche || currentRun?.canonicalNiche
+                        ? ` · ${currentRun.requestedNiche || currentRun.canonicalNiche}`
+                        : ''}
+                    </td>
                     <td>
                       {region.lastSuccessAt ? new Date(region.lastSuccessAt).toLocaleString('pt-BR') : '—'}
                     </td>
@@ -355,11 +377,24 @@ export function OsmCatalog() {
             e.preventDefault()
             const city = e.target.city.value.trim()
             const country = e.target.country.value
-            requestSync(city, country)
+            const niche = e.target.niche.value.trim()
+            requestSync(city, country, niche)
           }}>
             <div className="field">
               <label htmlFor="city">Cidade</label>
               <input id="city" name="city" placeholder="Ex: Cuiabá" required />
+            </div>
+            <div className="field">
+              <label htmlFor="niche">Nicho</label>
+              <input
+                id="niche"
+                name="niche"
+                placeholder="Ex: nail designer"
+                required
+              />
+              <div className="hint">
+                Busca até 50 novos leads qualificados com WhatsApp validado e Instagram oficial.
+              </div>
             </div>
             <div className="field">
               <label htmlFor="country">País</label>
