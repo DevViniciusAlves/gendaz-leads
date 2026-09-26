@@ -33,6 +33,8 @@ class OsmCatalogControllerTest {
     @Mock
     OsmCatalogSyncService syncService;
     @Mock
+    com.gendaz.leads.service.OsmTargetService targetService;
+    @Mock
     SecurityService securityService;
     @Mock
     UserRepository userRepository;

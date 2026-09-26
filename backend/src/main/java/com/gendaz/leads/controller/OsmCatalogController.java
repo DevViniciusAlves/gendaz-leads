@@ -1,6 +1,7 @@
 package com.gendaz.leads.controller;
 
 import com.gendaz.leads.dto.osm.OsmCatalogRegionResponse;
+import com.gendaz.leads.dto.osm.OsmCatalogTargetResponse;
 import com.gendaz.leads.dto.osm.OsmRegionSyncRequest;
 import com.gendaz.leads.dto.osm.OsmSyncRequest;
 import com.gendaz.leads.dto.osm.OsmSyncResponse;
@@ -10,6 +11,7 @@ import com.gendaz.leads.entity.User;
 import com.gendaz.leads.repository.UserRepository;
 import com.gendaz.leads.security.SecurityService;
 import com.gendaz.leads.service.OsmCatalogSyncService;
+import com.gendaz.leads.service.OsmTargetService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -24,11 +26,13 @@ import java.util.stream.Collectors;
 public class OsmCatalogController {
 
     private final OsmCatalogSyncService syncService;
+    private final OsmTargetService targetService;
     private final SecurityService securityService;
     private final UserRepository userRepository;
 
-    public OsmCatalogController(OsmCatalogSyncService syncService, SecurityService securityService, UserRepository userRepository) {
+    public OsmCatalogController(OsmCatalogSyncService syncService, OsmTargetService targetService, SecurityService securityService, UserRepository userRepository) {
         this.syncService = syncService;
+        this.targetService = targetService;
         this.securityService = securityService;
         this.userRepository = userRepository;
     }
@@ -41,9 +45,15 @@ public class OsmCatalogController {
         return ResponseEntity.ok(regions);
     }
 
+    @GetMapping("/targets")
+    public ResponseEntity<List<OsmCatalogTargetResponse>> listTargets() {
+        return ResponseEntity.ok(targetService.listTargets());
+    }
+
     @PostMapping("/sync")
     @PreAuthorize("isAuthenticated()")
-    public ResponseEntity<OsmSyncResponse> requestSync(@Valid @RequestBody OsmSyncRequest request) {
+    public ResponseEntity<OsmSyncResponse> requestSync(@Valid @RequestBody OsmSyncRequest request,
+                                                       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         String email = securityService.currentEmail();
 
         User currentUser = userRepository.findByEmail(email)
@@ -53,12 +63,37 @@ public class OsmCatalogController {
                         "Não autenticado"
                 ));
 
-        OsmSyncRun syncRun = syncService.requestSync(
+        OsmSyncRun syncRun = targetService.requestNewTargetSync(
                 request.city(),
                 request.country(),
                 request.niche(),
-                currentUser
+                currentUser,
+                idempotencyKey
         );
+
+        syncService.dispatchSync(syncRun);
+
+        return ResponseEntity
+                .status(HttpStatus.ACCEPTED)
+                .body(OsmSyncResponse.from(syncRun));
+    }
+
+    @PostMapping("/targets/{targetId}/sync")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<OsmSyncResponse> requestTargetResync(
+            @PathVariable Long targetId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        String email = securityService.currentEmail();
+
+        User currentUser = userRepository.findByEmail(email)
+                .orElseThrow(() -> new com.gendaz.leads.exception.ApiException(
+                        HttpStatus.UNAUTHORIZED,
+                        "UNAUTHENTICATED",
+                        "Não autenticado"
+                ));
+
+        // Resync one-click: usa target persistido, sem modal, sem niche no body.
+        OsmSyncRun syncRun = targetService.requestTargetResync(targetId, currentUser, idempotencyKey);
 
         syncService.dispatchSync(syncRun);
 

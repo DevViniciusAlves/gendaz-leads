@@ -96,11 +96,11 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  get: (path) => request(path),
-  post: (path, body) => request(path, { method: 'POST', body }),
-  put: (path, body) => request(path, { method: 'PUT', body }),
-  patch: (path, body) => request(path, { method: 'PATCH', body }),
-  del: (path) => request(path, { method: 'DELETE' })
+  get: (path, options) => request(path, { ...(options || {}) }),
+  post: (path, body, options) => request(path, { method: 'POST', body, ...((options || {})) }),
+  put: (path, body, options) => request(path, { method: 'PUT', body, ...((options || {})) }),
+  patch: (path, body, options) => request(path, { method: 'PATCH', body, ...((options || {})) }),
+  del: (path, options) => request(path, { method: 'DELETE', ...((options || {})) })
 }
 
 export { getToken, setToken }

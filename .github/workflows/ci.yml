@@ -32,6 +32,22 @@ jobs:
       - name: Run backend startup smoke
         run: bash .github/scripts/backend_smoke.sh
 
+  frontend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Test Frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+
   frontend-build:
     runs-on: ubuntu-latest
     steps:
@@ -78,20 +94,19 @@ jobs:
       - name: Build WPP Docker Image
         run: docker build -f whatsapp-service/Dockerfile whatsapp-service -t gendaz-leads-whatsapp-ci
 
-  osm-python-test:
+  osm-java-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          pip install --no-cache-dir psycopg2-binary
-      - name: Run Python tests
-        run: |
-          python3 -m unittest discover -s .github/scripts -p "test_*.py"
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+      - name: Run OSM Java tests
+        working-directory: backend
+        run: mvn -B test -Dtest='NicheTwoStageTest,OsmGeoJsonSeqReaderTest,ContactResolversTest,WhatsAppPreflightParseTest,OsmTarget50LogicTest,OsmTargetServiceTest,QualifiedLeadPoolServiceTest' -DfailIfNoTests=false
 
   workflow-lint:
     runs-on: ubuntu-latest
@@ -121,17 +136,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
-          python-version: '3.11'
+          java-version: '17'
+          distribution: temurin
+          cache: maven
 
       - name: Install osmium
         run: |
           sudo apt-get update
           sudo apt-get install -y osmium-tool
 
-      - name: Run osmium fixture pipeline
+      - name: Run osmium fixture pipeline (Java verifier, no Python)
         run: |
           osmium tags-filter \
             --expressions=.github/osm-catalog-filter.txt \
@@ -146,11 +163,13 @@ jobs:
             -f geojsonseq \
             -o /tmp/exported.geojsonseq
 
-          python3 \
-            .github/scripts/verify_osmium_fixture.py \
-            /tmp/exported.geojsonseq
+          cd backend
+          mvn -B -q compile -DskipTests
+          mvn -B -q exec:java \
+            -Dexec.mainClass=com.gendaz.leads.osm.batch.OsmFixtureVerifierMain \
+            -Dexec.args="/tmp/exported.geojsonseq --min-features 1"
 
-      - name: Run boundary fixture pipeline (offline, no Nominatim)
+      - name: Run boundary fixture pipeline (offline, no Nominatim, Java verifier)
         run: |
           osmium cat \
             .github/fixtures/boundary-test.osm \
@@ -183,7 +202,7 @@ jobs:
             -f geojsonseq \
             -o /tmp/boundary-city.geojsonseq
 
-          python3 \
-            .github/scripts/verify_boundary_fixture.py \
-            /tmp/boundary.osm \
-            /tmp/boundary-city.geojsonseq
+          cd backend
+          mvn -B -q exec:java \
+            -Dexec.mainClass=com.gendaz.leads.osm.batch.OsmFixtureVerifierMain \
+            -Dexec.args="/tmp/boundary-city.geojsonseq --min-features 1"

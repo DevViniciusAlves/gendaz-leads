@@ -231,6 +231,51 @@ public class BaileysWhatsAppProvider implements WhatsAppServiceProvider {
                 node.path("deduplicated").asBoolean(false));
     }
 
+    @Override
+    public WhatsAppRecipientCheckResult checkRecipient(String recipient) {
+        // Validacao sem enviar mensagem: exists=true aprovado; exists=false NOT_ON_WHATSAPP;
+        // 409 sessao nao conectada e falha tecnica; 429/5xx/timeout com retry bounded.
+        requireConfigured();
+        int attempts = 3;
+        long intervalMs = 350;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                String body = execute(authed("/internal/whatsapp/session/recipients/check"),
+                        Map.of("recipient", recipient), "recipient-check");
+                JsonNode node = parse(body, "recipient-check");
+                boolean exists = node.path("exists").asBoolean(false);
+                return new WhatsAppRecipientCheckResult(exists, recipient, true);
+            } catch (ApiException e) {
+                String code = e.getCode();
+                if ("RECIPIENT_NOT_ON_WHATSAPP".equals(code) || "WHATSAPP_INVALID_RECIPIENT".equals(code)) {
+                    return new WhatsAppRecipientCheckResult(false, recipient, true);
+                }
+                if ("WHATSAPP_NOT_CONNECTED".equals(code)) {
+                    throw e;
+                }
+                boolean retriable = "WHATSAPP_RECIPIENT_CHECK_FAILED".equals(code)
+                        || "WHATSAPP_SEND_FAILED".equals(code)
+                        || "WHATSAPP_SERVICE_CONNECT_FAILED".equals(code)
+                        || "WHATSAPP_READ_TIMEOUT".equals(code);
+                if (retriable && attempt < attempts) {
+                    sleepQuiet(intervalMs);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new ApiException(HttpStatus.BAD_GATEWAY, "WHATSAPP_RECIPIENT_CHECK_FAILED",
+                "Falha ao verificar destinatario no WhatsApp.");
+    }
+
+    private static void sleepQuiet(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private WhatsAppSessionStatus toStatus(JsonNode node) {
         return new WhatsAppSessionStatus(
                 node.path("status").asText("UNKNOWN"),

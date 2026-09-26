@@ -7,6 +7,7 @@ import java.time.Instant;
 public record OsmSyncRunResponse(
         Long id,
         Long regionId,
+        Long targetId,
         String city,
         String state,
         String country,
@@ -33,12 +34,27 @@ public record OsmSyncRunResponse(
         Long discardedDuplicate,
         Long technicalFailures,
         Long qualifiedSaved,
-        Boolean datasetExhausted
+        Boolean datasetExhausted,
+        Long objectsRead,
+        Long commercialCandidates,
+        Long potentialNicheCandidates,
+        Long nicheConfirmed,
+        Long directPhone,
+        Long recoveredPhone,
+        Long directInstagram,
+        Long recoveredInstagram,
+        Long whatsappChecks,
+        Long whatsappVerifiedCount,
+        Long discardedNiche,
+        Long discardedDuplicateSource,
+        Long discardedDuplicatePhone,
+        Long discardedDuplicateInstagram
 ) {
     public static OsmSyncRunResponse from(OsmSyncRun run) {
         return new OsmSyncRunResponse(
                 run.getId(),
                 run.getRegion().getId(),
+                run.getTarget() == null ? null : run.getTarget().getId(),
                 run.getRegion().getCity(),
                 run.getRegion().getState(),
                 run.getRegion().getCountry(),
@@ -65,7 +81,21 @@ public record OsmSyncRunResponse(
                 run.getDiscardedDuplicate(),
                 run.getTechnicalFailures(),
                 run.getQualifiedSaved(),
-                run.getDatasetExhausted()
+                run.getDatasetExhausted(),
+                run.getObjectsRead(),
+                run.getCommercialCandidates(),
+                run.getPotentialNicheCandidates(),
+                run.getNicheConfirmed(),
+                run.getDirectPhone(),
+                run.getRecoveredPhone(),
+                run.getDirectInstagram(),
+                run.getRecoveredInstagram(),
+                run.getWhatsappChecks(),
+                run.getWhatsappVerifiedCount(),
+                run.getDiscardedNiche(),
+                run.getDiscardedDuplicateSource(),
+                run.getDiscardedDuplicatePhone(),
+                run.getDiscardedDuplicateInstagram()
         );
     }
 }

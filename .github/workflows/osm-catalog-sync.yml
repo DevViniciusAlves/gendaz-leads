@@ -11,6 +11,10 @@ on:
         description: 'ID da região no catálogo'
         required: true
         type: string
+      target_id:
+        description: 'ID do target cidade+nicho (vazio = legado)'
+        required: false
+        type: string
       city:
         description: 'Nome da cidade'
         required: true
@@ -67,6 +71,7 @@ jobs:
       OSM_SYNC_DATABASE_URL: ${{ secrets.OSM_SYNC_DATABASE_URL }}
       SYNC_RUN_ID: ${{ github.event.inputs.sync_run_id }}
       REGION_ID: ${{ github.event.inputs.region_id }}
+      TARGET_ID: ${{ github.event.inputs.target_id }}
       CITY: ${{ github.event.inputs.city }}
       STATE: ${{ github.event.inputs.state }}
       COUNTRY_CODE: ${{ github.event.inputs.country_code }}
@@ -91,19 +96,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
-          python-version: '3.11'
+          java-version: '17'
+          distribution: temurin
+          cache: maven
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y osmium-tool postgresql-client curl ca-certificates
 
-      - name: Install Python dependencies
-        run: |
-          pip install --no-cache-dir psycopg2-binary requests
+      - name: Build Java backend (batch + preflight)
+        working-directory: backend
+        run: mvn -B -q compile -DskipTests
 
       - name: Validate inputs
         run: |
@@ -114,6 +121,10 @@ jobs:
           fi
           if ! [[ "$REGION_ID" =~ ^[0-9]+$ ]]; then
             echo "ERROR: REGION_ID must be numeric"
+            exit 1
+          fi
+          if [ -n "$TARGET_ID" ] && ! [[ "$TARGET_ID" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: TARGET_ID must be numeric when provided"
             exit 1
           fi
           if ! [[ "$OSM_ID" =~ ^[0-9]+$ ]]; then
@@ -159,10 +170,11 @@ jobs:
             echo "ERROR: TARGET_VALID must be numeric"
             exit 1
           fi
-          echo "[osm-sync] start sync_run_id=$SYNC_RUN_ID region_id=$REGION_ID city=$CITY state=$STATE country_code=$COUNTRY_CODE osm_type=$OSM_TYPE osm_id=$OSM_ID geofabrik_region=$GEOFABRIK_REGION"
+          echo "[osm-sync] start sync_run_id=$SYNC_RUN_ID region_id=$REGION_ID target_id=$TARGET_ID city=$CITY state=$STATE country_code=$COUNTRY_CODE osm_type=$OSM_TYPE osm_id=$OSM_ID geofabrik_region=$GEOFABRIK_REGION"
 
-      - name: Validate WhatsApp session
-        run: python3 .github/scripts/whatsapp_sync_preflight.py
+      - name: Validate WhatsApp session (Java preflight)
+        working-directory: backend
+        run: mvn -B -q exec:java -Dexec.mainClass=com.gendaz.leads.osm.batch.OsmPreflightMain
 
       - name: Update sync run to RUNNING
         run: |
@@ -197,10 +209,10 @@ jobs:
           ACTUAL=$(md5sum "$PBF_FILE" | awk '{print $1}')
 
           if [ "$EXPECTED" != "$ACTUAL" ]; then
-            echo "[osm-sync] checksum_failed expected=$EXPECTED actual=$ACTUAL"
+            echo "[osm-sync] checksum_failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'Checksum validation failed for PBF download'
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'PBF_CHECKSUM_FAILED: checksum validation failed for PBF download'
               WHERE id = $SYNC_RUN_ID;
             "
             exit 1
@@ -217,7 +229,7 @@ jobs:
             echo "[osm-sync] osmium fileinfo failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'osmium fileinfo validation failed'
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'PBF_DOWNLOAD_FAILED: osmium fileinfo validation failed'
               WHERE id = $SYNC_RUN_ID;
             "
             exit 1
@@ -237,7 +249,7 @@ jobs:
             echo "[osm-sync] boundary getid failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'OSM boundary relation r${OSM_ID} not found or incomplete in ${GEOFABRIK_REGION} PBF'
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'BOUNDARY_NOT_FOUND: OSM boundary relation r${OSM_ID} not found or incomplete in ${GEOFABRIK_REGION} PBF'
               WHERE id = $SYNC_RUN_ID;
             "
             exit 1
@@ -249,7 +261,7 @@ jobs:
             echo "[osm-sync] boundary fileinfo failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'OSM boundary relation r${OSM_ID} fileinfo validation failed'
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'BOUNDARY_INVALID: OSM boundary relation r${OSM_ID} fileinfo validation failed'
               WHERE id = $SYNC_RUN_ID;
             "
             exit 1
@@ -272,7 +284,7 @@ jobs:
             echo "[osm-sync] city extract failed"
             psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
               UPDATE osm_sync_runs
-              SET status = 'FAILED', finished_at = NOW(), error_message = 'OSM city extraction failed using relation r${OSM_ID}'
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'CITY_EXTRACT_FAILED: OSM city extraction failed using relation r${OSM_ID}'
               WHERE id = $SYNC_RUN_ID;
             "
             exit 1
@@ -293,7 +305,7 @@ jobs:
               UPDATE osm_sync_runs
               SET status = 'FAILED',
                   finished_at = NOW(),
-                  error_message = 'osmium tags-filter failed'
+                  error_message = 'CATALOG_FILTER_FAILED: osmium tags-filter failed'
               WHERE id = $SYNC_RUN_ID;
             "
             exit 1
@@ -310,28 +322,30 @@ jobs:
             --attributes=type,id,timestamp \
             --format-option=print_record_separator=false \
             -f geojsonseq \
-            -o city-commercial.geojsonseq
+            -o city-commercial.geojsonseq || {
+            echo "[osm-sync] geojson export failed"
+            psql "$OSM_SYNC_DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+              UPDATE osm_sync_runs
+              SET status = 'FAILED', finished_at = NOW(), error_message = 'GEOJSON_EXPORT_FAILED: osmium export failed'
+              WHERE id = $SYNC_RUN_ID;
+            "
+            exit 1
+          }
 
           echo "[osm-sync] geojsonseq_export_ok"
 
-      - name: Run import script
+      - name: Run Java OSM sync batch (full lead pipeline)
+        working-directory: backend
         run: |
-          echo "[osm-sync] staging_complete"
-          python3 .github/scripts/osm_catalog_sync.py \
-            --sync-run-id "$SYNC_RUN_ID" \
-            --region-id "$REGION_ID" \
-            --city "$CITY" \
-            --state "$STATE" \
-            --country-code "$COUNTRY_CODE" \
-            --canonical-niche "$CANONICAL_NICHE" \
-            --target-valid "$TARGET_VALID" \
-            --niche-strategy-json "$NICHE_STRATEGY_JSON" \
-            --input city-commercial.geojsonseq
+          echo "[osm-sync] java_batch_start"
+          mvn -B -q exec:java \
+            -Dexec.mainClass=com.gendaz.leads.osm.batch.OsmSyncBatchMain \
+            -Dexec.args="--sync-run-id $SYNC_RUN_ID --region-id $REGION_ID --target-id ${TARGET_ID:-0} --city $CITY --state $STATE --country-code $COUNTRY_CODE --canonical-niche $CANONICAL_NICHE --target-valid $TARGET_VALID --niche-strategy-json $NICHE_STRATEGY_JSON --input ../city-commercial.geojsonseq"
 
       - name: Update sync run SUCCESS
         if: success()
         run: |
-          echo "[osm-sync] publish_success (handled by Python script)"
+          echo "[osm-sync] publish_success (handled by Java batch)"
 
       - name: Update sync run FAILED
         if: failure()
@@ -348,7 +362,7 @@ jobs:
               finished_at = NOW(),
               error_message = COALESCE(
                   error_message,
-                  'GitHub Actions workflow failed before catalog publish'
+                  'SYNC_FAILED: Java batch failed before catalog publish'
               )
           WHERE id = $SYNC_RUN_ID
             AND status NOT IN ('SUCCESS', 'PARTIAL', 'EXHAUSTED');
@@ -361,7 +375,7 @@ jobs:
                       FROM osm_sync_runs
                       WHERE id = $SYNC_RUN_ID
                   ),
-                  'GitHub Actions workflow failed before catalog publish'
+                  'SYNC_FAILED: Java batch failed before catalog publish'
               ),
               last_attempt_at = NOW(),
               updated_at = NOW()

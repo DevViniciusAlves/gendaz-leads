@@ -17,4 +17,6 @@ public interface WhatsAppServiceProvider {
     WhatsAppSessionStatus logout();
 
     WhatsAppSendResult sendText(String recipient, String text, String requestId);
+
+    WhatsAppRecipientCheckResult checkRecipient(String recipient);
 }

@@ -22,8 +22,15 @@ public class OsmSyncRun {
     private OsmCatalogRegion region;
 
     @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "target_id")
+    private OsmCatalogTarget target;
+
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "requested_by_user_id", nullable = false)
     private User requestedByUser;
+
+    @Column(name = "request_key", length = 64)
+    private String requestKey;
 
     @Column(name = "status", nullable = false, length = 20)
     @Builder.Default
@@ -110,6 +117,62 @@ public class OsmSyncRun {
     @Column(name = "dataset_exhausted")
     @Builder.Default
     private Boolean datasetExhausted = false;
+
+    @Column(name = "objects_read")
+    @Builder.Default
+    private Long objectsRead = 0L;
+
+    @Column(name = "commercial_candidates")
+    @Builder.Default
+    private Long commercialCandidates = 0L;
+
+    @Column(name = "potential_niche_candidates")
+    @Builder.Default
+    private Long potentialNicheCandidates = 0L;
+
+    @Column(name = "niche_confirmed")
+    @Builder.Default
+    private Long nicheConfirmed = 0L;
+
+    @Column(name = "direct_phone")
+    @Builder.Default
+    private Long directPhone = 0L;
+
+    @Column(name = "recovered_phone")
+    @Builder.Default
+    private Long recoveredPhone = 0L;
+
+    @Column(name = "direct_instagram")
+    @Builder.Default
+    private Long directInstagram = 0L;
+
+    @Column(name = "recovered_instagram")
+    @Builder.Default
+    private Long recoveredInstagram = 0L;
+
+    @Column(name = "whatsapp_checks")
+    @Builder.Default
+    private Long whatsappChecks = 0L;
+
+    @Column(name = "whatsapp_verified_count")
+    @Builder.Default
+    private Long whatsappVerifiedCount = 0L;
+
+    @Column(name = "discarded_niche")
+    @Builder.Default
+    private Long discardedNiche = 0L;
+
+    @Column(name = "discarded_duplicate_source")
+    @Builder.Default
+    private Long discardedDuplicateSource = 0L;
+
+    @Column(name = "discarded_duplicate_phone")
+    @Builder.Default
+    private Long discardedDuplicatePhone = 0L;
+
+    @Column(name = "discarded_duplicate_instagram")
+    @Builder.Default
+    private Long discardedDuplicateInstagram = 0L;
 
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
     private Instant createdAt;

@@ -21,4 +21,11 @@ public interface OsmSyncRunRepository extends JpaRepository<OsmSyncRun, Long> {
 
     @Query("SELECT s FROM OsmSyncRun s WHERE s.region.id = :regionId AND s.status IN :statuses")
     Optional<OsmSyncRun> findActiveByRegionId(@Param("regionId") Long regionId, @Param("statuses") List<String> statuses);
+
+    Optional<OsmSyncRun> findByRequestKey(String requestKey);
+
+    @Query("SELECT s FROM OsmSyncRun s WHERE s.target.id = :targetId AND s.status IN :statuses")
+    Optional<OsmSyncRun> findActiveByTargetId(@Param("targetId") Long targetId, @Param("statuses") List<String> statuses);
+
+    List<OsmSyncRun> findByTargetIdOrderByCreatedAtDesc(Long targetId);
 }

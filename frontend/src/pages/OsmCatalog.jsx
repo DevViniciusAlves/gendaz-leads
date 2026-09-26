@@ -2,13 +2,15 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '../api.js'
 import { useToast } from '../components/Toast.jsx'
 import { Modal } from '../components/Modal.jsx'
-import { IconDatabase, IconSync, IconRefresh, IconPlus } from '../components/Icons.jsx'
+import { IconDatabase, IconSync, IconPlus } from '../components/Icons.jsx'
 import { formatNumber } from '../format.js'
-import { buildOsmSyncRequest } from '../lib/osmSyncRequest.js'
+import { buildOsmSyncRequest, newIdempotencyKey } from '../lib/osmSyncRequest.js'
+import { syncErrorMessage, isTerminalRunStatus, isActiveRunStatus } from '../lib/syncErrors.js'
 
 const STATUS_COLORS = {
   READY: 'success',
   EMPTY: 'muted',
+  CONFIGURATION_REQUIRED: 'warning',
   QUEUED: 'warning',
   RUNNING: 'info',
   SUCCESS: 'success',
@@ -21,6 +23,7 @@ function statusLabel(status) {
   switch (status) {
     case 'READY': return 'Pronto'
     case 'EMPTY': return 'Vazio'
+    case 'CONFIGURATION_REQUIRED': return 'Configurar'
     case 'QUEUED': return 'Na fila'
     case 'RUNNING': return 'Executando'
     case 'SUCCESS': return 'Sucesso'
@@ -31,251 +34,240 @@ function statusLabel(status) {
   }
 }
 
-const TERMINAL_SYNC_STATUSES = ['SUCCESS', 'PARTIAL', 'EXHAUSTED', 'FAILED']
+const POLL_INTERVAL_MS = 5000
+const RECONCILE_WINDOW_MS = 2 * 60 * 1000
 
 export function OsmCatalog() {
-  const [regions, setRegions] = useState([])
+  const [targets, setTargets] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [showForm, setShowForm] = useState(false)
-  const [syncModalMode, setSyncModalMode] = useState(null)
-  // null | 'NEW_CITY' | 'EXISTING_REGION'
-  const [selectedRegion, setSelectedRegion] = useState(null)
-  const [countries, setCountries] = useState([])
-  const [countriesLoading, setCountriesLoading] = useState(true)
-  const [countriesError, setCountriesError] = useState('')
+  const [showNewModal, setShowNewModal] = useState(false)
   const [formSubmitting, setFormSubmitting] = useState(false)
+  const [syncingTargets, setSyncingTargets] = useState(() => new Set())
   const { push } = useToast()
 
   const pollingIntervals = useRef({})
-  const checkedActiveRuns = useRef(new Set())
+  const pollRetries = useRef({})
+  const mounted = useRef(true)
 
-  async function loadRegions() {
-    setLoading(true)
+  const loadTargets = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true)
     try {
-      const data = await api.get('/api/osm-catalog/regions')
-      setRegions(data)
+      const data = await api.get('/api/osm-catalog/targets')
+      if (!mounted.current) return data
+      setTargets(Array.isArray(data) ? data : [])
       setError('')
+      return data
     } catch (err) {
+      if (!mounted.current) throw err
       setError(err.message)
+      throw err
     } finally {
-      setLoading(false)
+      if (!mounted.current) return
+      if (!silent) setLoading(false)
     }
-  }
-
-  function closeSyncModal() {
-    setShowForm(false)
-    setSyncModalMode(null)
-    setSelectedRegion(null)
-  }
-
-  function openNewCitySync() {
-    setSelectedRegion(null)
-    setSyncModalMode('NEW_CITY')
-    setShowForm(true)
-  }
-
-  function openExistingRegionSync(region) {
-    setSelectedRegion(region)
-    setSyncModalMode('EXISTING_REGION')
-    setShowForm(true)
-  }
-
-  useEffect(() => {
-    loadRegions()
   }, [])
-
-  useEffect(() => {
-    api.get('/api/meta/countries')
-      .then((data) => {
-        setCountries(data)
-        setCountriesLoading(false)
-      })
-      .catch((err) => {
-        setCountriesError(err.message)
-        setCountriesLoading(false)
-      })
-  }, [])
-
-  // Load sync runs for regions that have active syncs on initial load
-  useEffect(() => {
-    if (regions.length === 0) return
-
-    regions.forEach((region) => {
-      if (checkedActiveRuns.current.has(region.id)) {
-        return
-      }
-
-      checkedActiveRuns.current.add(region.id)
-
-      api
-        .get(`/api/osm-catalog/regions/${region.id}/sync-runs`)
-        .then((data) => {
-          const latestRun = data?.[0]
-
-          if (!latestRun) return
-
-          setRegions((prev) =>
-            prev.map((item) =>
-              item.id === region.id
-                ? { ...item, syncRuns: data }
-                : item
-            )
-          )
-
-          if (
-            latestRun.status === 'QUEUED'
-            || latestRun.status === 'RUNNING'
-          ) {
-            startPolling(latestRun.id)
-          }
-        })
-        .catch(() => {})
-    })
-  }, [regions])
-
-  async function requestSync(city, country, niche) {
-    if (!city || !country || !niche) {
-      push('Preencha cidade, país e nicho.', 'error')
-      return
-    }
-    if (country !== 'br') {
-      push('A sincronização local V1 suporta apenas Brasil.', 'error')
-      return
-    }
-    setFormSubmitting(true)
-    try {
-      const { url, body } = buildOsmSyncRequest({ mode: 'NEW_CITY', city, country, niche })
-      const response = await api.post(url, body)
-      push('Sincronização iniciada. Verifique o status na tabela.', 'success')
-      closeSyncModal()
-      await loadRegions()
-      applyAcceptedRun(response)
-      if (response.syncRunId) {
-        startPolling(response.syncRunId)
-      }
-    } catch (err) {
-      push(err.message, 'error')
-    } finally {
-      setFormSubmitting(false)
-    }
-  }
 
   function applyAcceptedRun(response) {
-    if (!response || !response.syncRunId || !response.regionId) {
-      return
-    }
-    // Limpa erro legado: nova tentativa em andamento nao exibe falha antiga.
-    setRegions((prev) =>
-      prev.map((region) =>
-        region.id === response.regionId
-          ? {
-              ...region,
-              lastError: null,
-              syncRuns: [
-                {
-                  id: response.syncRunId,
-                  regionId: response.regionId,
-                  city: response.city,
-                  state: response.state,
-                  country: response.country,
-                  status: response.status || 'QUEUED',
-                  requestedNiche: response.requestedNiche,
-                  canonicalNiche: response.canonicalNiche,
-                  targetValid: response.targetValid ?? 50
-                }
-              ]
-            }
-          : region
-      )
-    )
-
-    checkedActiveRuns.current.add(response.regionId)
-  }
-
-  async function requestRegionSync(regionId, niche) {
-    if (!regionId || !niche) {
-      push('Informe o nicho para sincronizar novamente.', 'error')
-      return
-    }
-
-    setFormSubmitting(true)
-
-    try {
-      const { url, body } = buildOsmSyncRequest({ mode: 'EXISTING_REGION', regionId, niche })
-      const response = await api.post(url, body)
-
-      push('Sincronização iniciada.', 'success')
-
-      closeSyncModal()
-      await loadRegions()
-      applyAcceptedRun(response)
-      if (response.syncRunId) {
-        startPolling(response.syncRunId)
-      }
-    } catch (err) {
-      push(err.message, 'error')
-    } finally {
-      setFormSubmitting(false)
-    }
-  }
-
-  function startPolling(syncRunId) {
-    if (pollingIntervals.current[syncRunId]) {
-      return // Already polling
-    }
-    const interval = setInterval(async () => {
-      try {
-        const data = await api.get(`/api/osm-catalog/sync/${syncRunId}`)
-        // Update region with latest sync run by regionId
-        setRegions((prev) =>
-          prev.map((region) =>
-            region.id === data.regionId
-              ? {
-                  ...region,
-                  syncRuns: [data]
-                }
-              : region
-          )
-        )
-
-        if (TERMINAL_SYNC_STATUSES.includes(data.status)) {
-          clearInterval(pollingIntervals.current[syncRunId])
-          delete pollingIntervals.current[syncRunId]
-
-          checkedActiveRuns.current.delete(data.regionId)
-
-          loadRegions()
-
-          return
+    if (!response || !response.syncRunId) return
+    setTargets((prev) =>
+      prev.map((t) => {
+        const matchByTarget = response.targetId != null && t.id === response.targetId
+        const matchByRegion = response.targetId == null && response.regionId != null && t.regionId === response.regionId
+        if (!matchByTarget && !matchByRegion) return t
+        return {
+          ...t,
+          lastError: null,
+          lastAttemptAt: new Date().toISOString(),
+          latestRun: {
+            id: response.syncRunId,
+            targetId: response.targetId ?? t.id,
+            regionId: response.regionId ?? t.regionId,
+            city: response.city ?? t.city,
+            state: response.state ?? t.state,
+            country: response.country ?? t.country,
+            status: response.status || 'QUEUED',
+            requestedNiche: response.requestedNiche ?? t.requestedNiche,
+            canonicalNiche: response.canonicalNiche ?? t.canonicalNiche,
+            targetValid: response.targetValid ?? t.targetValid ?? 50,
+            qualifiedSaved: 0
+          }
         }
-      } catch (err) {
-        push(err.message, 'error')
-        clearInterval(pollingIntervals.current[syncRunId])
-        delete pollingIntervals.current[syncRunId]
-      }
-    }, 5000)
-    pollingIntervals.current[syncRunId] = interval
+      })
+    )
   }
 
-  function stopPolling(syncRunId) {
-    if (pollingIntervals.current[syncRunId]) {
-      clearInterval(pollingIntervals.current[syncRunId])
-      delete pollingIntervals.current[syncRunId]
+  const stopPolling = useCallback((runId) => {
+    if (pollingIntervals.current[runId]) {
+      clearInterval(pollingIntervals.current[runId])
+      delete pollingIntervals.current[runId]
     }
-  }
+    delete pollRetries.current[runId]
+  }, [])
 
-  // Cleanup on unmount
+  const fetchRunAndUpdate = useCallback(async (runId) => {
+    const data = await api.get(`/api/osm-catalog/sync/${runId}`)
+    if (!mounted.current) return data
+    setTargets((prev) =>
+      prev.map((t) => {
+        const isTarget = (data.targetId != null && t.id === data.targetId)
+          || (data.targetId == null && data.regionId != null && t.regionId === data.regionId)
+        if (!isTarget) return t
+        return { ...t, latestRun: data, lastAttemptAt: t.lastAttemptAt }
+      })
+    )
+    return data
+  }, [])
+
+  const startPolling = useCallback((runId) => {
+    if (!runId || pollingIntervals.current[runId]) return
+    pollRetries.current[runId] = 0
+    const tick = async () => {
+      try {
+        const data = await fetchRunAndUpdate(runId)
+        pollRetries.current[runId] = 0
+        if (isTerminalRunStatus(data.status)) {
+          stopPolling(runId)
+          // Recarrega o target para atualizar pool count e limpar erro antigo.
+          try {
+            await loadTargets({ silent: true })
+          } catch { /* mantém último estado */ }
+        }
+      } catch {
+        // Erro transitório não apaga sync real: retry curto antes de abandonar.
+        pollRetries.current[runId] = (pollRetries.current[runId] || 0) + 1
+        if (pollRetries.current[runId] >= 3) {
+          stopPolling(runId)
+          try {
+            await loadTargets({ silent: true })
+          } catch { /* mantém último estado */ }
+        }
+      }
+    }
+    // Poll imediato após 202, depois intervalo controlado.
+    tick()
+    pollingIntervals.current[runId] = setInterval(tick, POLL_INTERVAL_MS)
+  }, [fetchRunAndUpdate, loadTargets, stopPolling])
+
+  // Carga inicial: uma chamada GET /targets (sem N+1), retoma polling de runs ativos.
   useEffect(() => {
+    mounted.current = true
+    loadTargets()
+      .then((data) => {
+        if (!Array.isArray(data)) return
+        for (const t of data) {
+          if (t?.latestRun && isActiveRunStatus(t.latestRun.status)) {
+            startPolling(t.latestRun.id)
+          }
+        }
+      })
+      .catch(() => {})
     return () => {
+      mounted.current = false
       Object.values(pollingIntervals.current).forEach(clearInterval)
       pollingIntervals.current = {}
     }
-  }, [])
+  }, [loadTargets, startPolling])
 
-  function handleSyncClick(region, isResync) {
-    // Linha existente SEMPRE usa regionId: nunca chama o fluxo de cidade nova.
-    openExistingRegionSync(region)
+  function closeNewModal() {
+    if (formSubmitting) return
+    setShowNewModal(false)
+  }
+
+  async function reconcileAfterUncertainOutcome(targetId, intentKey) {
+    // Resposta perdida / 409: recarrega targets e procura run ativo ou recém-criado.
+    try {
+      const data = await loadTargets({ silent: true })
+      const found = (Array.isArray(data) ? data : []).find((t) => t.id === targetId)
+      const run = found?.latestRun
+      if (!run) return null
+      const createdAt = run.createdAt ? new Date(run.createdAt).getTime() : 0
+      const recent = Date.now() - createdAt < RECONCILE_WINDOW_MS
+      if (isActiveRunStatus(run.status) || recent) {
+        return run
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  async function requestNewSync(city, niche) {
+    if (!city || !niche) {
+      push('Preencha cidade e nicho.', 'error')
+      return
+    }
+    const intentKey = newIdempotencyKey()
+    setFormSubmitting(true)
+    try {
+      const { url, body } = buildOsmSyncRequest({ mode: 'NEW_CITY', city, country: 'br', niche })
+      const response = await api.post(url, body, { headers: { 'Idempotency-Key': intentKey } })
+      push('Sincronização iniciada. Verifique o status na tabela.', 'success')
+      setShowNewModal(false)
+      await loadTargets({ silent: true })
+      applyAcceptedRun(response)
+      if (response.syncRunId) startPolling(response.syncRunId)
+    } catch (err) {
+      push(syncErrorMessage(err), 'error')
+    } finally {
+      setFormSubmitting(false)
+    }
+  }
+
+  async function requestResync(targetId) {
+    // Sincronizar Novamente: um clique, sem modal, sem pedir dados. Usa target persistido.
+    if (syncingTargets.has(targetId)) return
+    const intentKey = newIdempotencyKey()
+    setSyncingTargets((prev) => new Set(prev).add(targetId))
+    // Limpa erro visual anterior imediatamente.
+    setTargets((prev) => prev.map((t) => (t.id === targetId ? { ...t, lastError: null } : t)))
+    try {
+      const { url, body } = buildOsmSyncRequest({ mode: 'TARGET_RESYNC', targetId })
+      const response = await api.post(url, body, { headers: { 'Idempotency-Key': intentKey } })
+      push('Sincronização iniciada.', 'success')
+      await loadTargets({ silent: true })
+      applyAcceptedRun(response)
+      if (response.syncRunId) startPolling(response.syncRunId)
+    } catch (err) {
+      if (err && (err.status === 409 || err.code === 'OSM_SYNC_ALREADY_RUNNING')) {
+        const run = await reconcileAfterUncertainOutcome(targetId, intentKey)
+        if (run) {
+          push('Já existe uma sincronização em andamento para este target.', 'info')
+          applyAcceptedRun({
+            syncRunId: run.id, targetId, regionId: run.regionId,
+            status: run.status, requestedNiche: run.requestedNiche,
+            canonicalNiche: run.canonicalNiche, targetValid: run.targetValid
+          })
+          startPolling(run.id)
+          return
+        }
+      }
+      // Erro de rede/resposta perdida depois do dispatch: reconcilia antes de falhar.
+      if (err && (err.message || '').toLowerCase().includes('fetch')
+        || err?.status == null || err?.status >= 500) {
+        const run = await reconcileAfterUncertainOutcome(targetId, intentKey)
+        if (run) {
+          push('Sincronização iniciada.', 'success')
+          applyAcceptedRun({
+            syncRunId: run.id, targetId, regionId: run.regionId,
+            status: run.status, requestedNiche: run.requestedNiche,
+            canonicalNiche: run.canonicalNiche, targetValid: run.targetValid
+          })
+          startPolling(run.id)
+          return
+        }
+      }
+      push(syncErrorMessage(err), 'error')
+      try {
+        await loadTargets({ silent: true })
+      } catch { /* mantém estado */ }
+    } finally {
+      setSyncingTargets((prev) => {
+        const next = new Set(prev)
+        next.delete(targetId)
+        return next
+      })
+    }
   }
 
   return (
@@ -288,121 +280,93 @@ export function OsmCatalog() {
           </h1>
           <p className="page-sub">Atualize os dados de estabelecimentos antes de gerar novos leads.</p>
         </div>
-        <button className="btn btn-primary" onClick={openNewCitySync} disabled={countriesLoading}>
+        <button className="btn btn-primary" onClick={() => setShowNewModal(true)}>
           <IconPlus width={15} height={15} />
-          Sincronizar Cidade
+          Sincronizar
         </button>
       </div>
 
       {loading && <div className="loading">Carregando...</div>}
       {error && <div className="error-state">Erro: {error}</div>}
 
-      {!loading && regions.length === 0 && (
+      {!loading && targets.length === 0 && (
         <div className="empty">
-          Nenhuma cidade sincronizada ainda. Clique em "Sincronizar Cidade" para começar.
+          Nenhuma sincronização ainda. Clique em &quot;Sincronizar&quot; para começar.
         </div>
       )}
 
-      {!loading && regions.length > 0 && (
+      {!loading && targets.length > 0 && (
         <div className="table-scroll">
           <table className="table">
             <thead>
               <tr>
                 <th>Cidade</th>
                 <th>Estado</th>
-                <th>País</th>
-                <th>Status</th>
-                <th>Leads qualificados</th>
-                <th>Progresso (50)</th>
+                <th>Nicho</th>
+                <th>Pool</th>
+                <th>Disponíveis</th>
+                <th>Último Run</th>
+                <th>Progresso</th>
                 <th>Última Sincronização</th>
                 <th>Última Tentativa</th>
-                <th>Sync Atual</th>
                 <th>Ações</th>
               </tr>
             </thead>
             <tbody>
-              {regions.map((region) => {
-                const currentRun = region.syncRuns?.[0]
-                const isRunning = currentRun && (currentRun.status === 'QUEUED' || currentRun.status === 'RUNNING')
-                const displayStatus = currentRun ? currentRun.status : region.catalogStatus
-                const statusColor = STATUS_COLORS[displayStatus] || 'muted'
-                // Erro legado nao aparece durante tentativa ativa.
-                const shouldShowError =
-                  currentRun?.status === 'FAILED'
-                  || (!currentRun && region.lastError)
-
+              {targets.map((target) => {
+                const run = target.latestRun
+                const running = run && isActiveRunStatus(run.status)
+                const starting = syncingTargets.has(target.id)
+                const busy = running || starting
+                const poolColor = STATUS_COLORS[target.poolStatus] || 'muted'
+                const runColor = run ? (STATUS_COLORS[run.status] || 'muted') : 'muted'
+                const showError = run?.status === 'FAILED' || (!run && target.lastError)
                 return (
-                  <tr key={region.id}>
+                  <tr key={target.id}>
+                    <td><strong>{target.city}</strong></td>
+                    <td>{target.state || '—'}</td>
+                    <td>{target.requestedNiche || target.canonicalNiche}</td>
                     <td>
-                      <strong>{region.city}</strong>
-                    </td>
-                    <td>{region.state || '—'}</td>
-                    <td>{region.country}</td>
-                    <td>
-                      <span className={`badge badge-${statusColor}`}>
-                        {currentRun ? statusLabel(currentRun.status) : statusLabel(region.catalogStatus)}
+                      <span className={`badge badge-${poolColor}`}>
+                        {target.poolStatus === 'READY'
+                          ? `Pronto (${formatNumber(target.qualifiedCount ?? 0)})`
+                          : statusLabel(target.poolStatus)}
                       </span>
                     </td>
-                    <td>{formatNumber(region.placeCount)}</td>
+                    <td>{formatNumber(target.availableNewCount ?? 0)}</td>
                     <td>
-                      {currentRun && currentRun.qualifiedSaved != null
-                        ? `${formatNumber(currentRun.qualifiedSaved)} / ${formatNumber(currentRun.targetValid ?? 50)}`
+                      {run
+                        ? <span className={`badge badge-${runColor}`}>{statusLabel(run.status)}</span>
                         : '—'}
-                      {currentRun?.requestedNiche || currentRun?.canonicalNiche
-                        ? ` · ${currentRun.requestedNiche || currentRun.canonicalNiche}`
-                        : ''}
                     </td>
                     <td>
-                      {region.lastSuccessAt ? new Date(region.lastSuccessAt).toLocaleString('pt-BR') : '—'}
+                      {run && run.qualifiedSaved != null
+                        ? `${formatNumber(run.qualifiedSaved)} / ${formatNumber(run.targetValid ?? target.targetValid ?? 50)}`
+                        : '—'}
+                      {run?.datasetExhausted && (run.status === 'PARTIAL' || run.status === 'EXHAUSTED')
+                        ? ' · esgotado' : ''}
                     </td>
-                    <td>
-                      {region.lastAttemptAt ? new Date(region.lastAttemptAt).toLocaleString('pt-BR') : '—'}
-                    </td>
-                    <td>
-                      {currentRun && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span className={`badge badge-${statusColor}`}>
-                            {statusLabel(currentRun.status)}
-                          </span>
-                          {isRunning && <IconSync width={14} height={14} style={{ animation: 'spin 1s linear infinite' }} />}
-                        </div>
-                      )}
-                    </td>
+                    <td>{target.lastSuccessAt ? new Date(target.lastSuccessAt).toLocaleString('pt-BR') : '—'}</td>
+                    <td>{target.lastAttemptAt ? new Date(target.lastAttemptAt).toLocaleString('pt-BR') : '—'}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 8 }}>
-                        {isRunning && (
-                          <button className="btn btn-sm" disabled>
-                            <IconSync width={14} height={14} style={{ animation: 'spin 1s linear infinite' }} />
-                            Aguardando...
-                          </button>
-                        )}
-                        {!isRunning && region.catalogStatus === 'READY' && (
-                          <button
-                            className="btn btn-sm"
-                            onClick={() => handleSyncClick(region, true)}
-                          >
-                            <IconSync width={14} height={14} />
-                            Sincronizar Novamente
-                          </button>
-                        )}
-                        {region.catalogStatus === 'EMPTY' && !isRunning && (
-                          <button
-                            className="btn btn-sm btn-primary"
-                            onClick={() => handleSyncClick(region, false)}
-                          >
-                            <IconSync width={14} height={14} />
-                            Iniciar Sync
-                          </button>
-                        )}
+                        <button
+                          className="btn btn-sm"
+                          disabled={busy}
+                          onClick={() => requestResync(target.id)}
+                        >
+                          <IconSync width={14} height={14} className={busy ? 'spin' : ''} />
+                          {starting ? 'Iniciando...' : running ? 'Sincronizando...' : 'Sincronizar Novamente'}
+                        </button>
                       </div>
-                      {shouldShowError && (
+                      {showError && (
                         <div className="error-state" style={{ fontSize: 11, marginTop: 4 }}>
-                          Erro: {currentRun?.status === 'FAILED' ? (currentRun.errorMessage || region.lastError) : region.lastError}
+                          Erro: {run?.status === 'FAILED' ? (run.errorMessage || target.lastError) : target.lastError}
                         </div>
                       )}
-                      {currentRun && currentRun.status === 'FAILED' && region.catalogStatus === 'READY' && (
-                        <div className="hint" style={{ fontSize: 11, marginTop: 4, color: 'var(--warning)' }}>
-                          Catálogo: READY (última sincronização falhou)
+                      {run?.status === 'FAILED' && target.poolStatus === 'READY' && (
+                        <div className="hint" style={{ fontSize: 11, marginTop: 4 }}>
+                          Pool: Pronto ({formatNumber(target.qualifiedCount ?? 0)} leads) — última sincronização falhou
                         </div>
                       )}
                     </td>
@@ -414,13 +378,13 @@ export function OsmCatalog() {
         </div>
       )}
 
-      {showForm && (
+      {showNewModal && (
         <Modal
-          title={syncModalMode === 'EXISTING_REGION' ? 'Sincronizar Região' : 'Sincronizar Cidade'}
-          onClose={closeSyncModal}
+          title="Sincronizar"
+          onClose={closeNewModal}
           footer={
             <>
-              <button className="btn" onClick={closeSyncModal}>
+              <button className="btn" onClick={closeNewModal} disabled={formSubmitting}>
                 Cancelar
               </button>
               <button type="submit" form="osm-sync-form" className="btn btn-primary" disabled={formSubmitting}>
@@ -429,100 +393,30 @@ export function OsmCatalog() {
             </>
           }
         >
-          {syncModalMode === 'EXISTING_REGION' && selectedRegion ? (
-            <form id="osm-sync-form" onSubmit={(e) => {
-              e.preventDefault()
-              const niche = e.target.niche.value.trim()
-              requestRegionSync(selectedRegion.id, niche)
-            }}>
-              <div className="field">
-                <label htmlFor="existing-city">Cidade</label>
-                <input id="existing-city" name="city" value={selectedRegion.city || ''} readOnly disabled />
+          <form id="osm-sync-form" onSubmit={(e) => {
+            e.preventDefault()
+            const city = e.target.city.value.trim()
+            const niche = e.target.niche.value.trim()
+            requestNewSync(city, niche)
+          }}>
+            <div className="field">
+              <label htmlFor="city">Cidade</label>
+              <input id="city" name="city" placeholder="Ex: Cuiabá" required />
+            </div>
+            <div className="field">
+              <label htmlFor="niche">Nicho</label>
+              <input id="niche" name="niche" placeholder="Ex: nail designer" required />
+              <div className="hint">
+                Busca até 50 novos leads qualificados com WhatsApp validado e Instagram oficial.
               </div>
-              <div className="field">
-                <label htmlFor="existing-state">Estado</label>
-                <input id="existing-state" name="state" value={selectedRegion.state || ''} readOnly disabled />
-              </div>
-              <div className="field">
-                <label htmlFor="existing-country">País</label>
-                <input id="existing-country" name="country" value={selectedRegion.country || ''} readOnly disabled />
-              </div>
-              <div className="field">
-                <label htmlFor="niche">Nicho</label>
-                <input
-                  id="niche"
-                  name="niche"
-                  placeholder="Ex: nail designer"
-                  defaultValue={selectedRegion.syncRuns?.[0]?.requestedNiche || selectedRegion.syncRuns?.[0]?.canonicalNiche || ''}
-                  required
-                />
-                <div className="hint">
-                  Busca até 50 novos leads qualificados com WhatsApp validado e Instagram oficial.
-                </div>
-              </div>
-            </form>
-          ) : (
-            <>
-              {countriesError && (
-                <div className="error-state">Erro ao carregar países: {countriesError}</div>
-              )}
-              <form id="osm-sync-form" onSubmit={(e) => {
-                e.preventDefault()
-                const city = e.target.city.value.trim()
-                const country = e.target.country.value
-                const niche = e.target.niche.value.trim()
-                requestSync(city, country, niche)
-              }}>
-                <div className="field">
-                  <label htmlFor="city">Cidade</label>
-                  <input id="city" name="city" placeholder="Ex: Cuiabá" required />
-                </div>
-                <div className="field">
-                  <label htmlFor="niche">Nicho</label>
-                  <input
-                    id="niche"
-                    name="niche"
-                    placeholder="Ex: nail designer"
-                    required
-                  />
-                  <div className="hint">
-                    Busca até 50 novos leads qualificados com WhatsApp validado e Instagram oficial.
-                  </div>
-                </div>
-                <div className="field">
-                  <label htmlFor="country">País</label>
-                  <select
-                    id="country"
-                    name="country"
-                    defaultValue="br"
-                    required
-                    disabled={countriesLoading || countries.length === 0}
-                  >
-                    {countries.map((country) => (
-                      <option key={country.code} value={country.code}>
-                        {country.name}
-                      </option>
-                    ))}
-                  </select>
-                  {countriesLoading && <div className="hint">Carregando países...</div>}
-                  {countries.length === 0 && !countriesLoading && !countriesError && (
-                    <div className="hint">Nenhum país disponível</div>
-                  )}
-                  <div className="hint" style={{ color: 'var(--warning)' }}>
-                    V1 suporta apenas Brasil. Selecione Brasil.
-                  </div>
-                </div>
-              </form>
-            </>
-          )}
+            </div>
+            <div className="field">
+              <label htmlFor="country">País</label>
+              <input id="country" name="country" value="Brasil" readOnly disabled />
+            </div>
+          </form>
         </Modal>
       )}
-      <style jsx>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   )
 }

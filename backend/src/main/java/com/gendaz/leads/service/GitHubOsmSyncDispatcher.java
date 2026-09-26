@@ -62,6 +62,7 @@ public class GitHubOsmSyncDispatcher {
         inputs.put("canonical_niche", syncRun.getCanonicalNiche());
         inputs.put("target_valid", syncRun.getTargetValid().toString());
         inputs.put("niche_strategy_json", syncRun.getNicheStrategyJson());
+        inputs.put("target_id", syncRun.getTarget() == null ? "" : syncRun.getTarget().getId().toString());
 
         Map<String, Object> body = new HashMap<>();
         body.put("ref", ref);

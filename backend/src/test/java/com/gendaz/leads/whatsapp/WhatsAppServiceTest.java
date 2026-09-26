@@ -100,5 +100,10 @@ class WhatsAppServiceTest {
             this.lastRequestId = requestId;
             return new WhatsAppSendResult(true, "mid-1", requestId, false);
         }
+
+        @Override
+        public WhatsAppRecipientCheckResult checkRecipient(String recipient) {
+            return new WhatsAppRecipientCheckResult(true, recipient, true);
+        }
     }
 }

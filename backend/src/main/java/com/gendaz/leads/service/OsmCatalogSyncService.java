@@ -2,10 +2,12 @@ package com.gendaz.leads.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.entity.OsmCatalogRegion;
+import com.gendaz.leads.entity.OsmCatalogTarget;
 import com.gendaz.leads.entity.OsmSyncRun;
 import com.gendaz.leads.entity.User;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.repository.OsmCatalogRegionRepository;
+import com.gendaz.leads.repository.OsmCatalogTargetRepository;
 import com.gendaz.leads.repository.OsmSyncRunRepository;
 import com.gendaz.leads.service.provider.BrazilGeofabrikRegionResolver;
 import com.gendaz.leads.service.provider.GeoScope;
@@ -40,6 +42,7 @@ public class OsmCatalogSyncService {
     private final GitHubOsmSyncDispatcher githubDispatcher;
     private final OsmCatalogSyncStatusService syncStatusService;
     private final EntityManager entityManager;
+    private final OsmCatalogTargetRepository targetRepositoryOrNull;
 
     @Value("${app.osm-catalog.enabled:true}")
     private boolean catalogEnabled;
@@ -53,6 +56,20 @@ public class OsmCatalogSyncService {
             OsmCatalogSyncStatusService syncStatusService,
             EntityManager entityManager
     ) {
+        this(regionRepository, syncRunRepository, osmProvider, geofabrikResolver,
+                githubDispatcher, syncStatusService, entityManager, null);
+    }
+
+    public OsmCatalogSyncService(
+            OsmCatalogRegionRepository regionRepository,
+            OsmSyncRunRepository syncRunRepository,
+            OpenStreetMapProvider osmProvider,
+            BrazilGeofabrikRegionResolver geofabrikResolver,
+            GitHubOsmSyncDispatcher githubDispatcher,
+            OsmCatalogSyncStatusService syncStatusService,
+            EntityManager entityManager,
+            OsmCatalogTargetRepository targetRepositoryOrNull
+    ) {
         this.regionRepository = regionRepository;
         this.syncRunRepository = syncRunRepository;
         this.osmProvider = osmProvider;
@@ -60,6 +77,7 @@ public class OsmCatalogSyncService {
         this.githubDispatcher = githubDispatcher;
         this.syncStatusService = syncStatusService;
         this.entityManager = entityManager;
+        this.targetRepositoryOrNull = targetRepositoryOrNull;
     }
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -288,8 +306,39 @@ public class OsmCatalogSyncService {
                     "Já existe uma sincronização em andamento para esta região.");
         }
 
+        OsmCatalogTarget target = null;
+        if (targetRepositoryOrNull != null) {
+            String canonical = strategy.canonicalName();
+            target = targetRepositoryOrNull.findByRegionIdAndCanonicalNiche(region.getId(), canonical)
+                    .orElseGet(() -> {
+                        OsmCatalogTarget t = OsmCatalogTarget.builder()
+                                .region(region)
+                                .requestedNiche(niche.trim())
+                                .canonicalNiche(canonical)
+                                .targetValid(50)
+                                .qualifiedCount(0)
+                                .availableNewCount(0)
+                                .poolStatus("EMPTY")
+                                .build();
+                        try {
+                            return targetRepositoryOrNull.saveAndFlush(t);
+                        } catch (DataIntegrityViolationException race) {
+                            entityManager.clear();
+                            return targetRepositoryOrNull.findByRegionIdAndCanonicalNiche(region.getId(), canonical)
+                                    .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
+                                            "Já existe uma sincronização em andamento para este target."));
+                        }
+                    });
+            Optional<OsmSyncRun> activeTarget = syncRunRepository.findActiveByTargetId(target.getId(), activeStatuses);
+            if (activeTarget.isPresent()) {
+                throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
+                        "Já existe uma sincronização em andamento para este target.");
+            }
+        }
+
         OsmSyncRun syncRun = new OsmSyncRun();
         syncRun.setRegion(region);
+        if (target != null) syncRun.setTarget(target);
         syncRun.setRequestedByUser(requestedBy);
         syncRun.setStatus("QUEUED");
         syncRun.setRequestedNiche(niche.trim());
@@ -307,6 +356,11 @@ public class OsmCatalogSyncService {
         region.setLastError(null);
         region.setLastAttemptAt(Instant.now());
         regionRepository.save(region);
+        if (target != null) {
+            target.setLastError(null);
+            target.setLastAttemptAt(Instant.now());
+            targetRepositoryOrNull.save(target);
+        }
 
         return syncRun;
     }

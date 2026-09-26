@@ -364,7 +364,16 @@ public final class NicheMapper {
                         "nails",
                         "nail designer",
                         "esmalteria",
-                        "alongamento de unhas"
+                        "alongamento de unhas",
+                        "alongamento",
+                        "banho de gel",
+                        "unha em gel",
+                        "unhas em gel",
+                        "fibra de vidro",
+                        "esmaltação",
+                        "esmaltacao",
+                        "nail design",
+                        "design de unhas"
                 );
         register(
                 "nails",
@@ -425,12 +434,18 @@ public final class NicheMapper {
                         "nail",
                         "nails",
                         "nail designer",
+                        "nail design",
                         "manicure",
                         "pedicure",
                         "esmalteria",
                         "unha",
                         "unhas",
-                        "alongamento de unhas"
+                        "alongamento de unhas",
+                        "alongamento",
+                        "banho de gel",
+                        "unha em gel",
+                        "fibra de vidro",
+                        "esmaltacao"
                 )
         );
 
@@ -1190,5 +1205,118 @@ public final class NicheMapper {
                         )
                 )
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Two-stage classification: POTENTIAL (amplo, antes do enrichment)
+    // vs CONFIRMED (nicho confirmado, apos enrichment oficial).
+    // shop=beauty sozinho autoriza investigacao, nunca confirma Nails.
+    // ------------------------------------------------------------------
+
+    public record NicheConfirmation(boolean confirmed, String evidenceType, String evidenceDetails) {}
+
+    private static final List<String> BROAD_COMMERCIAL_KEYS = List.of(
+            "shop", "amenity", "craft", "healthcare", "leisure", "office", "tourism");
+
+    public static boolean isPotential(NicheStrategy strategy, JsonNode tags, String normalizedName) {
+        if (strategy == null) return false;
+        // Regra forte ja qualifica como potencial.
+        if (matchesAnyRule(tags, strategy.structuredRules())) return true;
+        // Contexto do fallback (ex: shop=beauty, shop=hairdresser) autoriza investigacao.
+        if (strategy.nameFallback() != null
+                && strategy.nameFallback().requiresContext()
+                && matchesAnyRule(tags, strategy.nameFallback().contextAnyOf())) {
+            return true;
+        }
+        // Qualquer objeto comercial com nome contendo alias tambem e potencial.
+        if (hasAnyCommercialTag(tags) && containsAnyAlias(normalizedName, strategy)) {
+            return true;
+        }
+        // Nome com alias mesmo sem tag comercial conhecida: ainda investiga
+        // (enrichment oficial decide; evita rejeicao precoce).
+        if (containsAnyAlias(normalizedName, strategy)) {
+            return true;
+        }
+        // Objeto comercial generico sem evidencia: potencial para nao matar cedo,
+        // a confirmacao rigorosa acontece depois do enrichment.
+        return hasAnyCommercialTag(tags);
+    }
+
+    public static NicheConfirmation confirm(NicheStrategy strategy, JsonNode tags, String officialText) {
+        if (strategy == null) {
+            return new NicheConfirmation(false, "NONE", "no strategy");
+        }
+        // 1. Tag OSM forte confirma sozinha.
+        if (matchesAnyRule(tags, strategy.structuredRules())) {
+            return new NicheConfirmation(true, "TAG_STRONG", describeRules(strategy.structuredRules()));
+        }
+        // 2. Texto oficial (nome + descricao + servicos + website oficial + hub ligado pelo OSM).
+        String haystack = normalizeNamePhrase(
+                (tagsNameText(tags) == null ? "" : tagsNameText(tags) + " ")
+                        + (officialText == null ? "" : officialText));
+        String padded = " " + haystack + " ";
+        if (strategy.nameFallback() != null) {
+            for (String alias : strategy.nameFallback().aliases()) {
+                if (alias != null && !alias.isBlank() && padded.contains(" " + alias + " ")) {
+                    // Se fallback exige contexto, o contexto precisa existir nas tags
+                    // ou o texto oficial precisa trazer evidencia (nome/site ja conta).
+                    return new NicheConfirmation(true, "OFFICIAL_TEXT", alias);
+                }
+            }
+        }
+        return new NicheConfirmation(false, "NONE", "niche not confirmed in tags or official text");
+    }
+
+    private static boolean hasAnyCommercialTag(JsonNode tags) {
+        if (tags == null || !tags.isObject()) return false;
+        for (String key : BROAD_COMMERCIAL_KEYS) {
+            JsonNode v = tags.get(key);
+            if (v != null && !v.isNull() && !v.asText().isBlank()) return true;
+        }
+        // Objeto com contato oficial tambem merece investigacao.
+        for (String key : new String[]{"website", "contact:website", "url", "phone", "contact:phone",
+                "contact:instagram", "instagram"}) {
+            JsonNode v = tags.get(key);
+            if (v != null && !v.isNull() && !v.asText().isBlank()) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsAnyAlias(String normalizedName, NicheStrategy strategy) {
+        if (strategy.nameFallback() == null || normalizedName == null) return false;
+        String name = normalizeNamePhrase(normalizedName);
+        if (name.isBlank()) return false;
+        String padded = " " + name + " ";
+        for (String alias : strategy.nameFallback().aliases()) {
+            if (alias != null && !alias.isBlank() && padded.contains(" " + alias + " ")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String tagsNameText(JsonNode tags) {
+        if (tags == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (String key : new String[]{"name", "description", "service", "services", "beauty", "shop", "craft"}) {
+            JsonNode v = tags.get(key);
+            if (v != null && !v.isNull() && !v.asText().isBlank()) {
+                sb.append(v.asText()).append(' ');
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    private static String describeRules(List<NicheRule> rules) {
+        if (rules == null || rules.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (NicheRule rule : rules) {
+            if (sb.length() > 0) sb.append(" OR ");
+            sb.append(rule.allOf().stream()
+                    .map(c -> c.key() + "=" + String.join("|", c.acceptedValues()))
+                    .reduce((a, b) -> a + "+" + b).orElse(""));
+        }
+        String s = sb.toString();
+        return s.length() > 500 ? s.substring(0, 500) : s;
     }
 }

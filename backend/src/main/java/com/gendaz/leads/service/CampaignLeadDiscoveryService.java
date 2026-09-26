@@ -23,6 +23,7 @@ import com.gendaz.leads.util.CountryCodeResolver;
 import com.gendaz.leads.util.Normalizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -56,6 +57,9 @@ public class CampaignLeadDiscoveryService {
     private final Normalizer normalizer;
     private final OpenStreetMapProvider osm;
     private final LocalOsmCatalogProvider localCatalogProvider;
+
+    @Autowired(required = false)
+    private QualifiedLeadPoolService qualifiedPoolService;
 
     @Value("${app.discovery.catalog.enabled:true}")
     private boolean catalogDiscoveryEnabled;
@@ -1440,10 +1444,112 @@ public class CampaignLeadDiscoveryService {
         );
     }
 
+    private String humanTargetMessage(String raw, Campaign campaign) {
+        // raw: "OSM_TARGET_NOT_FOUND: Ainda não existe sincronização para [nicho] em [cidade]..."
+        int idx = raw.indexOf(':');
+        String msg = idx >= 0 ? raw.substring(idx + 1).trim() : raw;
+        if (msg.isBlank()) {
+            return "Ainda não existe sincronização para [" + campaign.getNiche() + "] em ["
+                    + campaign.getCity() + "]. Sincronize esse nicho antes de gerar a campanha.";
+        }
+        return msg;
+    }
+
+    private DiscoveryExecutionResult discoverFromQualifiedPool(Campaign campaign, int targetToAdd) {
+        QualifiedLeadPoolService.ResolvedTarget resolved = qualifiedPoolService.resolveTarget(
+                campaign.getNiche(), campaign.getCity(), campaign.getCountry());
+        long targetId = resolved.target().getId();
+        int initialCampaignLeadCount = (int) campaignLeadRepository.countByCampaignId(campaign.getId());
+        log.info("[osm-catalog] pool_query campaignId={} targetId={} niche={} canonical={} city={} target={}",
+                campaign.getId(), targetId, campaign.getNiche(), resolved.canonicalNiche(),
+                campaign.getCity(), targetToAdd);
+        int offset = 0;
+        int accepted = 0;
+        int scanned = 0;
+        int pages = 0;
+        int totalDuplicates = 0;
+        int totalAlreadySeen = 0;
+        int totalPersistenceConflicts = 0;
+        boolean exhausted = false;
+        Set<String> seenSourceIds = new HashSet<>();
+        while (accepted < targetToAdd) {
+            QualifiedLeadPoolService.PoolPage page =
+                    qualifiedPoolService.discoverPage(targetId, targetToAdd, offset);
+            pages++;
+            scanned += page.rawRows();
+            if (page.rawRows() == 0) {
+                exhausted = true;
+                break;
+            }
+            CandidateAcceptanceResult pageResult = acceptQualifiedCatalogCandidates(
+                    campaign, page.candidates(), targetToAdd - accepted, seenSourceIds);
+            accepted += pageResult.accepted();
+            totalDuplicates += pageResult.duplicates() + pageResult.duplicatesAfterEnrichment();
+            totalAlreadySeen += pageResult.alreadySeen();
+            totalPersistenceConflicts += pageResult.persistenceConflicts();
+            updateProgress(campaign, initialCampaignLeadCount, accepted);
+            if (accepted >= targetToAdd) break;
+            if (!page.hasMore()) {
+                exhausted = true;
+                break;
+            }
+            if (page.nextOffset() <= offset) {
+                throw new IllegalStateException("OSM catalog paging stalled");
+            }
+            offset = page.nextOffset();
+        }
+        int totalCampaignLeads = (int) campaignLeadRepository.countByCampaignId(campaign.getId());
+        DiscoveryExecutionResult.Outcome outcome;
+        String code = null;
+        String message = null;
+        if (accepted >= targetToAdd) {
+            outcome = DiscoveryExecutionResult.Outcome.COMPLETE;
+        } else if (accepted > 0) {
+            outcome = DiscoveryExecutionResult.Outcome.PARTIAL;
+            code = "OSM_CATALOG_PARTIAL";
+            message = "Foram adicionados " + accepted + " de " + targetToAdd
+                    + " leads. O pool possui apenas " + accepted + " leads novos disponíveis no momento.";
+            exhausted = true;
+        } else if (scanned > 0 && (totalDuplicates + totalAlreadySeen + totalPersistenceConflicts) > 0) {
+            outcome = DiscoveryExecutionResult.Outcome.EMPTY;
+            code = "OSM_POOL_ALL_DUPLICATES";
+            message = "Existem leads qualificados no pool, mas todos já foram utilizados ou já existem no banco de leads.";
+            exhausted = true;
+        } else {
+            outcome = DiscoveryExecutionResult.Outcome.EMPTY;
+            code = "OSM_NO_USEFUL_LEADS";
+            message = "Não há leads qualificados disponíveis neste target.";
+            exhausted = true;
+        }
+        log.info("[osm-catalog] pool_summary campaignId={} targetId={} target={} scanned={} accepted={} duplicates={} pages={} outcome={}",
+                campaign.getId(), targetId, targetToAdd, scanned, accepted,
+                totalDuplicates + totalAlreadySeen, pages, outcome);
+        return new DiscoveryExecutionResult(outcome, accepted, totalCampaignLeads, scanned, pages,
+                scanned, accepted, exhausted, code, message);
+    }
+
     private DiscoveryExecutionResult discoverFromLocalCatalog(
             Campaign campaign,
             int targetToAdd
     ) {
+        // Caminho novo: pool por target (cidade+nicho), sem rematch do NicheMapper.
+        if (qualifiedPoolService != null) {
+            try {
+                return discoverFromQualifiedPool(campaign, targetToAdd);
+            } catch (IllegalArgumentException e) {
+                String message = e.getMessage() == null ? "" : e.getMessage();
+                if (message.contains("OSM_TARGET_NOT_FOUND")) {
+                    return new DiscoveryExecutionResult(
+                            DiscoveryExecutionResult.Outcome.EMPTY,
+                            0,
+                            (int) campaignLeadRepository.countByCampaignId(campaign.getId()),
+                            0, 0, 0, 0, true,
+                            "OSM_TARGET_NOT_FOUND",
+                            humanTargetMessage(message, campaign));
+                }
+                // NOT_READY / AMBIGUOUS: cai no fluxo legado abaixo para manter codigos.
+            }
+        }
         int initialCampaignLeadCount =
                 (int) campaignLeadRepository
                         .countByCampaignId(campaign.getId());
@@ -1599,12 +1705,20 @@ public class CampaignLeadDiscoveryService {
         } else if (accepted > 0 && exhausted) {
             outcome = DiscoveryExecutionResult.Outcome.PARTIAL;
             finalErrorCode = "OSM_CATALOG_PARTIAL";
-            finalErrorMessage = "Foram encontrados " + accepted + " de " + targetToAdd + " novos leads com telefone após analisar todos os candidatos OSM disponíveis para este nicho.";
+            finalErrorMessage = "Foram adicionados " + accepted + " de " + targetToAdd
+                    + " leads. O pool possui apenas " + accepted + " leads novos disponíveis no momento.";
 
         } else if (accepted == 0 && exhausted) {
             outcome = DiscoveryExecutionResult.Outcome.EMPTY;
-            finalErrorCode = "OSM_NO_USEFUL_LEADS";
-            finalErrorMessage = "Nenhum novo lead com telefone foi encontrado após analisar todos os candidatos OSM disponíveis para este nicho.";
+            int totalDups = totalDuplicates + totalDuplicatesAfterEnrichment + totalAlreadySeen
+                    + totalPersistenceConflicts;
+            if (scanned > 0 && totalDups > 0) {
+                finalErrorCode = "OSM_POOL_ALL_DUPLICATES";
+                finalErrorMessage = "Existem leads qualificados no pool, mas todos já foram utilizados ou já existem no banco de leads.";
+            } else {
+                finalErrorCode = "OSM_NO_USEFUL_LEADS";
+                finalErrorMessage = "Não há leads qualificados disponíveis neste target.";
+            }
 
         } else {
             outcome = DiscoveryExecutionResult.Outcome.INFRA_UNAVAILABLE;
