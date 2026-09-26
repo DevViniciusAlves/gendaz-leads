@@ -92,4 +92,40 @@ class OsmCatalogControllerTest {
                 validator.validate(new OsmRegionSyncRequest("nail designer"));
         assertTrue(okViolations.isEmpty());
     }
+
+    @Test
+    void byRequestKeyEndpointRequiresAuthentication() throws Exception {
+        var method = OsmCatalogController.class.getMethod("getSyncRunByRequestKey", String.class);
+        assertNotNull(method.getAnnotation(PreAuthorize.class),
+                "GET /api/osm-catalog/sync/by-request-key/{requestKey} deve exigir autenticacao");
+    }
+
+    @Test
+    void byRequestKeyReturnsRunWhenScopedToUser() {
+        when(securityService.currentEmail()).thenReturn("user@test.com");
+        OsmCatalogRegion region = new OsmCatalogRegion();
+        region.setId(2L);
+        region.setCity("Cuiabá");
+        region.setState("Mato Grosso");
+        region.setCountry("Brasil");
+        OsmSyncRun run = new OsmSyncRun();
+        run.setId(77L);
+        run.setRegion(region);
+        run.setStatus("QUEUED");
+        when(syncService.getSyncRunByRequestKey(eq("key-123"), eq("user@test.com")))
+                .thenReturn(Optional.of(run));
+        var res = controller.getSyncRunByRequestKey("key-123");
+        assertEquals(HttpStatus.OK, res.getStatusCode());
+        assertNotNull(res.getBody());
+        assertEquals(77L, res.getBody().id());
+    }
+
+    @Test
+    void byRequestKeyReturns404WhenNotFound() {
+        when(securityService.currentEmail()).thenReturn("user@test.com");
+        when(syncService.getSyncRunByRequestKey(eq("missing"), eq("user@test.com")))
+                .thenReturn(Optional.empty());
+        var res = controller.getSyncRunByRequestKey("missing");
+        assertEquals(HttpStatus.NOT_FOUND, res.getStatusCode());
+    }
 }

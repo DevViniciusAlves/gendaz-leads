@@ -16,7 +16,7 @@ class OsmSyncJobLogicTest {
 
     private static OsmCandidate cand(String type, long id, ObjectNode tags, String name) {
         return new OsmCandidate(type, id, name, name == null ? "" : name.toLowerCase(),
-                tags, -15.0, -56.0, "2024-01-01T00:00:00Z", null, "Cuiaba", "MT", "Brasil", "br");
+                tags, -15.0, -56.0, java.time.Instant.parse("2024-01-01T00:00:00Z"), null, "Cuiaba", "MT", "Brasil", "br");
     }
 
     @Test

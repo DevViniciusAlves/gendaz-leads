@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -27,7 +28,10 @@ public class OfficialContactEnrichmentService {
     private final OfficialWebsiteFetcher fetcher;
     private final String countryCode;
     private final Map<String, HubResult> hubCache = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<HubResult>> hubInflight = new ConcurrentHashMap<>();
     private final Map<String, String> socialCache = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<OfficialWebsiteFetcher.FetchResult>> socialInflight =
+            new ConcurrentHashMap<>();
 
     public final AtomicLong contactPagesFetched = new AtomicLong();
     public final AtomicLong contactHubCandidates = new AtomicLong();
@@ -204,14 +208,33 @@ public class OfficialContactEnrichmentService {
         if (norm == null) return new OfficialWebsiteFetcher.FetchResult(url, null, "INVALID_URL");
         String cachedHtml = socialCache.get(norm);
         if (cachedHtml != null) return new OfficialWebsiteFetcher.FetchResult(norm, cachedHtml, "OK_CACHED");
-        OfficialWebsiteFetcher.FetchResult r = fetcher.fetch(norm);
-        if (r.html() != null) socialCache.put(norm, r.html());
-        return r;
+        // Single-flight por URL normalizada (inclui negativos do run via fetcher cache).
+        CompletableFuture<OfficialWebsiteFetcher.FetchResult> f = socialInflight.computeIfAbsent(norm,
+                k -> CompletableFuture.supplyAsync(() -> fetcher.fetch(k)));
+        try {
+            OfficialWebsiteFetcher.FetchResult r = f.join();
+            if (r.html() != null) socialCache.put(norm, r.html());
+            return r;
+        } finally {
+            socialInflight.remove(norm);
+        }
     }
 
     HubResult fetchHub(String url) {
         String norm = OfficialWebsiteFetcher.normalizeUrl(url);
         if (norm == null) return null;
+        HubResult cached = hubCache.get(norm);
+        if (cached != null) return cached;
+        CompletableFuture<HubResult> f = hubInflight.computeIfAbsent(norm,
+                k -> CompletableFuture.supplyAsync(() -> fetchHubUncached(k)));
+        try {
+            return f.join();
+        } finally {
+            hubInflight.remove(norm);
+        }
+    }
+
+    private HubResult fetchHubUncached(String norm) {
         HubResult cached = hubCache.get(norm);
         if (cached != null) return cached;
         OfficialWebsiteFetcher.FetchResult r = fetcher.fetch(norm);
@@ -261,20 +284,47 @@ public class OfficialContactEnrichmentService {
             try {
                 com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
                 JsonNode root = om.readTree(json);
-                List<JsonNode> nodes = new ArrayList<>();
-                if (root.isArray()) root.forEach(nodes::add);
-                else nodes.add(root);
-                for (JsonNode node : nodes) {
-                    JsonNode sameAs = node.get("sameAs");
-                    if (sameAs == null) continue;
-                    if (sameAs.isTextual()) out.add(sameAs.asText());
-                    else if (sameAs.isArray()) sameAs.forEach(n -> {
-                        if (n.isTextual() && !n.asText().isBlank()) out.add(n.asText().trim());
-                    });
-                }
+                collectSameAs(root, out, 0);
             } catch (Exception ignored) {}
         }
         return out.stream().filter(u -> u.startsWith("http")).distinct().limit(10).toList();
+    }
+
+    /** Percorre JSON-LD recursivamente (root/array/@graph/nested) com limite. */
+    static void collectSameAs(JsonNode node, List<String> out, int depth) {
+        if (node == null || out.size() >= 50 || depth > 6) return;
+        if (node.isArray()) {
+            for (JsonNode child : node) {
+                collectSameAs(child, out, depth + 1);
+                if (out.size() >= 50) return;
+            }
+            return;
+        }
+        if (!node.isObject()) return;
+        JsonNode sameAs = node.get("sameAs");
+        if (sameAs != null) {
+            if (sameAs.isTextual() && !sameAs.asText().isBlank()) out.add(sameAs.asText().trim());
+            else if (sameAs.isArray()) sameAs.forEach(n -> {
+                if (n.isTextual() && !n.asText().isBlank()) out.add(n.asText().trim());
+            });
+        }
+        // @graph e objetos aninhados comuns em JSON-LD real.
+        for (String nestedKey : new String[]{"@graph", "hasPart", "mainEntity"}) {
+            JsonNode nested = node.get(nestedKey);
+            if (nested != null) collectSameAs(nested, out, depth + 1);
+        }
+        // Fallback generico: percorre valores objeto/array (limitado).
+        java.util.Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        int visited = 0;
+        while (fields.hasNext() && visited < 30 && out.size() < 50) {
+            Map.Entry<String, JsonNode> e = fields.next();
+            visited++;
+            if ("sameAs".equals(e.getKey()) || "@graph".equals(e.getKey())) continue;
+            JsonNode v = e.getValue();
+            if (v != null && (v.isObject() || v.isArray())) {
+                collectSameAs(v, out, depth + 1);
+            }
+        }
     }
 
     static List<String> findHubUrls(String html, String baseUrl) {

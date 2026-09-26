@@ -34,7 +34,7 @@ class OsmGeoJsonSeqReaderTest {
         assertEquals(1L, out.get(0).osmId());
         assertEquals(-15.6, out.get(0).latitude(), 1e-9);
         assertEquals(-56.1, out.get(0).longitude(), 1e-9);
-        assertEquals("2024-01-01T00:00:00Z", out.get(0).timestamp());
+        assertEquals(java.time.Instant.parse("2024-01-01T00:00:00Z"), out.get(0).sourceTimestamp());
         assertEquals("beauty", out.get(0).tags().path("shop").asText());
         assertEquals("Studio Bella", out.get(0).tags().path("name").asText());
         // Polygon centroid deterministico da bbox: ((-56.2 + -56.0)/2, (-15.7 + -15.5)/2)

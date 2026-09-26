@@ -45,6 +45,14 @@ public class OsmSyncMetrics {
     public long stageReadClassifyMs;
     public long stageEnrichMs;
     public long stageWppPublishMs;
+    // Novos: timestamp invalido, enrichment tecnico, chunking, scan writes.
+    public long invalidSourceTimestamp;
+    public long technicalEnrichmentFailures;
+    public long enrichmentTimedOut;
+    public long enrichmentChunks;
+    public long candidatesNotScheduledAfterTargetReached;
+    public long scanStateBatchWrites;
+    public long scanStateRowsWritten;
 
     public long discardedDuplicateTotal() {
         return discardedDuplicateSource + discardedDuplicatePhone + discardedDuplicateInstagram;

@@ -55,15 +55,17 @@ function runDetail(run) {
     potenciais: run.potentialNicheCandidates ?? run.candidatesScanned ?? '—',
     confirmados: run.nicheConfirmed ?? run.nicheMatches ?? '—',
     semInstagram: run.discardedNoInstagram ?? '—',
-    semTelefone: run.discardedNoPhone ?? run.discardedNoPhone ?? '—',
+    semTelefone: run.discardedNoPhone ?? '—',
     semWhatsApp: run.discardedNotOnWhatsApp ?? '—',
     duplicados: dup,
     novosSalvos: run.qualifiedSaved ?? '—',
+    tempoTotal: run.durationMs ?? run.duration_ms ?? null,
+    timeouts: run.enrichmentTimedOut ?? run.enrichment_timed_out ?? null,
+    falhasTecnicas: run.technicalEnrichmentFailures ?? run.technical_failures ?? run.technicalFailures ?? null,
   }
 }
 
 const POLL_INTERVAL_MS = 5000
-const RECONCILE_WINDOW_MS = 2 * 60 * 1000
 
 export function OsmCatalog() {
   const [targets, setTargets] = useState([])
@@ -204,15 +206,28 @@ export function OsmCatalog() {
   }
 
   async function reconcileAfterUncertainOutcome(targetId, intentKey) {
-    // Resposta perdida / 409: recarrega targets e procura run ativo ou recém-criado.
+    // Reconciliacao por Idempotency-Key real: consulta o run exato da key.
+    // Nunca aceitar "latestRun ativo ou recente" de outra tentativa.
+    if (intentKey) {
+      try {
+        const exact = await api.get(`/api/osm-catalog/sync/by-request-key/${encodeURIComponent(intentKey)}`)
+        if (exact && exact.id) {
+          if (targetId != null && exact.targetId != null && exact.targetId !== targetId) {
+            return null
+          }
+          return exact
+        }
+      } catch {
+        // Cai para fallback legado abaixo.
+      }
+    }
     try {
       const data = await loadTargets({ silent: true })
       const found = (Array.isArray(data) ? data : []).find((t) => t.id === targetId)
       const run = found?.latestRun
       if (!run) return null
-      const createdAt = run.createdAt ? new Date(run.createdAt).getTime() : 0
-      const recent = Date.now() - createdAt < RECONCILE_WINDOW_MS
-      if (isActiveRunStatus(run.status) || recent) {
+      // Fallback legado so vale se o run ainda esta ativo (sem aceitar run B p/ tentativa A).
+      if (isActiveRunStatus(run.status)) {
         return run
       }
       return null
@@ -237,6 +252,24 @@ export function OsmCatalog() {
       applyAcceptedRun(response)
       if (response.syncRunId) startPolling(response.syncRunId)
     } catch (err) {
+      // NEW_CITY tambem reconcilia resposta perdida pela mesma Idempotency-Key.
+      const uncertain = !err?.status || err?.status >= 500
+        || (err.message || '').toLowerCase().includes('fetch')
+      if (uncertain) {
+        const run = await reconcileAfterUncertainOutcome(null, intentKey)
+        if (run) {
+          push('Sincronização iniciada.', 'success')
+          setShowNewModal(false)
+          await loadTargets({ silent: true })
+          applyAcceptedRun({
+            syncRunId: run.id, targetId: run.targetId, regionId: run.regionId,
+            status: run.status, requestedNiche: run.requestedNiche,
+            canonicalNiche: run.canonicalNiche, targetValid: run.targetValid
+          })
+          startPolling(run.id)
+          return
+        }
+      }
       push(syncErrorMessage(err), 'error')
     } finally {
       setFormSubmitting(false)
@@ -395,6 +428,9 @@ export function OsmCatalog() {
                                   sem Instagram: {d.semInstagram} · sem telefone: {d.semTelefone}<br />
                                   sem WhatsApp: {d.semWhatsApp} · duplicados: {d.duplicados}<br />
                                   novos salvos: {d.novosSalvos}
+                                  {d.tempoTotal != null && (<><br />tempo total: {(Number(d.tempoTotal) / 1000).toFixed(1)}s</>)}
+                                  {d.timeouts != null && Number(d.timeouts) > 0 && (<> · timeouts: {d.timeouts}</>)}
+                                  {d.falhasTecnicas != null && Number(d.falhasTecnicas) > 0 && (<> · falhas técnicas: {d.falhasTecnicas}</>)}
                                   {run.status === 'PARTIAL' && (
                                     <><br />Pool possui apenas {formatNumber(run.qualifiedSaved ?? 0)} novos disponíveis.</>
                                   )}

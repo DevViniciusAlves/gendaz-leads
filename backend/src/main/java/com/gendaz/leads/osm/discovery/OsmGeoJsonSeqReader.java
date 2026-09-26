@@ -96,8 +96,8 @@ public class OsmGeoJsonSeqReader implements Iterable<OsmCandidate>, AutoCloseabl
         if (osmType == null || osmId < 0) return null;
 
         JsonNode tags = extractTags(props);
-        String timestamp = textOrNull(props.get("@timestamp"));
-        if (timestamp == null) timestamp = textOrNull(props.get("timestamp"));
+        java.time.Instant sourceTimestamp = OsmSourceTimestamp.parse(
+                props.has("@timestamp") ? props.get("@timestamp") : props.get("timestamp"));
 
         String name = textOrNull(tags.get("name"));
         double[] coords = representativeCoords(root.path("geometry"));
@@ -109,7 +109,7 @@ public class OsmGeoJsonSeqReader implements Iterable<OsmCandidate>, AutoCloseabl
                 osmType.toLowerCase(java.util.Locale.ROOT), osmId,
                 name == null ? "" : name, normalized == null ? "" : normalized,
                 tags, coords[1], coords[0],
-                timestamp, address, defaultCity, defaultState, defaultCountry, defaultCountryCode);
+                sourceTimestamp, address, defaultCity, defaultState, defaultCountry, defaultCountryCode);
     }
 
     private double[] representativeCoords(JsonNode geometry) {

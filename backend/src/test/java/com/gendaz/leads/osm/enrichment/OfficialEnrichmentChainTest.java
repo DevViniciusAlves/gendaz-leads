@@ -57,7 +57,7 @@ class OfficialEnrichmentChainTest {
         tags.put("shop", "beauty");
         tags.put("name", "Studio Test");
         OsmCandidate c = new OsmCandidate("node", 99, "Studio Test", "studio test",
-                tags, 0, 0, "2024-01-01T00:00:00Z", null, "Cuiaba", "MT", "Brasil", "br");
+                tags, 0, 0, java.time.Instant.parse("2024-01-01T00:00:00Z"), null, "Cuiaba", "MT", "Brasil", "br");
         assertFalse(OfficialContactEnrichmentService.hasOfficialContactChannel(c.tags()));
     }
 }

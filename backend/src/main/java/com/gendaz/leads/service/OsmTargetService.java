@@ -121,8 +121,8 @@ public class OsmTargetService {
         }
 
         OsmCatalogTarget target = getOrCreateTarget(region, niche.trim(), strategy.canonicalName());
-        OsmSyncRun run = createRunForTarget(target, requestedBy, key);
-        return new SyncRequestResult(run, true);
+        SyncRequestResult created = createRunForTarget(target, requestedBy, key);
+        return created;
     }
 
     @Transactional
@@ -143,8 +143,8 @@ public class OsmTargetService {
             }
         }
         // ZERO resolveScope(), ZERO Nominatim: usa target persistido.
-        OsmSyncRun run = createRunForTarget(target, requestedBy, key);
-        return new SyncRequestResult(run, true);
+        SyncRequestResult created = createRunForTarget(target, requestedBy, key);
+        return created;
     }
 
     @Transactional
@@ -171,11 +171,12 @@ public class OsmTargetService {
         }
     }
 
-    private OsmSyncRun createRunForTarget(OsmCatalogTarget target, User requestedBy, String requestKey) {
+    private SyncRequestResult createRunForTarget(OsmCatalogTarget target, User requestedBy, String requestKey) {
         // Idempotencia: mesma key retorna o mesmo run (checado antes; re-checa aqui por corrida).
+        // newlyCreated e decidido EXATAMENTE aqui: true so quando este metodo insere.
         if (requestKey != null) {
             Optional<OsmSyncRun> same = syncRunRepository.findByRequestKey(requestKey);
-            if (same.isPresent()) return same.get();
+            if (same.isPresent()) return new SyncRequestResult(same.get(), false);
         }
         // Protecao por target + por regiao (mesmo PBF: serializa por cidade).
         if (syncRunRepository.findActiveByTargetId(target.getId(), ACTIVE).isPresent()
@@ -207,7 +208,8 @@ public class OsmTargetService {
             entityManager.clear();
             if (requestKey != null) {
                 Optional<OsmSyncRun> same = syncRunRepository.findByRequestKey(requestKey);
-                if (same.isPresent()) return same.get();
+                // Vencedor do unique conflict: NAO e newlyCreated (evita 2 dispatches).
+                if (same.isPresent()) return new SyncRequestResult(same.get(), false);
             }
             throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
                     "Já existe uma sincronização em andamento para este target.");
@@ -223,7 +225,7 @@ public class OsmTargetService {
         log.info("[osm-target] run_queued runId={} targetId={} regionId={} canonical={} requestKey={}",
                 run.getId(), target.getId(), target.getRegion().getId(), target.getCanonicalNiche(),
                 requestKey == null ? "-" : "present");
-        return run;
+        return new SyncRequestResult(run, true);
     }
 
     private OsmCatalogRegion resolveAndPersistNewRegion(String city, String country, String normalizedCity, String countryCode) {

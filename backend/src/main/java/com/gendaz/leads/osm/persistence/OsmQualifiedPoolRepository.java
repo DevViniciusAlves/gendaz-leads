@@ -1,9 +1,12 @@
 package com.gendaz.leads.osm.persistence;
 
+import com.gendaz.leads.osm.discovery.OsmSourceTimestamp;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
 
 /**
  * Publicacao atomica do pool qualificado:
@@ -20,7 +23,7 @@ public class OsmQualifiedPoolRepository {
             String city, String state, String country, String countryCode,
             String phone, String normalizedPhone, String website,
             String instagram, String normalizedInstagram,
-            String tagsJson, String sourceTimestamp,
+            String tagsJson, Instant sourceTimestamp,
             String evidenceType, String evidenceDetails,
             String contactSource, String contactSourceUrl,
             String instagramSource, String instagramSourceUrl) {}
@@ -36,7 +39,7 @@ public class OsmQualifiedPoolRepository {
                         + "enriched_at, last_seen_at, source_timestamp) "
                         + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSONB), TRUE, "
                         + "TRUE, NOW(), TRUE, NOW(), TRUE, NOW(), ?, ?, ?, 'QUALIFIED', ?, ?, NOW(), NOW(), "
-                        + "CAST(? AS TIMESTAMPTZ)) "
+                        + "?) "
                         + "ON CONFLICT (osm_type, osm_id) DO UPDATE SET "
                         + "business_name = EXCLUDED.business_name, normalized_name = EXCLUDED.normalized_name, "
                         + "latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, "
@@ -79,7 +82,7 @@ public class OsmQualifiedPoolRepository {
             ps.setString(i++, lead.tagsJson() == null ? null : lastNicheFromEvidence(lead));
             ps.setString(i++, lead.contactSource());
             ps.setString(i++, lead.contactSourceUrl());
-            ps.setString(i++, lead.sourceTimestamp());
+            OsmSourceTimestamp.bindInstant(ps, i++, lead.sourceTimestamp());
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getLong(1);

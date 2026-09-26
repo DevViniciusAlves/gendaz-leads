@@ -1,5 +1,7 @@
 package com.gendaz.leads.osm.persistence;
 
+import com.gendaz.leads.osm.discovery.OsmSourceTimestamp;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -8,16 +10,19 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Scan state em Java. Outcomes: NO_PHONE, NO_INSTAGRAM, NOT_ON_WHATSAPP,
  * NICHE_NOT_CONFIRMED, DUPLICATE_*, QUALIFIED. Falha tecnica WPP nunca gera
  * cache negativo. TTL 30 dias; reavalia se source_timestamp mudou.
  * Pipeline version invalida cache quando algoritmo muda.
+ *
+ * <p>source_timestamp e sempre Instant tipado (nunca String/CAST textual).
  */
 public class OsmCandidateScanStateRepository {
 
-    public record ScanEntry(String outcome, Instant retryAfter, String sourceTimestamp, String pipelineVersion) {}
+    public record ScanEntry(String outcome, Instant retryAfter, Instant sourceTimestamp, String pipelineVersion) {}
 
     public static final String PIPELINE_VERSION = "java-osm-v2";
 
@@ -36,7 +41,7 @@ public class OsmCandidateScanStateRepository {
                 Timestamp src = rs.getTimestamp(3);
                 return new ScanEntry(rs.getString(1),
                         retry == null ? null : retry.toInstant(),
-                        src == null ? null : src.toInstant().toString(),
+                        src == null ? null : src.toInstant(),
                         rs.getString(4));
             }
         }
@@ -66,7 +71,7 @@ public class OsmCandidateScanStateRepository {
                     Timestamp src = rs.getTimestamp(5);
                     ScanEntry entry = new ScanEntry(rs.getString(3),
                             retry == null ? null : retry.toInstant(),
-                            src == null ? null : src.toInstant().toString(),
+                            src == null ? null : src.toInstant(),
                             rs.getString(6));
                     result.put(key(osmType, osmId), entry);
                 }
@@ -79,12 +84,12 @@ public class OsmCandidateScanStateRepository {
         return (osmType == null ? "?" : osmType) + "/" + osmId;
     }
 
-    public boolean shouldSkip(ScanEntry entry, String currentSourceTimestamp) {
+    public boolean shouldSkip(ScanEntry entry, Instant currentSourceTimestamp) {
         if (entry == null) return false;
         if ("QUALIFIED".equals(entry.outcome())) return true;
-        // source_timestamp mudou: reavalia.
-        if (currentSourceTimestamp != null && entry.sourceTimestamp() != null
-                && !currentSourceTimestamp.equals(entry.sourceTimestamp())) {
+        // source_timestamp mudou: reavalia (comparacao tipada Instant).
+        if (!Objects.equals(currentSourceTimestamp, entry.sourceTimestamp())
+                && currentSourceTimestamp != null && entry.sourceTimestamp() != null) {
             return false;
         }
         // Pipeline version diferente: reavalia (ja filtrado no loadAll, mas defensivo).
@@ -100,13 +105,13 @@ public class OsmCandidateScanStateRepository {
     }
 
     public void upsert(Connection con, long regionId, Long targetId, String canonicalNiche,
-                       String osmType, long osmId, String sourceTimestamp, String outcome,
-                       String phone, String instagram, String details) throws SQLException {
+                       String osmType, long osmId, Instant sourceTimestamp, String outcome,
+                       String phone, String instagram, String details) throws Exception {
         try (PreparedStatement ps = con.prepareStatement(
                 "INSERT INTO osm_candidate_scan_state "
                         + "(region_id, target_id, canonical_niche, osm_type, osm_id, source_timestamp, "
                         + "outcome, normalized_phone, normalized_instagram, last_checked_at, retry_after, details, pipeline_version) "
-                        + "VALUES (?, ?, ?, ?, ?, CAST(? AS TIMESTAMPTZ), ?, ?, ?, NOW(), "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), "
                         + "CASE WHEN ? IN ('QUALIFIED') THEN NULL ELSE NOW() + INTERVAL '30 days' END, ?, ?) "
                         + "ON CONFLICT (region_id, canonical_niche, osm_type, osm_id) DO UPDATE SET "
                         + "target_id = EXCLUDED.target_id, source_timestamp = EXCLUDED.source_timestamp, "
@@ -122,7 +127,7 @@ public class OsmCandidateScanStateRepository {
             ps.setString(3, canonicalNiche);
             ps.setString(4, osmType);
             ps.setLong(5, osmId);
-            ps.setString(6, sourceTimestamp);
+            OsmSourceTimestamp.bindInstant(ps, 6, sourceTimestamp);
             ps.setString(7, outcome);
             ps.setString(8, phone);
             ps.setString(9, instagram);

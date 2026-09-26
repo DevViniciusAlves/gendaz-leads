@@ -84,6 +84,8 @@ jobs:
       NICHE_STRATEGY_JSON: ${{ github.event.inputs.niche_strategy_json }}
       GITHUB_RUN_ID: ${{ github.run_id }}
       OSM_SYNC_WEBSITE_MAX_WORKERS: "8"
+      OSM_SYNC_ENRICH_BATCH_SIZE: "32"
+      OSM_SYNC_CANDIDATE_ENRICH_TIMEOUT_MS: "12000"
       OSM_SYNC_SOCIAL_MAX_WORKERS: "4"
       OSM_SYNC_SOCIAL_PUBLIC_FETCH_ENABLED: "true"
       OSM_SYNC_CONTACT_HUBS_ENABLED: "true"

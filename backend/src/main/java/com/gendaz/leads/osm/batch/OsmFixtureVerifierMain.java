@@ -45,6 +45,7 @@ public class OsmFixtureVerifierMain {
         Set<String> types = new HashSet<>();
         long count = 0;
         boolean contactCompanionFound = false;
+        long numericTimestampCount = 0;
         for (String raw : Files.readAllLines(input)) {
             String line = raw.replace("\u001E", "").strip();
             if (line.isEmpty()) continue;
@@ -59,6 +60,17 @@ public class OsmFixtureVerifierMain {
                 fail("Feature " + osmType + " sem @id");
             }
             long osmId = idNode.asLong(-1);
+            // Timestamp OSM deve ser parseavel como Instant tipado (epoch seconds/millis/ISO).
+            // Reproduz o formato que causou o run #19 (@timestamp numerico).
+            JsonNode tsNode = props.has("@timestamp") ? props.get("@timestamp") : props.get("timestamp");
+            java.time.Instant parsed = com.gendaz.leads.osm.discovery.OsmSourceTimestamp.parse(tsNode);
+            if (tsNode != null && !tsNode.isNull() && (tsNode.isNumber()
+                    || (tsNode.isTextual() && tsNode.asText().matches("-?\\d+")))) {
+                numericTimestampCount++;
+                if (parsed == null) {
+                    fail("Feature " + osmType + "/" + osmId + " com @timestamp numerico nao parseavel");
+                }
+            }
             if ("node".equals(osmType) && osmId == 4
                     && "+5565888887777".equals(props.path("contact:phone").asText(null))) {
                 contactCompanionFound = true;
@@ -77,7 +89,8 @@ public class OsmFixtureVerifierMain {
         if (!contactCompanionFound) {
             fail("Contact-only OSM companion was dropped by tags-filter/export pipeline");
         }
-        System.out.println("OSMIUM_FIXTURE_PASS count=" + count + " types=" + String.join(",", sorted(types)));
+        System.out.println("OSMIUM_FIXTURE_PASS count=" + count + " types=" + String.join(",", sorted(types))
+                + " numericTimestamps=" + numericTimestampCount);
     }
 
     static void verifyBoundary(Path boundaryOsm, Path cityGeojsonseq) throws Exception {

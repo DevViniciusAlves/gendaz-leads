@@ -168,6 +168,7 @@ describe('OsmCatalog targets', () => {
     err409.code = 'OSM_SYNC_ALREADY_RUNNING'
     api.post.mockRejectedValueOnce(err409)
     api.get.mockImplementation(async (path) => {
+      if (typeof path === 'string' && path.startsWith('/api/osm-catalog/sync/by-request-key/')) return active
       if (path === '/api/osm-catalog/targets') return [targetReady({ latestRun: active })]
       if (path === '/api/osm-catalog/sync/50') return active
       return null
@@ -183,6 +184,7 @@ describe('OsmCatalog targets', () => {
     const created = { id: 60, targetId: 10, regionId: 2, status: 'QUEUED', qualifiedSaved: 0, targetValid: 50, createdAt: new Date().toISOString() }
     api.post.mockRejectedValueOnce(new TypeError('fetch failed'))
     api.get.mockImplementation(async (path) => {
+      if (typeof path === 'string' && path.startsWith('/api/osm-catalog/sync/by-request-key/')) return created
       if (path === '/api/osm-catalog/targets') return [targetReady({ latestRun: created })]
       if (path === '/api/osm-catalog/sync/60') return created
       return null
@@ -213,5 +215,36 @@ describe('OsmCatalog targets', () => {
     unmount()
     // Sem throw após unmount ao avançar timers.
     await vi.advanceTimersByTimeAsync(15000)
+  })
+
+  it('reconcilia pela requestKey exata e rejeita run recente errado', async () => {
+    api.get.mockResolvedValueOnce([targetReady()])
+    const wrongRecent = { id: 999, targetId: 999, regionId: 9, status: 'RUNNING', qualifiedSaved: 0, targetValid: 50, createdAt: new Date().toISOString() }
+    const correct = { id: 61, targetId: 10, regionId: 2, status: 'QUEUED', qualifiedSaved: 0, targetValid: 50 }
+    api.post.mockRejectedValueOnce(new TypeError('fetch failed'))
+    api.get.mockImplementation(async (path) => {
+      if (typeof path === 'string' && path.startsWith('/api/osm-catalog/sync/by-request-key/')) return correct
+      if (path === '/api/osm-catalog/targets') return [targetReady({ latestRun: wrongRecent })]
+      if (path === '/api/osm-catalog/sync/61') return correct
+      return null
+    })
+    renderCatalog()
+    await waitFor(() => expect(screen.getByText('Sincronizar Novamente')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: /Sincronizar Novamente/ }))
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith(
+      expect.stringContaining('/api/osm-catalog/sync/by-request-key/')))
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: /Na fila|Sincronizando/ })
+    ).toBeInTheDocument())
+  })
+
+  it('run terminal para polling e EXHAUSTED aparece como concluido', async () => {
+    const exhausted = { id: 62, targetId: 10, regionId: 2, status: 'EXHAUSTED', qualifiedSaved: 0, targetValid: 50 }
+    api.get.mockImplementation(async (path) => {
+      if (path === '/api/osm-catalog/targets') return [targetReady({ latestRun: exhausted })]
+      return exhausted
+    })
+    renderCatalog()
+    await waitFor(() => expect(screen.getByText('Concluído — 0 novos leads')).toBeInTheDocument())
   })
 })

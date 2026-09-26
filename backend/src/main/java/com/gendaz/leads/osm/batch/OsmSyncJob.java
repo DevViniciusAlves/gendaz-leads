@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gendaz.leads.osm.discovery.OsmCandidate;
 import com.gendaz.leads.osm.discovery.OsmGeoJsonSeqReader;
+import com.gendaz.leads.osm.discovery.OsmSourceTimestamp;
 import com.gendaz.leads.osm.enrichment.OfficialContactEnrichmentService;
 import com.gendaz.leads.osm.enrichment.OfficialWebsiteFetcher;
 import com.gendaz.leads.osm.persistence.BatchDataSource;
@@ -22,6 +23,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -35,15 +37,18 @@ import java.util.concurrent.TimeUnit;
  * Motor target-50 em Java:
  * qualifiedSaved == 50 => SUCCESS; 1..49 com dataset esgotado => PARTIAL;
  * 0 com dataset esgotado => EXHAUSTED; erro tecnico real => FAILED.
+ * Candidatos tecnicamente inconclusivos (timeout/infra) => PARTIAL com
+ * datasetExhausted=false, nunca EXHAUSTED.
  * Enrichment oficial acontece ANTES da rejeicao definitiva do nicho.
  * Instagram + telefone + WhatsApp obrigatorios. Dedup antes do WPP e antes de contar.
  *
  * Performance (java-osm-v2):
  * - scan state carregado 1x (bulk) + lookup in-memory, zero conexao por candidato
- * - potential antes de qualquer DB
- * - scan rejections em batch (sem commit por candidato)
- * - enrichment paralelo bounded (OSM_SYNC_WEBSITE_MAX_WORKERS)
- * - timeouts HTTP configuraveis
+ * - potential antes de qualquer DB; !potential nao gera write (so metrica)
+ * - scan rejections em batch com conexao curta por lote (sem tx longa)
+ * - enrichment paralelo bounded por chunks com early stop (sem HTTP apos 50)
+ * - timeout por candidato; future carrega candidato explicito (sem out.size())
+ * - nenhuma transacao DB aberta durante HTTP
  */
 public class OsmSyncJob {
 
@@ -59,13 +64,18 @@ public class OsmSyncJob {
         this.strategy = NicheMapper.resolve(args.canonicalNiche());
     }
 
-    record PendingScan(String osmType, long osmId, String sourceTimestamp, String outcome,
+    record PendingScan(String osmType, long osmId, Instant sourceTimestamp, String outcome,
                        String phone, String ig, String details) {}
 
     record TieredCandidate(OsmCandidate candidate, int tier) {}
 
     record EnrichedItem(TieredCandidate tiered,
                         OfficialContactEnrichmentService.EnrichedContact enriched) {}
+
+    record EnrichmentResult(TieredCandidate candidate,
+                            OfficialContactEnrichmentService.EnrichedContact contact,
+                            Throwable error,
+                            boolean timedOut) {}
 
     public OsmSyncMetrics run() throws Exception {
         OsmSyncMetrics m = new OsmSyncMetrics();
@@ -75,24 +85,43 @@ public class OsmSyncJob {
         int workers = envInt("OSM_SYNC_WEBSITE_MAX_WORKERS", 8);
         int connectTimeout = envInt("OSM_SYNC_CONNECT_TIMEOUT_MS", 2000);
         int readTimeout = envInt("OSM_SYNC_READ_TIMEOUT_MS", 3500);
+        int enrichChunkSize = envInt("OSM_SYNC_ENRICH_BATCH_SIZE", 32);
+        long candidateTimeoutMs = envLong("OSM_SYNC_CANDIDATE_ENRICH_TIMEOUT_MS", 12_000L);
         if (workers < 1) workers = 1;
         if (workers > 16) workers = 16;
+        if (enrichChunkSize < 1) enrichChunkSize = 32;
+        if (enrichChunkSize > 100) enrichChunkSize = 100;
+        final int workersFinal = workers;
 
+        // Conexao A curta: contexto + RUNNING + snapshots, depois commit/close.
+        RunContext ctx;
+        OsmDeduplicator dedup = new OsmDeduplicator();
+        Map<String, OsmCandidateScanStateRepository.ScanEntry> scanStates;
+        OsmCandidateScanStateRepository scanRepo = new OsmCandidateScanStateRepository();
         try (Connection con = BatchDataSource.open()) {
             con.setAutoCommit(false);
-            RunContext ctx = loadRunContext(con);
+            ctx = loadRunContext(con);
             markRunning(con, ctx);
             con.commit();
+        }
+        // Preflight fora de qualquer transacao DB.
+        if (!args.dryRun()) {
+            new WhatsAppPreflightService(wppUrl, wppToken).ensureReady();
+            logStage("PRECHECK", "whatsapp preflight ok");
+        }
+        // Snapshots em conexao curta separada (sem tx longa).
+        try (Connection con = BatchDataSource.open()) {
+            con.setAutoCommit(true);
+            dedup.loadPool(con, args.regionId(), ctx.targetId());
+            long t0 = System.currentTimeMillis();
+            scanStates = scanRepo.loadAll(con, args.regionId(), ctx.targetId(),
+                    ctx.canonicalNiche(), OsmCandidateScanStateRepository.PIPELINE_VERSION);
+            m.stageLoadScanStateMs = System.currentTimeMillis() - t0;
+            logStage("LOAD_SCAN_STATE", "loaded=" + scanStates.size()
+                    + " durationMs=" + m.stageLoadScanStateMs);
+        }
 
-            if (!args.dryRun()) {
-                new WhatsAppPreflightService(wppUrl, wppToken).ensureReady();
-                logStage("PRECHECK", "whatsapp preflight ok");
-            }
-
-            OsmDeduplicator dedup = new OsmDeduplicator();
-            dedup.loadPool(con, args.regionId(), args.targetId());
-            OsmCandidateScanStateRepository scanRepo = new OsmCandidateScanStateRepository();
-            OsmQualifiedPoolRepository poolRepo = new OsmQualifiedPoolRepository();
+        try {
             OfficialWebsiteFetcher fetcher = new OfficialWebsiteFetcher(connectTimeout, readTimeout, 500_000);
             OfficialContactEnrichmentService enrichment =
                     new OfficialContactEnrichmentService(fetcher, args.countryCode());
@@ -102,17 +131,8 @@ public class OsmSyncJob {
             List<OsmQualifiedPoolRepository.QualifiedLead> staged = new ArrayList<>();
             List<PendingScan> pendingScans = new ArrayList<>();
 
-            // Stage 1: bulk load scan state (1 query).
+            // Stage 2: read + commercial + potential + scan-skip in-memory + priority (CPU local, sem tx).
             long t0 = System.currentTimeMillis();
-            Map<String, OsmCandidateScanStateRepository.ScanEntry> scanStates =
-                    scanRepo.loadAll(con, args.regionId(), ctx.targetId(),
-                            ctx.canonicalNiche(), OsmCandidateScanStateRepository.PIPELINE_VERSION);
-            m.stageLoadScanStateMs = System.currentTimeMillis() - t0;
-            logStage("LOAD_SCAN_STATE", "loaded=" + scanStates.size()
-                    + " durationMs=" + m.stageLoadScanStateMs);
-
-            // Stage 2: read + commercial + potential + scan-skip in-memory + priority.
-            t0 = System.currentTimeMillis();
             List<TieredCandidate> tiered = new ArrayList<>();
             try (OsmGeoJsonSeqReader reader = new OsmGeoJsonSeqReader(
                     Path.of(args.input()), args.city(), args.state(), null, args.countryCode())) {
@@ -120,22 +140,21 @@ public class OsmSyncJob {
                     if (candidate == null) continue;
                     m.objectsRead++;
                     m.candidatesScanned++;
+                    if (candidate.sourceTimestamp() == null) m.invalidSourceTimestamp++;
 
                     if (!isCommercialOrContact(candidate)) continue;
                     m.commercialCandidates++;
 
+                    // !potential: barato/local, sem DB write (evita milhoes de linhas).
                     if (!NicheMapper.isPotential(strategy, candidate.tags(), candidate.normalizedName())) {
                         m.discardedNiche++;
-                        pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
-                                candidate.timestamp(), "NICHE_NOT_CONFIRMED", null, null, "not potential"));
-                        flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, false);
                         continue;
                     }
                     m.potentialNicheCandidates++;
 
                     OsmCandidateScanStateRepository.ScanEntry entry =
                             scanStates.get(candidate.stableKey());
-                    if (entry != null && scanRepo.shouldSkip(entry, candidate.timestamp())) {
+                    if (entry != null && scanRepo.shouldSkip(entry, candidate.sourceTimestamp())) {
                         m.scanStateSkipped++;
                         continue;
                     }
@@ -145,9 +164,9 @@ public class OsmSyncJob {
                         m.fastRejectedNoOfficialChannel++;
                         m.discardedNoOfficialChannel++;
                         pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
-                                candidate.timestamp(), "NO_OFFICIAL_CONTACT_CHANNEL", null, null,
+                                candidate.sourceTimestamp(), "NO_OFFICIAL_CONTACT_CHANNEL", null, null,
                                 "sem canal oficial"));
-                        flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, false);
+                        flushScanBatch(ctx, scanRepo, pendingScans, false, m);
                         continue;
                     }
 
@@ -159,131 +178,174 @@ public class OsmSyncJob {
             logStage("READ_CLASSIFY", "tiered=" + tiered.size()
                     + " durationMs=" + m.stageReadClassifyMs);
 
-            // Stage 3: parallel enrichment (bounded), preservando ordem de prioridade.
+            // Stage 3+4: chunks ordenados com early stop real (nao agenda HTTP apos 50).
             t0 = System.currentTimeMillis();
-            List<EnrichedItem> enrichedList = enrichParallel(enrichment, tiered, workers);
-            m.stageEnrichMs = System.currentTimeMillis() - t0;
-            logStage("ENRICH", "enriched=" + enrichedList.size()
-                    + " workers=" + workers + " durationMs=" + m.stageEnrichMs);
+            ExecutorService pool = Executors.newFixedThreadPool(workersFinal);
+            long technicalInconclusive = 0;
+            try {
+                int cursor = 0;
+                while (cursor < tiered.size() && m.qualifiedSaved < args.targetValid()) {
+                    int end = Math.min(cursor + enrichChunkSize, tiered.size());
+                    List<TieredCandidate> chunk = tiered.subList(cursor, end);
+                    cursor = end;
+                    m.enrichmentChunks++;
+                    List<EnrichmentResult> results =
+                            enrichChunk(enrichment, chunk, pool, candidateTimeoutMs, m);
+                    for (EnrichmentResult r : results) {
+                        if (m.qualifiedSaved >= args.targetValid()) break;
+                        if (r.error() != null || r.contact() == null) {
+                            m.technicalEnrichmentFailures++;
+                            if (r.timedOut()) m.enrichmentTimedOut++;
+                            technicalInconclusive++;
+                            continue;
+                        }
+                        OsmCandidate candidate = r.candidate().candidate();
+                        OfficialContactEnrichmentService.EnrichedContact enriched = r.contact();
 
-            // Stage 4: confirm niche -> contacts -> dedup (antes do WPP) -> WPP -> stage.
-            t0 = System.currentTimeMillis();
-            for (EnrichedItem item : enrichedList) {
-                if (m.qualifiedSaved >= args.targetValid()) break;
-                OsmCandidate candidate = item.tiered().candidate();
-                OfficialContactEnrichmentService.EnrichedContact enriched = item.enriched();
+                        if (enriched.directPhone()) m.directPhone++;
+                        else if (enriched.phone() != null) m.recoveredPhone++;
+                        if (enriched.directInstagram()) m.directInstagram++;
+                        else if (enriched.instagram() != null) m.recoveredInstagram++;
 
-                if (enriched.directPhone()) m.directPhone++;
-                else if (enriched.phone() != null) m.recoveredPhone++;
-                if (enriched.directInstagram()) m.directInstagram++;
-                else if (enriched.instagram() != null) m.recoveredInstagram++;
+                        NicheMapper.NicheConfirmation confirmation = NicheMapper.confirm(
+                                strategy, candidate.tags(), enriched.officialText());
+                        if (!confirmation.confirmed()) {
+                            m.discardedNiche++;
+                            // Persiste NICHE_NOT_CONFIRMED somente pos-enrichment (era potential).
+                            pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
+                                    candidate.sourceTimestamp(), "NICHE_NOT_CONFIRMED", null, null,
+                                    "confirm failed"));
+                            flushScanBatch(ctx, scanRepo, pendingScans, false, m);
+                            continue;
+                        }
+                        m.nicheConfirmed++;
 
-                NicheMapper.NicheConfirmation confirmation = NicheMapper.confirm(
-                        strategy, candidate.tags(), enriched.officialText());
-                if (!confirmation.confirmed()) {
-                    m.discardedNiche++;
-                    pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
-                            candidate.timestamp(), "NICHE_NOT_CONFIRMED", null, null, "confirm failed"));
-                    flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, false);
-                    continue;
-                }
-                m.nicheConfirmed++;
+                        if (enriched.instagram() == null) {
+                            m.discardedNoInstagram++;
+                            pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
+                                    candidate.sourceTimestamp(), "NO_INSTAGRAM",
+                                    enriched.phone() == null ? null : enriched.phone().normalized(),
+                                    null, "sem instagram oficial"));
+                            flushScanBatch(ctx, scanRepo, pendingScans, false, m);
+                            continue;
+                        }
+                        if (enriched.phone() == null) {
+                            m.discardedNoPhone++;
+                            pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
+                                    candidate.sourceTimestamp(), "NO_PHONE", null,
+                                    enriched.instagram().normalized(), "sem telefone oficial"));
+                            flushScanBatch(ctx, scanRepo, pendingScans, false, m);
+                            continue;
+                        }
 
-                if (enriched.instagram() == null) {
-                    m.discardedNoInstagram++;
-                    pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
-                            candidate.timestamp(), "NO_INSTAGRAM",
-                            enriched.phone() == null ? null : enriched.phone().normalized(),
-                            null, "sem instagram oficial"));
-                    flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, false);
-                    continue;
-                }
-                if (enriched.phone() == null) {
-                    m.discardedNoPhone++;
-                    pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
-                            candidate.timestamp(), "NO_PHONE", null,
-                            enriched.instagram().normalized(), "sem telefone oficial"));
-                    flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, false);
-                    continue;
-                }
+                        // Dedup ANTES do WPP.
+                        OsmDeduplicator.DuplicateResult dup = dedup.check(candidate.osmType(), candidate.osmId(),
+                                enriched.phone().normalized(), enriched.instagram().normalized());
+                        if (dup.duplicate()) {
+                            switch (dup.kind()) {
+                                case SOURCE -> m.discardedDuplicateSource++;
+                                case PHONE, GLOBAL -> m.discardedDuplicatePhone++;
+                                case INSTAGRAM -> m.discardedDuplicateInstagram++;
+                                default -> m.discardedDuplicateSource++;
+                            }
+                            pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
+                                    candidate.sourceTimestamp(), "DUPLICATE_PHONE",
+                                    enriched.phone().normalized(), enriched.instagram().normalized(),
+                                    "duplicate " + dup.kind()));
+                            flushScanBatch(ctx, scanRepo, pendingScans, false, m);
+                            continue;
+                        }
 
-                // Dedup ANTES do WPP (WPP e operacao externa cara).
-                OsmDeduplicator.DuplicateResult dup = dedup.check(candidate.osmType(), candidate.osmId(),
-                        enriched.phone().normalized(), enriched.instagram().normalized());
-                if (dup.duplicate()) {
-                    switch (dup.kind()) {
-                        case SOURCE -> m.discardedDuplicateSource++;
-                        case PHONE, GLOBAL -> m.discardedDuplicatePhone++;
-                        case INSTAGRAM -> m.discardedDuplicateInstagram++;
-                        default -> m.discardedDuplicateSource++;
+                        m.whatsappChecks++;
+                        WhatsAppRecipientCheckResult wppRes;
+                        if (args.dryRun()) {
+                            wppRes = WhatsAppRecipientCheckResult.found();
+                        } else {
+                            wppRes = wpp.check(enriched.phone().normalized());
+                        }
+                        if (wppRes.technicalFailure()) {
+                            throw new WhatsAppInfrastructureException(wppRes.code(),
+                                    "Falha tecnica WhatsApp durante validacao (" + wppRes.code() + ")");
+                        }
+                        if (!wppRes.exists()) {
+                            m.discardedNotOnWhatsApp++;
+                            pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
+                                    candidate.sourceTimestamp(), "NOT_ON_WHATSAPP",
+                                    enriched.phone().normalized(), enriched.instagram().normalized(),
+                                    "nao existe no WhatsApp"));
+                            flushScanBatch(ctx, scanRepo, pendingScans, false, m);
+                            continue;
+                        }
+                        m.whatsappVerified++;
+
+                        OsmQualifiedPoolRepository.QualifiedLead lead =
+                                toQualifiedLead(candidate, enriched, confirmation);
+                        staged.add(lead);
+                        dedup.markSeen(candidate.osmType(), candidate.osmId(),
+                                enriched.phone().normalized(), enriched.instagram().normalized());
+                        m.qualifiedSaved++;
+                        log.info("[osm-sync] sync_summary runId={} targetId={} qualifiedSaved={}/{} candidate={} phoneSrc={} igSrc={}",
+                                args.syncRunId(), args.targetId(), m.qualifiedSaved, args.targetValid(),
+                                candidate.stableKey(),
+                                enriched.phone().source(), enriched.instagram().source());
                     }
-                    pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
-                            candidate.timestamp(), "DUPLICATE_PHONE",
-                            enriched.phone().normalized(), enriched.instagram().normalized(),
-                            "duplicate " + dup.kind()));
-                    flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, false);
-                    continue;
                 }
+                if (cursor < tiered.size() && m.qualifiedSaved >= args.targetValid()) {
+                    m.candidatesNotScheduledAfterTargetReached = tiered.size() - cursor;
+                }
+            } finally {
+                pool.shutdown();
+                try {
+                    pool.awaitTermination(60, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            m.stageEnrichMs = System.currentTimeMillis() - t0;
+            logStage("ENRICH", "qualified=" + m.qualifiedSaved
+                    + " workers=" + workersFinal + " chunks=" + m.enrichmentChunks
+                    + " durationMs=" + m.stageEnrichMs);
 
-                // WPP recipient check: falha tecnica aborta como FAILED, nunca como descarte.
-                m.whatsappChecks++;
-                WhatsAppRecipientCheckResult wppRes;
-                if (args.dryRun()) {
-                    wppRes = WhatsAppRecipientCheckResult.found();
-                } else {
-                    wppRes = wpp.check(enriched.phone().normalized());
-                }
-                if (wppRes.technicalFailure()) {
-                    throw new WhatsAppInfrastructureException(wppRes.code(),
-                            "Falha tecnica WhatsApp durante validacao (" + wppRes.code() + ")");
-                }
-                if (!wppRes.exists()) {
-                    m.discardedNotOnWhatsApp++;
-                    pendingScans.add(new PendingScan(candidate.osmType(), candidate.osmId(),
-                            candidate.timestamp(), "NOT_ON_WHATSAPP",
-                            enriched.phone().normalized(), enriched.instagram().normalized(),
-                            "nao existe no WhatsApp"));
-                    flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, false);
-                    continue;
-                }
-                m.whatsappVerified++;
+            // Metricas do fetcher/enrichment.
+            // (enrichment instance guardado acima; recriar contadores aqui seria zero — usar refs locais.)
+            // Nota: fetcher/enrichment sao locais deste bloco; copiar antes do publish.
+            m.websiteCandidates = enrichmentRef(enrichment).websiteCandidates.get();
+            m.websiteFetchSuccess = fetcherRef(fetcher).fetchSuccess.get();
+            m.websiteFetchFailed = fetcherRef(fetcher).fetchFailed.get();
+            m.websiteTimeout = fetcherRef(fetcher).fetchTimeout.get();
+            m.website403 = fetcherRef(fetcher).fetch403.get();
+            m.website404 = fetcherRef(fetcher).fetch404.get();
+            m.website429 = fetcherRef(fetcher).fetch429.get();
+            m.contactPagesFetched = enrichmentRef(enrichment).contactPagesFetched.get();
+            m.contactHubCandidates = enrichmentRef(enrichment).contactHubCandidates.get();
+            m.contactHubSuccess = enrichmentRef(enrichment).contactHubSuccess.get();
+            m.sameAsLinksFound = enrichmentRef(enrichment).sameAsLinksFound.get();
+            m.socialCandidates = enrichmentRef(enrichment).socialCandidates.get();
+            m.socialSuccess = enrichmentRef(enrichment).socialSuccess.get();
 
-                OsmQualifiedPoolRepository.QualifiedLead lead = toQualifiedLead(candidate, enriched, confirmation);
-                staged.add(lead);
-                dedup.markSeen(candidate.osmType(), candidate.osmId(),
-                        enriched.phone().normalized(), enriched.instagram().normalized());
-                m.qualifiedSaved++;
-                log.info("[osm-sync] sync_summary runId={} targetId={} qualifiedSaved={}/{} candidate={} phoneSrc={} igSrc={}",
-                        args.syncRunId(), args.targetId(), m.qualifiedSaved, args.targetValid(),
-                        candidate.stableKey(),
-                        enriched.phone().source(), enriched.instagram().source());
+            // Status do dataset: inconclusivos tecnicos nunca viram EXHAUSTED.
+            String finalStatus;
+            boolean targetReached = m.qualifiedSaved >= args.targetValid();
+            if (targetReached) {
+                finalStatus = "SUCCESS";
+                m.datasetExhausted = false;
+            } else if (technicalInconclusive > 0) {
+                finalStatus = m.qualifiedSaved > 0 ? "PARTIAL" : "PARTIAL";
+                m.datasetExhausted = false;
+            } else if (m.qualifiedSaved > 0) {
+                finalStatus = "PARTIAL";
+                m.datasetExhausted = true;
+            } else {
+                finalStatus = "EXHAUSTED";
+                m.datasetExhausted = true;
             }
 
-            // Copia metricas do fetcher/enrichment para o summary.
-            m.websiteCandidates = enrichment.websiteCandidates.get();
-            m.websiteFetchSuccess = fetcher.fetchSuccess.get();
-            m.websiteFetchFailed = fetcher.fetchFailed.get();
-            m.websiteTimeout = fetcher.fetchTimeout.get();
-            m.website403 = fetcher.fetch403.get();
-            m.website404 = fetcher.fetch404.get();
-            m.website429 = fetcher.fetch429.get();
-            m.contactPagesFetched = enrichment.contactPagesFetched.get();
-            m.contactHubCandidates = enrichment.contactHubCandidates.get();
-            m.contactHubSuccess = enrichment.contactHubSuccess.get();
-            m.sameAsLinksFound = enrichment.sameAsLinksFound.get();
-            m.socialCandidates = enrichment.socialCandidates.get();
-            m.socialSuccess = enrichment.socialSuccess.get();
+            // Flush restante (conexao curta) antes da publicacao.
+            t0 = System.currentTimeMillis();
+            flushScanBatch(ctx, scanRepo, pendingScans, true, m);
 
-            m.datasetExhausted = m.qualifiedSaved < args.targetValid();
-            String finalStatus = m.qualifiedSaved >= args.targetValid() ? "SUCCESS"
-                    : m.qualifiedSaved > 0 ? "PARTIAL" : "EXHAUSTED";
-            String finalError = "EXHAUSTED".equals(finalStatus) ? null : null;
-
-            // Flush restante das rejeicoes antes da publicacao.
-            flushScanBatchIfNeeded(con, scanRepo, ctx, pendingScans, true);
-            con.commit();
-
-            // Publicacao atomica.
+            // Publicacao atomica propria (sem tx aberta durante HTTP).
+            OsmQualifiedPoolRepository poolRepo = new OsmQualifiedPoolRepository();
             try (Connection con2 = BatchDataSource.open()) {
                 con2.setAutoCommit(false);
                 try {
@@ -302,8 +364,8 @@ public class OsmSyncJob {
                     if (ctx.targetId() > 0) {
                         poolRepo.recalcTargetCounts(con2, ctx.targetId());
                     }
-                    finalizeRun(con2, ctx, finalStatus, m, finalError);
-                    updateTargetOutcome(con2, ctx, finalStatus, m, finalError);
+                    finalizeRun(con2, ctx, finalStatus, m, null);
+                    updateTargetOutcome(con2, ctx, finalStatus, m, null);
                     con2.commit();
                 } catch (Exception e) {
                     con2.rollback();
@@ -312,35 +374,15 @@ public class OsmSyncJob {
             }
             m.stageWppPublishMs = System.currentTimeMillis() - t0;
             m.durationMs = System.currentTimeMillis() - jobStart;
-            log.info("[osm-sync] sync_summary runId={} status={} objectsRead={} commercial={} potential={} "
-                            + "scanSkipped={} fastRejected={} confirmed={} "
-                            + "directPhone={} recoveredPhone={} directIg={} recoveredIg={} "
-                            + "websiteCand={} websiteOk={} websiteFail={} timeout={} http403={} http404={} http429={} "
-                            + "contactPages={} hubCand={} hubOk={} sameAs={} socialCand={} socialOk={} "
-                            + "discNiche={} discNoPhone={} discNoIg={} discNoWpp={} discNoChannel={} "
-                            + "dupSrc={} dupPhone={} dupIg={} "
-                            + "wppChecks={} wppVerified={} qualifiedSaved={}/{} exhausted={} "
-                            + "stageLoadMs={} stageReadMs={} stageEnrichMs={} stageWppPublishMs={} durationMs={}",
-                    args.syncRunId(), finalStatus, m.objectsRead, m.commercialCandidates,
-                    m.potentialNicheCandidates, m.scanStateSkipped, m.fastRejectedNoOfficialChannel,
-                    m.nicheConfirmed, m.directPhone, m.recoveredPhone, m.directInstagram, m.recoveredInstagram,
-                    m.websiteCandidates, m.websiteFetchSuccess, m.websiteFetchFailed, m.websiteTimeout,
-                    m.website403, m.website404, m.website429,
-                    m.contactPagesFetched, m.contactHubCandidates, m.contactHubSuccess,
-                    m.sameAsLinksFound, m.socialCandidates, m.socialSuccess,
-                    m.discardedNiche, m.discardedNoPhone, m.discardedNoInstagram, m.discardedNotOnWhatsApp,
-                    m.discardedNoOfficialChannel,
-                    m.discardedDuplicateSource, m.discardedDuplicatePhone, m.discardedDuplicateInstagram,
-                    m.whatsappChecks, m.whatsappVerified, m.qualifiedSaved, args.targetValid(), m.datasetExhausted,
-                    m.stageLoadScanStateMs, m.stageReadClassifyMs, m.stageEnrichMs, m.stageWppPublishMs, m.durationMs);
+            logSummary(finalStatus, m);
             return m;
         } catch (WhatsAppInfrastructureException e) {
             try (Connection con = BatchDataSource.open()) {
-                RunContext ctx = loadRunContext(con);
+                RunContext rc = loadRunContext(con);
                 con.setAutoCommit(false);
                 try {
-                    finalizeRun(con, ctx, "FAILED", m, e.getCode() + ": " + e.getMessage());
-                    updateTargetOutcome(con, ctx, "FAILED", m, e.getCode() + ": " + e.getMessage());
+                    finalizeRun(con, rc, "FAILED", m, e.getCode() + ": " + e.getMessage());
+                    updateTargetOutcome(con, rc, "FAILED", m, e.getCode() + ": " + e.getMessage());
                     con.commit();
                 } catch (Exception ex) {
                     con.rollback();
@@ -350,11 +392,11 @@ public class OsmSyncJob {
         } catch (Exception e) {
             try (Connection con = BatchDataSource.open()) {
                 try {
-                    RunContext ctx = loadRunContext(con);
+                    RunContext rc = loadRunContext(con);
                     con.setAutoCommit(false);
                     try {
-                        finalizeRun(con, ctx, "FAILED", m, safe(e.getMessage()));
-                        updateTargetOutcome(con, ctx, "FAILED", m, safe(e.getMessage()));
+                        finalizeRun(con, rc, "FAILED", m, safe(e.getMessage()));
+                        updateTargetOutcome(con, rc, "FAILED", m, safe(e.getMessage()));
                         con.commit();
                     } catch (Exception ex) {
                         con.rollback();
@@ -365,50 +407,64 @@ public class OsmSyncJob {
         }
     }
 
-    private List<EnrichedItem> enrichParallel(OfficialContactEnrichmentService enrichment,
-                                             List<TieredCandidate> tiered, int workers) {
-        if (tiered.isEmpty()) return List.of();
-        ExecutorService pool = Executors.newFixedThreadPool(workers);
-        try {
-            List<CompletableFuture<EnrichedItem>> futures = new ArrayList<>(tiered.size());
-            for (TieredCandidate t : tiered) {
-                futures.add(CompletableFuture.supplyAsync(() -> {
-                    OfficialContactEnrichmentService.EnrichedContact e = enrichment.enrich(t.candidate());
-                    return new EnrichedItem(t, e);
-                }, pool));
-            }
-            List<EnrichedItem> out = new ArrayList<>(tiered.size());
-            for (CompletableFuture<EnrichedItem> f : futures) {
-                try {
-                    out.add(f.get(120, TimeUnit.SECONDS));
-                } catch (Exception e) {
-                    // Falha de enrichment isolada nao derruba o run; item sem contatos sera descartado.
-                    try {
-                        TieredCandidate t = tiered.get(out.size());
-                        out.add(new EnrichedItem(t, new OfficialContactEnrichmentService.EnrichedContact(
-                                null, null, null, "", false, false)));
-                    } catch (Exception ignored) {}
-                }
-            }
-            return out;
-        } finally {
-            pool.shutdown();
-            try {
-                pool.awaitTermination(60, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
+    private static OfficialContactEnrichmentService enrichmentRef(OfficialContactEnrichmentService e) {
+        return e;
     }
 
-    private void flushScanBatchIfNeeded(Connection con, OsmCandidateScanStateRepository repo,
-                                       RunContext ctx, List<PendingScan> pending, boolean force) throws Exception {
+    private static OfficialWebsiteFetcher fetcherRef(OfficialWebsiteFetcher f) {
+        return f;
+    }
+
+    /** Enrichment por chunk: timeout individual, candidato explicito no resultado. */
+    List<EnrichmentResult> enrichChunk(OfficialContactEnrichmentService enrichment,
+                                       List<TieredCandidate> chunk, ExecutorService pool,
+                                       long candidateTimeoutMs, OsmSyncMetrics m) {
+        List<CompletableFuture<EnrichmentResult>> futures = new ArrayList<>(chunk.size());
+        for (TieredCandidate t : chunk) {
+            CompletableFuture<EnrichmentResult> f = CompletableFuture.supplyAsync(() -> {
+                try {
+                    OfficialContactEnrichmentService.EnrichedContact e = enrichment.enrich(t.candidate());
+                    return new EnrichmentResult(t, e, null, false);
+                } catch (Throwable th) {
+                    return new EnrichmentResult(t, null, th, false);
+                }
+            }, pool);
+            // Timeout por candidato: nao derruba run, nao cacheia negativo definitivo.
+            CompletableFuture<EnrichmentResult> withTimeout = f.orTimeout(candidateTimeoutMs, TimeUnit.MILLISECONDS)
+                    .exceptionally(ex -> {
+                        Throwable cause = ex instanceof java.util.concurrent.TimeoutException ? ex
+                                : ex.getCause() != null ? ex.getCause() : ex;
+                        boolean timedOut = cause instanceof java.util.concurrent.TimeoutException
+                                || (ex.toString() != null && ex.toString().contains("TimeoutException"));
+                        return new EnrichmentResult(t, null, cause, timedOut);
+                    });
+            futures.add(withTimeout);
+        }
+        List<EnrichmentResult> out = new ArrayList<>(chunk.size());
+        for (CompletableFuture<EnrichmentResult> f : futures) {
+            try {
+                out.add(f.join());
+            } catch (Exception e) {
+                // Jamais mapear por out.size(): fallback preserva ordem do chunk via indice.
+                int idx = out.size();
+                TieredCandidate t = idx < chunk.size() ? chunk.get(idx) : null;
+                if (t != null) out.add(new EnrichmentResult(t, null, e, false));
+            }
+        }
+        return out;
+    }
+
+    /** Scan batch com conexao curta propria (commit/close por lote). */
+    void flushScanBatch(RunContext ctx, OsmCandidateScanStateRepository repo,
+                        List<PendingScan> pending, boolean force, OsmSyncMetrics m) throws Exception {
         if (pending.isEmpty()) return;
         if (!force && pending.size() < SCAN_BATCH_SIZE) return;
+        List<PendingScan> batch = new ArrayList<>(pending);
+        pending.clear();
         String sql = "INSERT INTO osm_candidate_scan_state "
                 + "(region_id, target_id, canonical_niche, osm_type, osm_id, source_timestamp, "
                 + "outcome, normalized_phone, normalized_instagram, last_checked_at, retry_after, details, pipeline_version) "
-                + "VALUES (?, ?, ?, ?, ?, CAST(? AS TIMESTAMPTZ), ?, ?, ?, NOW(), "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), "
                 + "CASE WHEN ? IN ('QUALIFIED') THEN NULL ELSE NOW() + INTERVAL '30 days' END, ?, ?) "
                 + "ON CONFLICT (region_id, canonical_niche, osm_type, osm_id) DO UPDATE SET "
                 + "target_id = EXCLUDED.target_id, source_timestamp = EXCLUDED.source_timestamp, "
@@ -417,27 +473,34 @@ public class OsmSyncJob {
                 + "retry_after = CASE WHEN EXCLUDED.outcome IN ('QUALIFIED') THEN NULL "
                 + "ELSE NOW() + INTERVAL '30 days' END, details = EXCLUDED.details, "
                 + "pipeline_version = EXCLUDED.pipeline_version";
-        try (PreparedStatement ps = con.prepareStatement(sql)) {
-            for (PendingScan p : pending) {
-                int i = 1;
-                ps.setLong(i++, args.regionId());
-                if (ctx.targetId() > 0) ps.setLong(i++, ctx.targetId());
-                else ps.setNull(i++, java.sql.Types.BIGINT);
-                ps.setString(i++, ctx.canonicalNiche());
-                ps.setString(i++, p.osmType());
-                ps.setLong(i++, p.osmId());
-                ps.setString(i++, p.sourceTimestamp());
-                ps.setString(i++, p.outcome());
-                ps.setString(i++, p.phone());
-                ps.setString(i++, p.ig());
-                ps.setString(i++, p.outcome());
-                ps.setString(i++, p.details() == null ? null : p.details().substring(0, Math.min(p.details().length(), 2000)));
-                ps.setString(i++, OsmCandidateScanStateRepository.PIPELINE_VERSION);
-                ps.addBatch();
+        try (Connection con = BatchDataSource.open()) {
+            con.setAutoCommit(false);
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                for (PendingScan p : batch) {
+                    int i = 1;
+                    ps.setLong(i++, args.regionId());
+                    if (ctx.targetId() > 0) ps.setLong(i++, ctx.targetId());
+                    else ps.setNull(i++, java.sql.Types.BIGINT);
+                    ps.setString(i++, ctx.canonicalNiche());
+                    ps.setString(i++, p.osmType());
+                    ps.setLong(i++, p.osmId());
+                    OsmSourceTimestamp.bindInstant(ps, i++, p.sourceTimestamp());
+                    ps.setString(i++, p.outcome());
+                    ps.setString(i++, p.phone());
+                    ps.setString(i++, p.ig());
+                    ps.setString(i++, p.outcome());
+                    ps.setString(i++, p.details() == null ? null : p.details().substring(0, Math.min(p.details().length(), 2000)));
+                    ps.setString(i++, OsmCandidateScanStateRepository.PIPELINE_VERSION);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
             }
-            ps.executeBatch();
+            con.commit();
         }
-        pending.clear();
+        if (m != null) {
+            m.scanStateBatchWrites++;
+            m.scanStateRowsWritten += batch.size();
+        }
     }
 
     /** Tier 1: phone+ig diretos. Tier 2: phone ou ig direto + website. Tier 3: website+outro canal. Tier 4: website. Tier 5: resto. */
@@ -464,7 +527,7 @@ public class OsmSyncJob {
         return false;
     }
 
-    private record RunContext(long targetId, String canonicalNiche) {}
+    record RunContext(long targetId, String canonicalNiche) {}
 
     private RunContext loadRunContext(Connection con) throws Exception {
         try (PreparedStatement ps = con.prepareStatement(
@@ -589,11 +652,40 @@ public class OsmSyncJob {
                 c.latitude(), c.longitude(), c.address(),
                 c.city(), c.state(), c.country(), c.countryCode(),
                 rawPhone, e.phone().normalized(), e.website(),
-                "@" + rawIg, rawIg, tagsJson, c.timestamp(),
+                "@" + rawIg, rawIg, tagsJson, c.sourceTimestamp(),
                 confirmation.evidenceType(),
                 "canonical=" + strategy.canonicalName() + ";detail=" + confirmation.evidenceDetails(),
                 e.phone().source(), e.phone().sourceUrl(),
                 e.instagram().source(), e.instagram().sourceUrl());
+    }
+
+    private void logSummary(String finalStatus, OsmSyncMetrics m) {
+        log.info("[osm-sync] sync_summary runId={} status={} objectsRead={} commercial={} potential={} "
+                        + "scanSkipped={} fastRejected={} confirmed={} "
+                        + "directPhone={} recoveredPhone={} directIg={} recoveredIg={} "
+                        + "websiteCand={} websiteOk={} websiteFail={} timeout={} http403={} http404={} http429={} "
+                        + "contactPages={} hubCand={} hubOk={} sameAs={} socialCand={} socialOk={} "
+                        + "discNiche={} discNoPhone={} discNoIg={} discNoWpp={} discNoChannel={} "
+                        + "dupSrc={} dupPhone={} dupIg={} "
+                        + "wppChecks={} wppVerified={} qualifiedSaved={}/{} exhausted={} "
+                        + "invalidTs={} techFail={} enrichTimeout={} chunks={} notScheduled={} "
+                        + "scanBatches={} scanRows={} "
+                        + "stageLoadMs={} stageReadMs={} stageEnrichMs={} stageWppPublishMs={} durationMs={}",
+                args.syncRunId(), finalStatus, m.objectsRead, m.commercialCandidates,
+                m.potentialNicheCandidates, m.scanStateSkipped, m.fastRejectedNoOfficialChannel,
+                m.nicheConfirmed, m.directPhone, m.recoveredPhone, m.directInstagram, m.recoveredInstagram,
+                m.websiteCandidates, m.websiteFetchSuccess, m.websiteFetchFailed, m.websiteTimeout,
+                m.website403, m.website404, m.website429,
+                m.contactPagesFetched, m.contactHubCandidates, m.contactHubSuccess,
+                m.sameAsLinksFound, m.socialCandidates, m.socialSuccess,
+                m.discardedNiche, m.discardedNoPhone, m.discardedNoInstagram, m.discardedNotOnWhatsApp,
+                m.discardedNoOfficialChannel,
+                m.discardedDuplicateSource, m.discardedDuplicatePhone, m.discardedDuplicateInstagram,
+                m.whatsappChecks, m.whatsappVerified, m.qualifiedSaved, args.targetValid(), m.datasetExhausted,
+                m.invalidSourceTimestamp, m.technicalEnrichmentFailures, m.enrichmentTimedOut,
+                m.enrichmentChunks, m.candidatesNotScheduledAfterTargetReached,
+                m.scanStateBatchWrites, m.scanStateRowsWritten,
+                m.stageLoadScanStateMs, m.stageReadClassifyMs, m.stageEnrichMs, m.stageWppPublishMs, m.durationMs);
     }
 
     private static String env(String... names) {
@@ -609,6 +701,16 @@ public class OsmSyncJob {
             String v = System.getenv(name);
             if (v == null || v.isBlank()) return def;
             return Integer.parseInt(v.trim());
+        } catch (Exception e) {
+            return def;
+        }
+    }
+
+    private static long envLong(String name, long def) {
+        try {
+            String v = System.getenv(name);
+            if (v == null || v.isBlank()) return def;
+            return Long.parseLong(v.trim());
         } catch (Exception e) {
             return def;
         }

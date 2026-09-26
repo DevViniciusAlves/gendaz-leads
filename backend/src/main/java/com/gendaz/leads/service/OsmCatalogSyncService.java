@@ -444,6 +444,20 @@ public class OsmCatalogSyncService {
         return syncRunRepository.findById(id);
     }
 
+    public Optional<OsmSyncRun> getSyncRunByRequestKey(String requestKey, String requesterEmail) {
+        if (requestKey == null || requestKey.isBlank()) return Optional.empty();
+        Optional<OsmSyncRun> found = syncRunRepository.findByRequestKey(requestKey.trim());
+        if (found.isEmpty()) return Optional.empty();
+        OsmSyncRun run = found.get();
+        // Escopo ao usuario autenticado quando aplicavel.
+        if (requesterEmail != null && run.getRequestedByUser() != null
+                && run.getRequestedByUser().getEmail() != null
+                && !run.getRequestedByUser().getEmail().equalsIgnoreCase(requesterEmail)) {
+            return Optional.empty();
+        }
+        return found;
+    }
+
     public List<OsmSyncRun> getSyncRunsForRegion(Long regionId) {
         return syncRunRepository.findByRegionIdOrderByCreatedAtDesc(regionId);
     }

@@ -140,6 +140,15 @@ public class OsmCatalogController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    @GetMapping("/sync/by-request-key/{requestKey}")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<OsmSyncRunResponse> getSyncRunByRequestKey(@PathVariable String requestKey) {
+        String email = securityService.currentEmail();
+        return syncService.getSyncRunByRequestKey(requestKey, email)
+                .map(run -> ResponseEntity.ok(OsmSyncRunResponse.from(run)))
+                .orElse(ResponseEntity.notFound().build());
+    }
+
     @GetMapping("/regions/{regionId}/sync-runs")
     public ResponseEntity<List<OsmSyncRunResponse>> getSyncRunsForRegion(@PathVariable Long regionId) {
         List<OsmSyncRunResponse> runs = syncService.getSyncRunsForRegion(regionId).stream()

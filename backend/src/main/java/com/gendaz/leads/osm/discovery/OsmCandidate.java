@@ -13,7 +13,7 @@ public record OsmCandidate(
         JsonNode tags,
         double latitude,
         double longitude,
-        String timestamp,
+        java.time.Instant sourceTimestamp,
         String address,
         String city,
         String state,
