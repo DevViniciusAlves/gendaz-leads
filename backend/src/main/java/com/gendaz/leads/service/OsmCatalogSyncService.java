@@ -42,7 +42,7 @@ public class OsmCatalogSyncService {
     private final GitHubOsmSyncDispatcher githubDispatcher;
     private final OsmCatalogSyncStatusService syncStatusService;
     private final EntityManager entityManager;
-    private final OsmCatalogTargetRepository targetRepositoryOrNull;
+    private final OsmCatalogTargetRepository targetRepository;
 
     @Value("${app.osm-catalog.enabled:true}")
     private boolean catalogEnabled;
@@ -54,21 +54,8 @@ public class OsmCatalogSyncService {
             BrazilGeofabrikRegionResolver geofabrikResolver,
             GitHubOsmSyncDispatcher githubDispatcher,
             OsmCatalogSyncStatusService syncStatusService,
-            EntityManager entityManager
-    ) {
-        this(regionRepository, syncRunRepository, osmProvider, geofabrikResolver,
-                githubDispatcher, syncStatusService, entityManager, null);
-    }
-
-    public OsmCatalogSyncService(
-            OsmCatalogRegionRepository regionRepository,
-            OsmSyncRunRepository syncRunRepository,
-            OpenStreetMapProvider osmProvider,
-            BrazilGeofabrikRegionResolver geofabrikResolver,
-            GitHubOsmSyncDispatcher githubDispatcher,
-            OsmCatalogSyncStatusService syncStatusService,
             EntityManager entityManager,
-            OsmCatalogTargetRepository targetRepositoryOrNull
+            OsmCatalogTargetRepository targetRepository
     ) {
         this.regionRepository = regionRepository;
         this.syncRunRepository = syncRunRepository;
@@ -77,7 +64,7 @@ public class OsmCatalogSyncService {
         this.githubDispatcher = githubDispatcher;
         this.syncStatusService = syncStatusService;
         this.entityManager = entityManager;
-        this.targetRepositoryOrNull = targetRepositoryOrNull;
+        this.targetRepository = targetRepository;
     }
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -307,33 +294,31 @@ public class OsmCatalogSyncService {
         }
 
         OsmCatalogTarget target = null;
-        if (targetRepositoryOrNull != null) {
-            String canonical = strategy.canonicalName();
-            target = targetRepositoryOrNull.findByRegionIdAndCanonicalNiche(region.getId(), canonical)
-                    .orElseGet(() -> {
-                        OsmCatalogTarget t = OsmCatalogTarget.builder()
-                                .region(region)
-                                .requestedNiche(niche.trim())
-                                .canonicalNiche(canonical)
-                                .targetValid(50)
-                                .qualifiedCount(0)
-                                .availableNewCount(0)
-                                .poolStatus("EMPTY")
-                                .build();
-                        try {
-                            return targetRepositoryOrNull.saveAndFlush(t);
-                        } catch (DataIntegrityViolationException race) {
-                            entityManager.clear();
-                            return targetRepositoryOrNull.findByRegionIdAndCanonicalNiche(region.getId(), canonical)
-                                    .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
-                                            "Já existe uma sincronização em andamento para este target."));
-                        }
-                    });
-            Optional<OsmSyncRun> activeTarget = syncRunRepository.findActiveByTargetId(target.getId(), activeStatuses);
-            if (activeTarget.isPresent()) {
-                throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
-                        "Já existe uma sincronização em andamento para este target.");
-            }
+        String canonical = strategy.canonicalName();
+        target = targetRepository.findByRegionIdAndCanonicalNiche(region.getId(), canonical)
+                .orElseGet(() -> {
+                    OsmCatalogTarget t = OsmCatalogTarget.builder()
+                            .region(region)
+                            .requestedNiche(niche.trim())
+                            .canonicalNiche(canonical)
+                            .targetValid(50)
+                            .qualifiedCount(0)
+                            .availableNewCount(0)
+                            .poolStatus("EMPTY")
+                            .build();
+                    try {
+                        return targetRepository.saveAndFlush(t);
+                    } catch (DataIntegrityViolationException race) {
+                        entityManager.clear();
+                        return targetRepository.findByRegionIdAndCanonicalNiche(region.getId(), canonical)
+                                .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
+                                        "Já existe uma sincronização em andamento para este target."));
+                    }
+                });
+        Optional<OsmSyncRun> activeTarget = syncRunRepository.findActiveByTargetId(target.getId(), activeStatuses);
+        if (activeTarget.isPresent()) {
+            throw new ApiException(HttpStatus.CONFLICT, "OSM_SYNC_ALREADY_RUNNING",
+                    "Já existe uma sincronização em andamento para este target.");
         }
 
         OsmSyncRun syncRun = new OsmSyncRun();
@@ -356,11 +341,9 @@ public class OsmCatalogSyncService {
         region.setLastError(null);
         region.setLastAttemptAt(Instant.now());
         regionRepository.save(region);
-        if (target != null) {
-            target.setLastError(null);
-            target.setLastAttemptAt(Instant.now());
-            targetRepositoryOrNull.save(target);
-        }
+        target.setLastError(null);
+        target.setLastAttemptAt(Instant.now());
+        targetRepository.save(target);
 
         return syncRun;
     }

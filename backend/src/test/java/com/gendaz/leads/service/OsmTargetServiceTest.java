@@ -76,8 +76,10 @@ class OsmTargetServiceTest {
         when(syncRunRepository.findActiveByRegionId(eq(2L), anyList())).thenReturn(Optional.empty());
         when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        OsmSyncRun run = service.requestTargetResync(10L, new User(), null);
+        OsmTargetService.SyncRequestResult result = service.requestTargetResync(10L, new User(), null);
+        OsmSyncRun run = result.run();
 
+        assertTrue(result.newlyCreated());
         assertEquals("QUEUED", run.getStatus());
         assertEquals(Integer.valueOf(50), run.getTargetValid());
         assertEquals(10L, run.getTarget().getId());
@@ -91,8 +93,10 @@ class OsmTargetServiceTest {
         when(targetRepository.findById(10L)).thenReturn(Optional.of(target(cuiaba())));
         when(syncRunRepository.findByRequestKey("abc-12345")).thenReturn(Optional.of(existing));
 
-        OsmSyncRun run = service.requestTargetResync(10L, new User(), "abc-12345");
+        OsmTargetService.SyncRequestResult result = service.requestTargetResync(10L, new User(), "abc-12345");
+        OsmSyncRun run = result.run();
 
+        assertFalse(result.newlyCreated());
         assertEquals(99L, run.getId());
         verify(syncRunRepository, never()).saveAndFlush(any());
         verify(osmProvider, never()).resolveScope(any(), any());
@@ -124,8 +128,10 @@ class OsmTargetServiceTest {
         when(syncRunRepository.findActiveByRegionId(eq(2L), anyList())).thenReturn(Optional.empty());
         when(syncRunRepository.saveAndFlush(any(OsmSyncRun.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        OsmSyncRun run = service.requestNewTargetSync("Cuiabá", "Brasil", "barbearia", new User(), null);
+        OsmTargetService.SyncRequestResult result = service.requestNewTargetSync("Cuiabá", "Brasil", "barbearia", new User(), null);
+        OsmSyncRun run = result.run();
 
+        assertTrue(result.newlyCreated());
         assertEquals("QUEUED", run.getStatus());
         verify(osmProvider, never()).resolveScope(any(), any());
     }

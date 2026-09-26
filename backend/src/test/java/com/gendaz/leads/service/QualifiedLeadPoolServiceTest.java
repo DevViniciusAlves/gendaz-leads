@@ -45,8 +45,8 @@ class QualifiedLeadPoolServiceTest {
 
     @Test
     void resolveTargetThrowsWhenTargetMissing() {
-        when(regionRepository.findByNormalizedCityAndCountryCodeAndCatalogStatus(
-                anyString(), anyString(), eq("READY"))).thenReturn(List.of(region()));
+        when(regionRepository.findByNormalizedCityAndCountryCode(
+                anyString(), anyString())).thenReturn(List.of(region()));
         when(targetRepository.findByRegionIdAndCanonicalNiche(eq(2L), anyString()))
                 .thenReturn(Optional.empty());
 
@@ -62,8 +62,8 @@ class QualifiedLeadPoolServiceTest {
         t.setId(10L);
         t.setRegion(region());
         t.setCanonicalNiche("nails");
-        when(regionRepository.findByNormalizedCityAndCountryCodeAndCatalogStatus(
-                anyString(), anyString(), eq("READY"))).thenReturn(List.of(region()));
+        when(regionRepository.findByNormalizedCityAndCountryCode(
+                anyString(), anyString())).thenReturn(List.of(region()));
         when(targetRepository.findByRegionIdAndCanonicalNiche(eq(2L), eq("nails")))
                 .thenReturn(Optional.of(t));
 

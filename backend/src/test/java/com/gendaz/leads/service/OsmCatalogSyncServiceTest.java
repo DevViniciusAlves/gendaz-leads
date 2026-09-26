@@ -1,10 +1,12 @@
 package com.gendaz.leads.service;
 
 import com.gendaz.leads.entity.OsmCatalogRegion;
+import com.gendaz.leads.entity.OsmCatalogTarget;
 import com.gendaz.leads.entity.OsmSyncRun;
 import com.gendaz.leads.entity.User;
 import com.gendaz.leads.exception.ApiException;
 import com.gendaz.leads.repository.OsmCatalogRegionRepository;
+import com.gendaz.leads.repository.OsmCatalogTargetRepository;
 import com.gendaz.leads.repository.OsmSyncRunRepository;
 import com.gendaz.leads.service.provider.BrazilGeofabrikRegionResolver;
 import com.gendaz.leads.service.provider.GeoScope;
@@ -18,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.Mockito;
 import org.springframework.http.HttpStatus;
 
 import java.util.List;
@@ -44,6 +47,8 @@ class OsmCatalogSyncServiceTest {
     private OsmCatalogSyncStatusService syncStatusService;
     @Mock
     private EntityManager entityManager;
+    @Mock
+    private OsmCatalogTargetRepository targetRepository;
 
     private OsmCatalogSyncService service;
 
@@ -56,12 +61,19 @@ class OsmCatalogSyncServiceTest {
                 geofabrikResolver,
                 githubDispatcher,
                 syncStatusService,
-                entityManager
+                entityManager,
+                targetRepository
         );
         // Enable catalog for tests
         var field = OsmCatalogSyncService.class.getDeclaredField("catalogEnabled");
         field.setAccessible(true);
         field.set(service, true);
+
+        // Default: no existing target, return new target on save (lenient to avoid unnecessary stubbing errors)
+        Mockito.lenient().when(targetRepository.findByRegionIdAndCanonicalNiche(anyLong(), anyString()))
+                .thenReturn(Optional.empty());
+        Mockito.lenient().when(targetRepository.saveAndFlush(any(OsmCatalogTarget.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
     }
 
     @Test

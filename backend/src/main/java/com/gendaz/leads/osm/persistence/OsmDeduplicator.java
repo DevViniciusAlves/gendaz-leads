@@ -11,6 +11,7 @@ import java.util.Set;
  * Dedup antes de contar o lead: current run + osm_places/pool + leads globais.
  * Chaves: osm_type+osm_id, normalized_phone, normalized_instagram.
  * Mesmo way/123 com telefone/Instagram diferentes NAO consome outro slot.
+ * Dedup por target (cidade+nicho): so considera duplicados dentro do mesmo target.
  */
 public class OsmDeduplicator {
 
@@ -24,11 +25,29 @@ public class OsmDeduplicator {
     private final Set<String> leadInstagrams = new HashSet<>();
     private final Set<String> leadSources = new HashSet<>();
 
-    public void loadPool(Connection con, long regionId) throws SQLException {
-        try (PreparedStatement ps = con.prepareStatement(
-                "SELECT osm_type, osm_id, normalized_phone, normalized_instagram FROM osm_places "
-                        + "WHERE region_id = ? AND active = TRUE AND qualified = TRUE")) {
+    public void loadPool(Connection con, long regionId, Long targetId) throws SQLException {
+        String sql;
+        if (targetId != null && targetId > 0) {
+            // N:N: so carrega places que ja tem membership neste target
+            sql = """
+                    SELECT p.osm_type, p.osm_id, p.normalized_phone, p.normalized_instagram
+                    FROM osm_places p
+                    JOIN osm_place_niches n ON n.place_id = p.id
+                    WHERE p.region_id = ? AND n.target_id = ? AND n.active = TRUE
+                      AND p.active = TRUE AND p.qualified = TRUE
+                    """;
+        } else {
+            // Legado: carrega todos os places qualificados da regiao
+            sql = """
+                    SELECT osm_type, osm_id, normalized_phone, normalized_instagram FROM osm_places
+                    WHERE region_id = ? AND active = TRUE AND qualified = TRUE
+                    """;
+        }
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
             ps.setLong(1, regionId);
+            if (targetId != null && targetId > 0) {
+                ps.setLong(2, targetId);
+            }
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     poolSources.add(key(rs.getString(1), rs.getLong(2)));
@@ -84,8 +103,8 @@ public class OsmDeduplicator {
                         leadInstagrams.contains(instagram) ? DuplicateKind.GLOBAL : DuplicateKind.INSTAGRAM);
             }
         }
-        // source global openstreetmap osmType/osmId
-        String globalSrc = "openstreetmap_" + osmType + osmId;
+        // source global openstreetmap osmType/osmId (canonical format)
+        String globalSrc = "openstreetmap_" + osmType + "/" + osmId;
         if (leadSources.contains(globalSrc)) {
             return new DuplicateResult(true, DuplicateKind.GLOBAL);
         }

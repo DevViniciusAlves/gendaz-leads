@@ -149,7 +149,8 @@ public class OsmQualifiedPoolRepository {
                         + "AND p.instagram_validated = TRUE "
                         + "AND NOT EXISTS (SELECT 1 FROM leads l WHERE "
                         + "l.normalized_phone = p.normalized_phone "
-                        + "OR l.normalized_instagram = p.normalized_instagram)")) {
+                        + "OR l.normalized_instagram = p.normalized_instagram "
+                        + "OR l.normalized_source_id = 'openstreetmap_' || p.osm_type || '/' || p.osm_id)")) {
             ps.setLong(1, targetId);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();

@@ -65,6 +65,8 @@ public class OsmTargetService {
         this.entityManager = entityManager;
     }
 
+    public record SyncRequestResult(OsmSyncRun run, boolean newlyCreated) {}
+
     @Transactional(readOnly = true)
     public List<OsmCatalogTargetResponse> listTargets() {
         List<OsmCatalogTarget> targets = targetRepository.findAllByOrderByUpdatedAtDesc();
@@ -83,7 +85,7 @@ public class OsmTargetService {
     }
 
     @Transactional
-    public OsmSyncRun requestNewTargetSync(String city, String country, String niche, User requestedBy, String requestKey) {
+    public SyncRequestResult requestNewTargetSync(String city, String country, String niche, User requestedBy, String requestKey) {
         String countryCode = CountryCodeResolver.resolveToIso2(country);
         if (!"br".equalsIgnoreCase(countryCode)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "OSM_CATALOG_COUNTRY_NOT_SUPPORTED",
@@ -96,7 +98,9 @@ public class OsmTargetService {
         String key = normalizeKey(requestKey);
         if (key != null) {
             Optional<OsmSyncRun> existing = syncRunRepository.findByRequestKey(key);
-            if (existing.isPresent()) return existing.get();
+            if (existing.isPresent()) {
+                return new SyncRequestResult(existing.get(), false);
+            }
         }
 
         NicheMapper.NicheStrategy strategy = NicheMapper.resolve(niche);
@@ -117,11 +121,12 @@ public class OsmTargetService {
         }
 
         OsmCatalogTarget target = getOrCreateTarget(region, niche.trim(), strategy.canonicalName());
-        return createRunForTarget(target, requestedBy, key);
+        OsmSyncRun run = createRunForTarget(target, requestedBy, key);
+        return new SyncRequestResult(run, true);
     }
 
     @Transactional
-    public OsmSyncRun requestTargetResync(Long targetId, User requestedBy, String requestKey) {
+    public SyncRequestResult requestTargetResync(Long targetId, User requestedBy, String requestKey) {
         OsmCatalogTarget target = targetRepository.findById(targetId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "OSM_TARGET_NOT_FOUND",
                         "Sincronização não encontrada. Crie uma nova sincronização."));
@@ -133,10 +138,13 @@ public class OsmTargetService {
         String key = normalizeKey(requestKey);
         if (key != null) {
             Optional<OsmSyncRun> existing = syncRunRepository.findByRequestKey(key);
-            if (existing.isPresent()) return existing.get();
+            if (existing.isPresent()) {
+                return new SyncRequestResult(existing.get(), false);
+            }
         }
         // ZERO resolveScope(), ZERO Nominatim: usa target persistido.
-        return createRunForTarget(target, requestedBy, key);
+        OsmSyncRun run = createRunForTarget(target, requestedBy, key);
+        return new SyncRequestResult(run, true);
     }
 
     @Transactional

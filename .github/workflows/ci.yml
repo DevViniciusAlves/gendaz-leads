@@ -167,7 +167,15 @@ jobs:
           mvn -B -q compile -DskipTests
           mvn -B -q exec:java \
             -Dexec.mainClass=com.gendaz.leads.osm.batch.OsmFixtureVerifierMain \
-            -Dexec.args="/tmp/exported.geojsonseq --min-features 1"
+            -Dexec.args="/tmp/exported.geojsonseq"
+        env:
+          CITY: "Cuiabá"
+          STATE: "Mato Grosso"
+          COUNTRY_CODE: "br"
+          CANONICAL_NICHE: "nails"
+          TARGET_VALID: "50"
+          NICHE_STRATEGY_JSON: '{"canonicalName":"nails","structuredRules":[],"nameFallback":{"contextAnyOf":[],"aliases":[]}}'
+          INPUT_FILE: /tmp/exported.geojsonseq
 
       - name: Run boundary fixture pipeline (offline, no Nominatim, Java verifier)
         run: |
@@ -205,4 +213,12 @@ jobs:
           cd backend
           mvn -B -q exec:java \
             -Dexec.mainClass=com.gendaz.leads.osm.batch.OsmFixtureVerifierMain \
-            -Dexec.args="/tmp/boundary-city.geojsonseq --min-features 1"
+            -Dexec.args="--boundary /tmp/boundary.osm /tmp/boundary-city.geojsonseq"
+        env:
+          CITY: "Cuiabá"
+          STATE: "Mato Grosso"
+          COUNTRY_CODE: "br"
+          CANONICAL_NICHE: "nails"
+          TARGET_VALID: "50"
+          NICHE_STRATEGY_JSON: '{"canonicalName":"nails","structuredRules":[],"nameFallback":{"contextAnyOf":[],"aliases":[]}}'
+          INPUT_FILE: /tmp/boundary-city.geojsonseq

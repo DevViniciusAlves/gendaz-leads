@@ -69,7 +69,12 @@ public class Normalizer {
 
     public String normalizeSourceId(String source, String sourceId) {
         if (sourceId == null) return null;
-        return (source == null ? "src" : source.toLowerCase()) + "_" + sourceId.toLowerCase();
+        String s = (source == null ? "src" : source.toLowerCase());
+        // Canonical format for OpenStreetMap: openstreetmap_way/123, openstreetmap_node/456
+        if ("openstreetmap".equals(s) && sourceId.contains("/")) {
+            return s + "_" + sourceId.toLowerCase();
+        }
+        return s + "_" + sourceId.toLowerCase();
     }
 
     public String stripAccents(String input) {

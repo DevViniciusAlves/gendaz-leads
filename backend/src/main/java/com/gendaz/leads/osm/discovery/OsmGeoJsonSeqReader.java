@@ -85,21 +85,17 @@ public class OsmGeoJsonSeqReader implements Iterable<OsmCandidate>, AutoCloseabl
             return null;
         }
         JsonNode props = root.path("properties");
-        String osmType = textOrNull(props.get("type"));
-        // osmium export com --attributes=type,id grava type/id no properties.
-        long osmId = props.has("id") && props.get("id").canConvertToLong()
-                ? props.get("id").asLong() : -1;
-        if (osmType == null || osmId < 0) {
-            // Fallback: tenta ler de properties.@type/@id (alguns exports).
-            osmType = textOrNull(props.get("@type"));
-            if (props.has("@id") && props.get("@id").canConvertToLong()) {
-                osmId = props.get("@id").asLong();
-            }
-        }
+        if (!props.isObject()) return null;
+
+        // Formato real do `osmium export`: @type/@id numerico + tags FLAT em properties.
+        // (com --attributes=type,id,timestamp o osmium tambem pode emitir type/id.)
+        String osmType = textOrNull(props.get("@type"));
+        if (osmType == null) osmType = textOrNull(props.get("type"));
+        long osmId = longOrNeg(props.get("@id"));
+        if (osmId < 0) osmId = longOrNeg(props.get("id"));
         if (osmType == null || osmId < 0) return null;
 
-        JsonNode tags = props.has("tags") && props.get("tags").isObject()
-                ? props.get("tags") : JSON.createObjectNode();
+        JsonNode tags = extractTags(props);
         String timestamp = textOrNull(props.get("@timestamp"));
         if (timestamp == null) timestamp = textOrNull(props.get("timestamp"));
 
@@ -163,6 +159,53 @@ public class OsmGeoJsonSeqReader implements Iterable<OsmCandidate>, AutoCloseabl
         if (n == null || n.isNull()) return null;
         String s = n.asText();
         return s == null || s.isBlank() ? null : s.trim();
+    }
+
+    private static long longOrNeg(JsonNode n) {
+        if (n == null || n.isNull()) return -1;
+        if (n.canConvertToLong()) return n.asLong();
+        // Tolerancia: "@id": "node/123".
+        String s = n.asText();
+        if (s == null) return -1;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)\\s*$").matcher(s.trim());
+        if (m.find()) {
+            try {
+                return Long.parseLong(m.group(1));
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    private static final java.util.Set<String> META_KEYS = java.util.Set.of(
+            "@type", "@id", "@timestamp", "@version", "@changeset",
+            "type", "id", "timestamp", "version", "changeset");
+
+    /** Tags flat em properties + merge de eventual objeto "tags" aninhado. */
+    static com.fasterxml.jackson.databind.node.ObjectNode extractTags(JsonNode props) {
+        com.fasterxml.jackson.databind.node.ObjectNode tags = JSON.createObjectNode();
+        java.util.Iterator<java.util.Map.Entry<String, JsonNode>> fields = props.fields();
+        while (fields.hasNext()) {
+            java.util.Map.Entry<String, JsonNode> e = fields.next();
+            if (META_KEYS.contains(e.getKey())) continue;
+            if (e.getKey().equals("tags") && e.getValue() != null && e.getValue().isObject()) continue;
+            JsonNode v = e.getValue();
+            if (v != null && v.isValueNode()) {
+                tags.put(e.getKey(), v.asText());
+            }
+        }
+        JsonNode nested = props.get("tags");
+        if (nested != null && nested.isObject()) {
+            java.util.Iterator<java.util.Map.Entry<String, JsonNode>> nf = nested.fields();
+            while (nf.hasNext()) {
+                java.util.Map.Entry<String, JsonNode> e = nf.next();
+                if (!tags.has(e.getKey()) && e.getValue() != null && e.getValue().isValueNode()) {
+                    tags.put(e.getKey(), e.getValue().asText());
+                }
+            }
+        }
+        return tags;
     }
 
     static String normalizeName(String name) {

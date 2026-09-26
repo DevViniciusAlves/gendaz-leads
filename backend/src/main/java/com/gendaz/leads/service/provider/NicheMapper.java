@@ -1237,9 +1237,11 @@ public final class NicheMapper {
         if (containsAnyAlias(normalizedName, strategy)) {
             return true;
         }
-        // Objeto comercial generico sem evidencia: potencial para nao matar cedo,
-        // a confirmacao rigorosa acontece depois do enrichment.
-        return hasAnyCommercialTag(tags);
+        // Objeto comercial generico sem evidencia de contexto do nicho: NAO e potencial.
+        // Isso evita que restaurant/hotel/pharmacy entrem como potential para Nails.
+        // So considera potencial se houver tag comercial relevante para o nicho
+        // (ja verificado acima via fallback contextAnyOf).
+        return false;
     }
 
     public static NicheConfirmation confirm(NicheStrategy strategy, JsonNode tags, String officialText) {

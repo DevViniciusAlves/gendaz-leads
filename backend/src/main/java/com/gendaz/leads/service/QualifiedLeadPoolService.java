@@ -60,17 +60,17 @@ public class QualifiedLeadPoolService {
     public ResolvedTarget resolveTarget(String niche, String city, String country) {
         String countryCode = CountryCodeResolver.resolveToIso2(country);
         String normalizedCity = normalizeForCompare(city);
-        List<OsmCatalogRegion> readyRegions = regionRepository
-                .findByNormalizedCityAndCountryCodeAndCatalogStatus(normalizedCity, countryCode, "READY");
-        if (readyRegions.isEmpty()) {
+        List<OsmCatalogRegion> regions = regionRepository
+                .findByNormalizedCityAndCountryCode(normalizedCity, countryCode);
+        if (regions.isEmpty()) {
             throw new IllegalArgumentException(
                     "OSM_CATALOG_NOT_READY: O catálogo OSM desta cidade ainda não foi sincronizado. Sincronize a cidade antes de gerar leads.");
         }
-        if (readyRegions.size() > 1) {
+        if (regions.size() > 1) {
             throw new IllegalArgumentException(
                     "OSM_CATALOG_LOCATION_AMBIGUOUS: Há mais de uma cidade sincronizada com este nome. Informe uma localização mais específica.");
         }
-        OsmCatalogRegion region = readyRegions.get(0);
+        OsmCatalogRegion region = regions.get(0);
         String canonical = NicheMapper.resolve(niche).canonicalName();
         OsmCatalogTarget target = targetRepository.findByRegionIdAndCanonicalNiche(region.getId(), canonical)
                 .orElseThrow(() -> new IllegalArgumentException(

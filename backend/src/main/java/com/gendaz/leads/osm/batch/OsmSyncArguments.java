@@ -31,17 +31,29 @@ public record OsmSyncArguments(
                 m.put(a.substring(2).replace('-', '_'), "true");
             }
         }
+        // Allow override via environment variables (for city/state with spaces)
+        String envCity = System.getenv("CITY");
+        String envState = System.getenv("STATE");
+        String envCountryCode = System.getenv("COUNTRY_CODE");
+        String envCanonicalNiche = System.getenv("CANONICAL_NICHE");
+        String envTargetValid = System.getenv("TARGET_VALID");
+        String envNicheStrategyJson = System.getenv("NICHE_STRATEGY_JSON");
+        String envInput = System.getenv("INPUT_FILE");
+        String envSyncRunId = System.getenv("SYNC_RUN_ID");
+        String envRegionId = System.getenv("REGION_ID");
+        String envTargetId = System.getenv("TARGET_ID");
+
         // Aliases vindos do workflow Python legado.
-        long syncRunId = parseLong(first(m, "sync_run_id", "sync_run"), "sync-run-id");
-        long regionId = parseLong(first(m, "region_id", "region"), "region-id");
-        long targetId = parseLongOpt(first(m, "target_id", "target"));
-        String city = first(m, "city", null);
-        String state = first(m, "state", null);
-        String countryCode = first(m, "country_code", "country");
-        String canonical = first(m, "canonical_niche", "canonical");
-        int targetValid = (int) parseLongOptDefault(first(m, "target_valid", "target"), 50L);
-        String strategyJson = first(m, "niche_strategy_json", "strategy");
-        String input = first(m, "input", null);
+        long syncRunId = parseLong(first(m, "sync_run_id", "sync_run", envSyncRunId), "sync-run-id");
+        long regionId = parseLong(first(m, "region_id", "region", envRegionId), "region-id");
+        long targetId = parseLongOpt(first(m, "target_id", "target", envTargetId));
+        String city = first(m, "city", envCity);
+        String state = first(m, "state", envState);
+        String countryCode = first(m, "country_code", "country", envCountryCode);
+        String canonical = first(m, "canonical_niche", "canonical", envCanonicalNiche);
+        int targetValid = (int) parseLongOptDefault(first(m, "target_valid", "target", envTargetValid), 50L);
+        String strategyJson = first(m, "niche_strategy_json", "strategy", envNicheStrategyJson);
+        String input = first(m, "input", envInput);
         boolean dryRun = Boolean.parseBoolean(m.getOrDefault("dry_run", "false"));
         if (city == null || canonical == null || input == null) {
             throw new IllegalArgumentException(
@@ -57,7 +69,7 @@ public record OsmSyncArguments(
 
     private static String first(Map<String, String> m, String... keys) {
         for (String k : keys) {
-            if (m.containsKey(k)) return m.get(k);
+            if (k != null && m.containsKey(k)) return m.get(k);
         }
         return null;
     }

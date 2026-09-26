@@ -340,7 +340,18 @@ jobs:
           echo "[osm-sync] java_batch_start"
           mvn -B -q exec:java \
             -Dexec.mainClass=com.gendaz.leads.osm.batch.OsmSyncBatchMain \
-            -Dexec.args="--sync-run-id $SYNC_RUN_ID --region-id $REGION_ID --target-id ${TARGET_ID:-0} --city $CITY --state $STATE --country-code $COUNTRY_CODE --canonical-niche $CANONICAL_NICHE --target-valid $TARGET_VALID --niche-strategy-json $NICHE_STRATEGY_JSON --input ../city-commercial.geojsonseq"
+            -Dexec.args="--sync-run-id $SYNC_RUN_ID --region-id $REGION_ID --target-id ${TARGET_ID:-0} --country-code $COUNTRY_CODE --canonical-niche $CANONICAL_NICHE --target-valid $TARGET_VALID --niche-strategy-json '$NICHE_STRATEGY_JSON' --input ../city-commercial.geojsonseq"
+        env:
+          CITY: ${{ github.event.inputs.city }}
+          STATE: ${{ github.event.inputs.state }}
+          COUNTRY_CODE: ${{ github.event.inputs.country_code }}
+          CANONICAL_NICHE: ${{ github.event.inputs.canonical_niche }}
+          TARGET_VALID: ${{ github.event.inputs.target_valid }}
+          NICHE_STRATEGY_JSON: ${{ github.event.inputs.niche_strategy_json }}
+          INPUT_FILE: ../city-commercial.geojsonseq
+          SYNC_RUN_ID: ${{ github.event.inputs.sync_run_id }}
+          REGION_ID: ${{ github.event.inputs.region_id }}
+          TARGET_ID: ${{ github.event.inputs.target_id }}
 
       - name: Update sync run SUCCESS
         if: success()

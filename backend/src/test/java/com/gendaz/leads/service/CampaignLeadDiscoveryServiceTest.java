@@ -19,6 +19,7 @@ import com.gendaz.leads.service.provider.LocalOsmCatalogProvider;
 import com.gendaz.leads.service.provider.OpenStreetMapProvider;
 import com.gendaz.leads.service.provider.SearchRegion;
 import com.gendaz.leads.service.WhatsAppRecipientNormalizer;
+import com.gendaz.leads.service.QualifiedLeadPoolService;
 import com.gendaz.leads.util.Normalizer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,6 +53,7 @@ class CampaignLeadDiscoveryServiceTest {
     @Mock WebsiteContactEnricher websiteContactEnricher;
     @Mock OpenStreetMapProvider osm;
     @Mock LocalOsmCatalogProvider localCatalogProvider;
+    @Mock QualifiedLeadPoolService qualifiedPoolService;
 
     private Normalizer normalizer;
     private WhatsAppRecipientNormalizer whatsAppRecipientNormalizer;
@@ -70,6 +72,9 @@ class CampaignLeadDiscoveryServiceTest {
                 deduplicationService, persistenceService, websiteContactEnricher, whatsAppRecipientNormalizer, normalizer, osm,
                 localCatalogProvider
         );
+
+        // Inject qualifiedPoolService via reflection
+        setField(service, "qualifiedPoolService", qualifiedPoolService);
 
         setField(service, "baseBudgetMs", 180000L);
         setField(service, "perLeadBudgetMs", 15000L);

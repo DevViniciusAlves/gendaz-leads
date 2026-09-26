@@ -66,7 +66,7 @@ public class OsmSyncJob {
             }
 
             OsmDeduplicator dedup = new OsmDeduplicator();
-            dedup.loadPool(con, args.regionId());
+            dedup.loadPool(con, args.regionId(), args.targetId());
             OsmCandidateScanStateRepository scanRepo = new OsmCandidateScanStateRepository();
             OsmQualifiedPoolRepository poolRepo = new OsmQualifiedPoolRepository();
             OfficialWebsiteFetcher fetcher = new OfficialWebsiteFetcher(2000, 8000, 500_000);
@@ -187,6 +187,9 @@ public class OsmSyncJob {
             String finalStatus = m.qualifiedSaved >= args.targetValid() ? "SUCCESS"
                     : m.qualifiedSaved > 0 ? "PARTIAL" : "EXHAUSTED";
 
+            // EXHAUSTED nao e erro tecnico - nao seta error_message
+            String finalError = "EXHAUSTED".equals(finalStatus) ? null : null;
+
             // Publicacao atomica.
             try (Connection con2 = BatchDataSource.open()) {
                 con2.setAutoCommit(false);
@@ -206,8 +209,8 @@ public class OsmSyncJob {
                     if (ctx.targetId() > 0) {
                         poolRepo.recalcTargetCounts(con2, ctx.targetId());
                     }
-                    finalizeRun(con2, ctx, finalStatus, m, null);
-                    updateTargetOutcome(con2, ctx, finalStatus, m, null);
+                    finalizeRun(con2, ctx, finalStatus, m, finalError);
+                    updateTargetOutcome(con2, ctx, finalStatus, m, finalError);
                     con2.commit();
                 } catch (Exception e) {
                     con2.rollback();
@@ -323,7 +326,7 @@ public class OsmSyncJob {
     private void updateTargetOutcome(Connection con, RunContext ctx, String status, OsmSyncMetrics m, String error)
             throws Exception {
         if (ctx.targetId() <= 0) return;
-        boolean success = "SUCCESS".equals(status) || "PARTIAL".equals(status);
+        boolean success = "SUCCESS".equals(status) || "PARTIAL".equals(status) || "EXHAUSTED".equals(status);
         try (PreparedStatement ps = con.prepareStatement(
                 "UPDATE osm_catalog_targets SET last_attempt_at=NOW(), updated_at=NOW(), "
                         + "last_success_at=CASE WHEN ? THEN NOW() ELSE last_success_at END, "

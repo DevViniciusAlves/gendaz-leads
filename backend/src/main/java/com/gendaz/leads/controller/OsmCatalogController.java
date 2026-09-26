@@ -63,7 +63,7 @@ public class OsmCatalogController {
                         "Não autenticado"
                 ));
 
-        OsmSyncRun syncRun = targetService.requestNewTargetSync(
+        OsmTargetService.SyncRequestResult result = targetService.requestNewTargetSync(
                 request.city(),
                 request.country(),
                 request.niche(),
@@ -71,11 +71,13 @@ public class OsmCatalogController {
                 idempotencyKey
         );
 
-        syncService.dispatchSync(syncRun);
+        if (result.newlyCreated()) {
+            syncService.dispatchSync(result.run());
+        }
 
         return ResponseEntity
                 .status(HttpStatus.ACCEPTED)
-                .body(OsmSyncResponse.from(syncRun));
+                .body(OsmSyncResponse.from(result.run()));
     }
 
     @PostMapping("/targets/{targetId}/sync")
@@ -93,13 +95,15 @@ public class OsmCatalogController {
                 ));
 
         // Resync one-click: usa target persistido, sem modal, sem niche no body.
-        OsmSyncRun syncRun = targetService.requestTargetResync(targetId, currentUser, idempotencyKey);
+        OsmTargetService.SyncRequestResult result = targetService.requestTargetResync(targetId, currentUser, idempotencyKey);
 
-        syncService.dispatchSync(syncRun);
+        if (result.newlyCreated()) {
+            syncService.dispatchSync(result.run());
+        }
 
         return ResponseEntity
                 .status(HttpStatus.ACCEPTED)
-                .body(OsmSyncResponse.from(syncRun));
+                .body(OsmSyncResponse.from(result.run()));
     }
 
     @PostMapping("/regions/{regionId}/sync")
