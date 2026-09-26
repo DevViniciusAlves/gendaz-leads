@@ -47,14 +47,25 @@ class OsmPostgresTimestampIT {
                 assertNotEquals("0", rs.getString(1));
             }
             Instant epoch = Instant.ofEpochSecond(1573317070L);
+            // Regiao scratch (FK de scan-state e places exige region real).
+            long regionId;
+            try (PreparedStatement ps = con.prepareStatement(
+                    "INSERT INTO osm_catalog_regions (city, normalized_city, state, normalized_state, "
+                            + "country, country_code, osm_type, osm_id, geofabrik_region) "
+                            + "VALUES ('IT City', 'it city', 'IT', 'it', 'Brasil', 'br', 'relation', 999991, "
+                            + "'centro-oeste') RETURNING id");
+                 ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                regionId = rs.getLong(1);
+            }
             // scan-state upsert tipado + read round-trip.
             OsmCandidateScanStateRepository scan = new OsmCandidateScanStateRepository();
             con.setAutoCommit(false);
-            scan.upsert(con, 999991L, null, "nails-it", "node", 369650222L, epoch,
+            scan.upsert(con, regionId, null, "nails-it", "node", 369650222L, epoch,
                     "NO_PHONE", null, null, "it");
             con.commit();
             OsmCandidateScanStateRepository.ScanEntry entry =
-                    scan.find(con, 999991L, "nails-it", "node", 369650222L);
+                    scan.find(con, regionId, "nails-it", "node", 369650222L);
             assertNotNull(entry);
             assertEquals(epoch, entry.sourceTimestamp());
             // pool upsert tipado.
@@ -65,12 +76,23 @@ class OsmPostgresTimestampIT {
                     null, "@it", "it", "{}", epoch, "TAG_STRONG", "canonical=nails-it;detail=it",
                     "OSM_DIRECT", null, "OSM_DIRECT", null);
             con.setAutoCommit(false);
-            long placeId = pool.upsertPlace(con, 999991L, lead);
+            long placeId = pool.upsertPlace(con, regionId, lead);
             assertTrue(placeId > 0);
             con.rollback();
             con.setAutoCommit(false);
             try (PreparedStatement del = con.prepareStatement(
-                    "DELETE FROM osm_candidate_scan_state WHERE region_id = 999991")) {
+                    "DELETE FROM osm_candidate_scan_state WHERE region_id = ?")) {
+                del.setLong(1, regionId);
+                del.executeUpdate();
+            }
+            try (PreparedStatement del = con.prepareStatement(
+                    "DELETE FROM osm_places WHERE region_id = ?")) {
+                del.setLong(1, regionId);
+                del.executeUpdate();
+            }
+            try (PreparedStatement del = con.prepareStatement(
+                    "DELETE FROM osm_catalog_regions WHERE id = ?")) {
+                del.setLong(1, regionId);
                 del.executeUpdate();
             }
             con.commit();
