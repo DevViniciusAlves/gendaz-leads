@@ -37,14 +37,27 @@ class OsmTarget50LogicTest {
         OsmCandidateScanStateRepository repo = new OsmCandidateScanStateRepository();
         OsmCandidateScanStateRepository.ScanEntry entry =
                 new OsmCandidateScanStateRepository.ScanEntry(
-                        "NO_PHONE", Instant.now().plusSeconds(3600), "2024-01-01T00:00:00Z");
+                        "NO_PHONE", Instant.now().plusSeconds(3600), "2024-01-01T00:00:00Z",
+                        OsmCandidateScanStateRepository.PIPELINE_VERSION);
         assertTrue(repo.shouldSkip(entry, "2024-01-01T00:00:00Z"));
         assertFalse(repo.shouldSkip(entry, "2024-02-01T00:00:00Z"));
         OsmCandidateScanStateRepository.ScanEntry expired =
                 new OsmCandidateScanStateRepository.ScanEntry(
-                        "NO_PHONE", Instant.now().minusSeconds(10), "2024-01-01T00:00:00Z");
+                        "NO_PHONE", Instant.now().minusSeconds(10), "2024-01-01T00:00:00Z",
+                        OsmCandidateScanStateRepository.PIPELINE_VERSION);
         assertFalse(repo.shouldSkip(expired, "2024-01-01T00:00:00Z"));
         assertTrue(repo.shouldSkip(
-                new OsmCandidateScanStateRepository.ScanEntry("QUALIFIED", null, null), "anything"));
+                new OsmCandidateScanStateRepository.ScanEntry("QUALIFIED", null, null,
+                        OsmCandidateScanStateRepository.PIPELINE_VERSION), "anything"));
+    }
+
+    @Test
+    void oldPipelineVersionNeverSkips() {
+        OsmCandidateScanStateRepository repo = new OsmCandidateScanStateRepository();
+        OsmCandidateScanStateRepository.ScanEntry old =
+                new OsmCandidateScanStateRepository.ScanEntry(
+                        "NO_PHONE", Instant.now().plusSeconds(3600), "2024-01-01T00:00:00Z",
+                        "java-osm-v1");
+        assertFalse(repo.shouldSkip(old, "2024-01-01T00:00:00Z"));
     }
 }

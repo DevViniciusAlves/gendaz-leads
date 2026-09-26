@@ -105,10 +105,15 @@ describe('OsmCatalog targets', () => {
       return null
     })
     await vi.advanceTimersByTimeAsync(6000)
-    await waitFor(() => expect(screen.getByText('Sucesso')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Concluído — 50 novos leads')).toBeInTheDocument())
   })
 
   it('polling PARTIAL/EXHAUSTED/FAILED exibe status sem confundir com pool', async () => {
+    const expected = {
+      PARTIAL: 'Concluído — 5 novos de 50',
+      EXHAUSTED: 'Concluído — 5 novos leads',
+      FAILED: 'Falhou',
+    }
     for (const status of ['PARTIAL', 'EXHAUSTED', 'FAILED']) {
       vi.clearAllMocks()
       const run = { id: 31, targetId: 10, regionId: 2, status, qualifiedSaved: status === 'FAILED' ? 0 : 5, targetValid: 50 }
@@ -118,7 +123,7 @@ describe('OsmCatalog targets', () => {
       })
       cleanup()
       renderCatalog()
-      const label = status === 'PARTIAL' ? 'Parcial' : status === 'EXHAUSTED' ? 'Esgotado' : 'Falhou'
+      const label = expected[status]
       await waitFor(() => expect(screen.getByText(label)).toBeInTheDocument())
       // Pool READY continua visível mesmo com run FAILED.
       expect(screen.getByText(/Pronto \(17\)/)).toBeInTheDocument()

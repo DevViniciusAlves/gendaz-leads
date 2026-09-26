@@ -26,11 +26,39 @@ function statusLabel(status) {
     case 'CONFIGURATION_REQUIRED': return 'Configurar'
     case 'QUEUED': return 'Na fila'
     case 'RUNNING': return 'Executando'
-    case 'SUCCESS': return 'Sucesso'
-    case 'PARTIAL': return 'Parcial'
-    case 'EXHAUSTED': return 'Esgotado'
+    case 'SUCCESS': return 'Concluído'
+    case 'PARTIAL': return 'Concluído — parcial'
+    case 'EXHAUSTED': return 'Concluído'
     case 'FAILED': return 'Falhou'
     default: return status
+  }
+}
+
+function runHeadline(run, target) {
+  if (!run) return '—'
+  const saved = run.qualifiedSaved ?? 0
+  const targetValid = run.targetValid ?? target?.targetValid ?? 50
+  switch (run.status) {
+    case 'SUCCESS': return `Concluído — ${formatNumber(saved)} novos leads`
+    case 'PARTIAL': return `Concluído — ${formatNumber(saved)} novos de ${formatNumber(targetValid)}`
+    case 'EXHAUSTED': return `Concluído — ${formatNumber(saved)} novos leads`
+    case 'FAILED': return 'Falhou'
+    default: return statusLabel(run.status)
+  }
+}
+
+function runDetail(run) {
+  if (!run) return null
+  const dup = (run.discardedDuplicateSource ?? 0) + (run.discardedDuplicatePhone ?? 0)
+    + (run.discardedDuplicateInstagram ?? 0)
+  return {
+    potenciais: run.potentialNicheCandidates ?? run.candidatesScanned ?? '—',
+    confirmados: run.nicheConfirmed ?? run.nicheMatches ?? '—',
+    semInstagram: run.discardedNoInstagram ?? '—',
+    semTelefone: run.discardedNoPhone ?? run.discardedNoPhone ?? '—',
+    semWhatsApp: run.discardedNotOnWhatsApp ?? '—',
+    duplicados: dup,
+    novosSalvos: run.qualifiedSaved ?? '—',
   }
 }
 
@@ -44,6 +72,7 @@ export function OsmCatalog() {
   const [showNewModal, setShowNewModal] = useState(false)
   const [formSubmitting, setFormSubmitting] = useState(false)
   const [syncingTargets, setSyncingTargets] = useState(() => new Set())
+  const [expandedRuns, setExpandedRuns] = useState(() => new Set())
   const { push } = useToast()
 
   const pollingIntervals = useRef({})
@@ -336,15 +365,47 @@ export function OsmCatalog() {
                     <td>{formatNumber(target.availableNewCount ?? 0)}</td>
                     <td>
                       {run
-                        ? <span className={`badge badge-${runColor}`}>{statusLabel(run.status)}</span>
+                        ? <span className={`badge badge-${runColor}`}>{runHeadline(run, target)}</span>
                         : '—'}
                     </td>
                     <td>
                       {run && run.qualifiedSaved != null
                         ? `${formatNumber(run.qualifiedSaved)} / ${formatNumber(run.targetValid ?? target.targetValid ?? 50)}`
                         : '—'}
-                      {run?.datasetExhausted && (run.status === 'PARTIAL' || run.status === 'EXHAUSTED')
-                        ? ' · esgotado' : ''}
+                      {run && (run.status === 'PARTIAL' || run.status === 'EXHAUSTED' || run.status === 'SUCCESS')
+                        ? (
+                          <div style={{ marginTop: 4 }}>
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => setExpandedRuns((prev) => {
+                                const next = new Set(prev)
+                                if (next.has(run.id)) next.delete(run.id)
+                                else next.add(run.id)
+                                return next
+                              })}
+                            >
+                              {expandedRuns.has(run.id) ? 'Ocultar detalhes' : 'Ver detalhes'}
+                            </button>
+                            {expandedRuns.has(run.id) && (() => {
+                              const d = runDetail(run)
+                              if (!d) return null
+                              return (
+                                <div className="hint" style={{ fontSize: 11, marginTop: 4, lineHeight: 1.6 }}>
+                                  potenciais: {d.potenciais} · confirmados: {d.confirmados}<br />
+                                  sem Instagram: {d.semInstagram} · sem telefone: {d.semTelefone}<br />
+                                  sem WhatsApp: {d.semWhatsApp} · duplicados: {d.duplicados}<br />
+                                  novos salvos: {d.novosSalvos}
+                                  {run.status === 'PARTIAL' && (
+                                    <><br />Pool possui apenas {formatNumber(run.qualifiedSaved ?? 0)} novos disponíveis.</>
+                                  )}
+                                  {run.status === 'EXHAUSTED' && (run.qualifiedSaved ?? 0) === 0 && (
+                                    <><br />Nenhum candidato com Instagram + telefone + WhatsApp no dataset oficial.</>
+                                  )}
+                                </div>
+                              )
+                            })()}
+                          </div>
+                        ) : null}
                     </td>
                     <td>{target.lastSuccessAt ? new Date(target.lastSuccessAt).toLocaleString('pt-BR') : '—'}</td>
                     <td>{target.lastAttemptAt ? new Date(target.lastAttemptAt).toLocaleString('pt-BR') : '—'}</td>
